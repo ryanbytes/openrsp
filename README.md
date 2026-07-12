@@ -33,6 +33,8 @@ On macOS with Homebrew: `brew install cmake pkg-config libusb`.
 
 The probe is read-only. The official SDRplay service may prevent string-descriptor access; the tool reports that libusb error instead of stopping or detaching anything. Do not stop a production receiver just to run the probe.
 
+`openrsp-lifecycle` is disruptive. On the locally tested macOS/RSPduo system, claiming interface 0 caused SDRplay API clients to receive a physical-removal event and left the proprietary daemon unable to start another stream. Run it only on an offline test system after stopping all SDRplay clients and the proprietary daemon. Its two long confirmation flags are intentional.
+
 ## Development path
 
 1. Identify one exact receiver revision from USB descriptors and physical labeling.

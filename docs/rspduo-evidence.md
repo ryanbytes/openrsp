@@ -5,8 +5,15 @@
 - USB vendor/product: `1df7:3020`
 - USB device class: vendor-specific (`0xff`)
 - Configurations: 1
+- Interface 0 alternate 1: isochronous IN endpoint `0x81`, raw max-packet field `0x1400`
+- Interface 0 alternate 2: isochronous IN endpoint `0x81`, raw max-packet field `0x0400`
+- Interface 0 alternate 3: bulk IN endpoint `0x81`, max packet 512 bytes
 - Serial descriptor: readable (value intentionally not recorded here)
 - Model mapping: SDRplay's published VirtualHere guide states PID `3020` is RSPduo
+
+## Destructive-interference observation
+
+On 2026-07-12, opening and claiming interface 0 and then immediately releasing it used no vendor writes and made no alternate-setting change, but still caused the active SDRplay API client to report physical removal. The proprietary daemon remained running yet subsequently returned `Service Not Responding` on stream initialization. Therefore interface claim is classified as disruptive and must never be part of discovery or an unattended hardware test.
 
 No control-transfer meaning, endpoint role, tuner register, initialization sequence, or IQ framing has yet been established. Do not infer those from the descriptor alone.
 

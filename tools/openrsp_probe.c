@@ -55,8 +55,20 @@ int main(void)
         fputs(", \"manufacturer\": ", stdout); json_string(device->manufacturer);
         fputs(", \"product\": ", stdout); json_string(device->product);
         fputs(", \"serial\": ", stdout); json_string(device->serial);
-        printf(", \"usb_class\": %u, \"configurations\": %u, \"descriptor_error\": %d}",
-               device->usb_class, device->configuration_count, device->descriptor_error);
+        printf(", \"usb_class\": %u, \"configurations\": %u, \"descriptor_error\": %d, "
+               "\"configuration_error\": %d, \"interface_count\": %u, \"endpoints\": [",
+               device->usb_class, device->configuration_count, device->descriptor_error,
+               device->configuration_error, device->interface_count);
+        for (uint8_t endpoint_index = 0; endpoint_index < device->endpoint_count; ++endpoint_index) {
+            const openrsp_endpoint_info *endpoint = &device->endpoints[endpoint_index];
+            printf("%s{\"address\": \"%02x\", \"attributes\": \"%02x\", \"max_packet_size\": %u, "
+                   "\"interval\": %u, \"interface\": %u, \"alternate\": %u}",
+                   endpoint_index == 0 ? "" : ", ", endpoint->address, endpoint->attributes,
+                   endpoint->max_packet_size, endpoint->interval, endpoint->interface_number,
+                   endpoint->alternate_setting);
+        }
+        putchar(']');
+        putchar('}');
         puts(index + 1 == second_count ? "" : ",");
     }
     puts("  ]\n}");
