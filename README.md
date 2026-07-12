@@ -1,6 +1,6 @@
 # OpenRSP
 
-OpenRSP is the start of a clean-room, open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. OpenRSP currently performs safe USB discovery and evidence capture. It **does not yet tune or stream IQ samples**.
+OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes tuner A, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
 
 That limitation is deliberate. SDRplay's public API is documented, but its USB protocol and hardware-control implementation are proprietary. SoapySDRPlay3 and gr-sdrplay3 are open application adapters that still require SDRplay's closed API. Claiming this repository is a working replacement before independently documenting USB initialization, tuner register programming, sample framing, and calibration would be bullshit.
 
@@ -12,10 +12,10 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Read public USB descriptors without claiming an interface | Implemented |
 | Machine-readable probe output | Implemented |
 | Original RSP1-class/RSP1A/RSP2 model-ID hints | Discovery only |
-| RSPduo identification | Verified locally; discovery only |
+| RSPduo tuner-A direct initialization | Experimental; verified on one unit |
 | RSPdx/RSP1B/RSPdxR2 identification | Awaiting hardware evidence |
-| Tuning, gain, filters, antennas, bias-T | Not implemented |
-| IQ streaming | Not implemented |
+| Frequency, sample-rate, basic gain and bandwidth | Experimental Mirics implementation |
+| IQ streaming | Experimental; bulk capture verified on hardware |
 | API 3 ABI compatibility | Not implemented |
 
 ## Build and test
@@ -27,6 +27,7 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/openrsp-probe
+./build/openrsp-miri-probe
 ```
 
 On macOS with Homebrew: `brew install cmake pkg-config libusb`.
@@ -34,6 +35,16 @@ On macOS with Homebrew: `brew install cmake pkg-config libusb`.
 The probe is read-only. The official SDRplay service may prevent string-descriptor access; the tool reports that libusb error instead of stopping or detaching anything. Do not stop a production receiver just to run the probe.
 
 `openrsp-lifecycle` is disruptive. On the locally tested macOS/RSPduo system, claiming interface 0 caused SDRplay API clients to receive a physical-removal event and left the proprietary daemon unable to start another stream. Run it only on an offline test system after stopping all SDRplay clients and the proprietary daemon. Its two long confirmation flags are intentional.
+
+`openrsp-iq` is the actual direct driver test. It sends volatile device/tuner configuration commands and streams samples without SDRplay's API or daemon. On macOS it currently needs root access after all SDRplay clients and `com.sdrplay.service` are stopped. Do not run it against a live production receiver.
+
+Example offline capture:
+
+```sh
+sudo ./build/openrsp-iq -f 100000000 -s 2048000 -T 1 -e 2 -m 252 capture.iq
+```
+
+The output is interleaved little-endian signed 16-bit IQ. RSPduo support is presently tuner A only and the RF routing/calibration behavior still needs measurement.
 
 ## Development path
 
@@ -64,4 +75,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the clean-room rules and evidence req
 
 ## Licensing and trademarks
 
-OpenRSP is licensed under the MIT License. SDRplay, RSP, and Mirics names identify compatible or investigated hardware; this project is unaffiliated with and not endorsed by SDRplay Limited or Mirics Limited.
+OpenRSP is licensed under GPL-2.0-or-later because its direct hardware backend derives from the GPL libmirisdr implementation. The imported source and its history are preserved under `third_party/libmirisdr`. SDRplay, RSP, and Mirics names identify compatible or investigated hardware; this project is unaffiliated with and not endorsed by SDRplay Limited or Mirics Limited.
