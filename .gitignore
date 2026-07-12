@@ -1,0 +1,5 @@
+/build/
+*.pcap
+*.pcapng
+captures/private/
+.DS_Store
