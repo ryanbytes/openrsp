@@ -108,7 +108,7 @@ if(UNIX)
 
     add_executable(sdrplay-api-compat-test tests/sdrplay_api_compat_test.c)
     target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
-    target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads)
+    target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads m)
     target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(sdrplay-api-compat-test PRIVATE -UNDEBUG)
     add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
