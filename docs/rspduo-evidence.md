@@ -429,6 +429,13 @@ first run exposed a verifier bug: it expected only one `fsChanged` callback no
 matter how many updates were requested. The verifier now requires one callback
 per requested update, and the identical 100-update run passes.
 
+A separate five-minute run under the live SDRTrunk/RTL workload delivered
+607,666,176 samples in 482,157 callbacks. At its midpoint it applied ten
+combined 2.048 MS/s, RF, and gain updates; all ten acknowledgements for each
+field arrived, streaming continued for the remaining half, and uninitialization
+succeeded. The OpenRSP daemon and SDRTrunk retained their original process IDs
+throughout. This is useful bounded evidence, but it is not a long-duration soak.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
