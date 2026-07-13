@@ -203,13 +203,13 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     int adc_result = mirisdr_adc_init(p);
     int hard_result = mirisdr_set_hard(p);
     int soft_result = mirisdr_set_soft(p);
-    (void)lna_state;
-    int gain_result = mirisdr_set_tuner_gain(p, 102 - gain_reduction);
-    int frontend_result = mirisdr_rspduo_finish_tuner(p);
-    int result = adc_result | hard_result | soft_result | gain_result | frontend_result;
+    int gain_result = mirisdr_set_rspduo_gain(p, gain_reduction, lna_state);
+    int final_hard_result = mirisdr_set_hard(p);
+    int result = adc_result | hard_result | soft_result | gain_result |
+                 final_hard_result;
     if (result < 0) {
-        fprintf(stderr, "RSPduo configure failed adc=%d hard=%d soft=%d gain=%d frontend=%d\n",
-                adc_result, hard_result, soft_result, gain_result, frontend_result);
+        fprintf(stderr, "RSPduo configure failed adc=%d hard=%d soft=%d gain=%d final_hard=%d\n",
+                adc_result, hard_result, soft_result, gain_result, final_hard_result);
     }
     return result < 0 ? -1 : 0;
 }

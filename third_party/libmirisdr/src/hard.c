@@ -178,6 +178,9 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 		p->addr = 504 + 2;
 		break;
 	}
+	if (p->usb_pid == 0x3020u) {
+		mirisdr_write_reg(p, 0x09, 0x200016);
+	}
 
 	/*
 	 * Výpočet dělení vzorkovací frekvence

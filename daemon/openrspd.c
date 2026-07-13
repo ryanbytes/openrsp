@@ -388,9 +388,6 @@ static int set_rspduo_controls(mirisdr_dev_t *radio,
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
 {
     if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
-    /* Keep this order identical to the direct openrsp-iq path.  That path is
-     * the hardware gate: it streams at 2.048 MS/s, while the former combined
-     * configure helper left endpoint 0x81 stalled before the first callback. */
 #define OPENRSPD_CONFIG_STEP(name, expression) do { \
         int step_result = (expression); \
         if (step_result != 0) { \
@@ -400,22 +397,14 @@ static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *c
             return OPENRSP_STATUS_IO_ERROR; \
         } \
     } while (0)
-    OPENRSPD_CONFIG_STEP("hw-flavour",
-                        mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY));
-    OPENRSPD_CONFIG_STEP("sample-rate",
-                        mirisdr_set_sample_rate(radio, config->sample_rate_hz));
-    OPENRSPD_CONFIG_STEP("center-frequency",
-                        mirisdr_set_center_freq(radio, config->center_frequency_hz));
-    OPENRSPD_CONFIG_STEP("sample-format", mirisdr_set_sample_format(radio, "AUTO"));
-    OPENRSPD_CONFIG_STEP("transfer", mirisdr_set_transfer(radio, "BULK"));
-    OPENRSPD_CONFIG_STEP("if-frequency",
-                        mirisdr_set_if_freq(radio, (uint32_t)config->if_frequency_hz));
-    OPENRSPD_CONFIG_STEP("bandwidth",
-                        mirisdr_set_bandwidth(radio, config->bandwidth_hz));
-    OPENRSPD_CONFIG_STEP("gain-mode", mirisdr_set_tuner_gain_mode(radio, 1));
-    /* The direct hardware gate starts at this register state.  The API
-     * applies the caller's requested GR/LNA setting after first IQ. */
-    OPENRSPD_CONFIG_STEP("initial-gain", mirisdr_set_tuner_gain(radio, 102));
+    OPENRSPD_CONFIG_STEP(
+        "rspduo",
+        mirisdr_configure_rspduo(radio, config->sample_rate_hz,
+                                 config->center_frequency_hz,
+                                 (uint32_t)config->if_frequency_hz,
+                                 config->bandwidth_hz,
+                                 config->gain_reduction_db,
+                                 config->lna_state));
 #undef OPENRSPD_CONFIG_STEP
     return OPENRSP_STATUS_OK;
 }
