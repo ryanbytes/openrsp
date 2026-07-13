@@ -479,6 +479,15 @@ int main(void)
     unsigned long long error_time = 1u;
     assert(sdrplay_api_GetLastErrorByType(&devices[0], 0, &error_time) != NULL);
     assert(error_time == 0u);
+    for (int unsupported_type = 1; unsupported_type <= 4; ++unsupported_type) {
+        error_time = 0x1122334455667788ULL;
+        assert(sdrplay_api_GetLastErrorByType(&devices[0], unsupported_type,
+                                               &error_time) == NULL);
+        assert(error_time == 0x1122334455667788ULL);
+    }
+    error_time = 0x8877665544332211ULL;
+    assert(sdrplay_api_GetLastErrorByType(&devices[0], -1, &error_time) == NULL);
+    assert(error_time == 0x8877665544332211ULL);
     sdrplay_api_DeviceParamsT *params = NULL;
     assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) == sdrplay_api_Success);
     sdrplay_api_TunerSelectT active_tuner = sdrplay_api_Tuner_A;
@@ -683,6 +692,13 @@ int main(void)
     assert(update_error != NULL);
     assert(strstr(update_error->function, "sdrplay_api_Update") != NULL);
     assert(strstr(update_error->message, "daemon rejected update") != NULL);
+    error_time = 0u;
+    sdrplay_api_ErrorInfoT *typed_update_error =
+        sdrplay_api_GetLastErrorByType(&devices[0], 0, &error_time);
+    assert(typed_update_error != NULL);
+    assert(error_time != 0u);
+    assert(strstr(typed_update_error->function, "sdrplay_api_Update") != NULL);
+    assert(strstr(typed_update_error->message, "daemon rejected update") != NULL);
     params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_Frf, 0u) ==

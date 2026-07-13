@@ -92,6 +92,7 @@ typedef struct {
 
 static compat_device_context rspduo;
 static sdrplay_api_ErrorInfoT last_error;
+static unsigned long long last_error_time;
 static _Thread_local sdrplay_api_ErrorInfoT last_error_view;
 static pthread_mutex_t last_error_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -224,6 +225,13 @@ static void record_last_error(const char *function, const char *format, ...)
     va_start(arguments, format);
     (void)vsnprintf(last_error.message, sizeof(last_error.message), format, arguments);
     va_end(arguments);
+    struct timespec recorded_at;
+    if (timespec_get(&recorded_at, TIME_UTC) == TIME_UTC) {
+        last_error_time = (unsigned long long)recorded_at.tv_sec * 1000000u +
+                          (unsigned long long)recorded_at.tv_nsec / 1000u;
+    } else {
+        last_error_time = 0u;
+    }
     (void)pthread_mutex_unlock(&last_error_lock);
 }
 
@@ -704,6 +712,7 @@ static void reset_parameters(void)
 {
     memset(&rspduo, 0, sizeof(rspduo));
     memset(&last_error, 0, sizeof(last_error));
+    last_error_time = 0u;
     atomic_init(&rspduo.pending_gr_changed, 0u);
     atomic_init(&rspduo.pending_rf_changed, 0u);
     atomic_init(&rspduo.pending_fs_changed, 0u);
@@ -915,9 +924,16 @@ sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(sdrplay_api_DeviceT *devi
                                                         int type, unsigned long long *time)
 {
     (void)device;
-    (void)type;
-    if (time) *time = 0u;
-    return sdrplay_api_GetLastError(device);
+    /* API 3.15 defines 0 as a DLL error and 1--3 as DLL-device,
+     * service, and service-device errors. OpenRSP currently records only
+     * in-process compatibility-layer errors. Preserve the caller's timestamp
+     * when the requested category has no record, matching the vendor ABI. */
+    if (type != 0) return NULL;
+    (void)pthread_mutex_lock(&last_error_lock);
+    last_error_view = last_error;
+    if (time != NULL) *time = last_error_time;
+    (void)pthread_mutex_unlock(&last_error_lock);
+    return &last_error_view;
 }
 
 sdrplay_api_ErrT sdrplay_api_DisableHeartbeat(void)

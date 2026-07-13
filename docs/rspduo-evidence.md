@@ -330,6 +330,23 @@ finish that update. The overload fixture injects a saturated IQ frame, receives
 callback, then requires a hysteretic `Overload_Corrected` event from the next
 normal frame. Gain and device-failure events use the same dispatcher.
 
+## Typed last-error behavior (2026-07-13)
+
+The official 3.15.1 library was behavior-probed with its service absent and no
+receiver attached. `GetLastErrorByType` returned null for types -1 and 4 and
+left the caller's timestamp unchanged. Type 0 returned the recorded DLL error
+with a nonzero microsecond timestamp; types 1, 2, and 3 returned null and also
+left the timestamp unchanged because no error existed in those categories.
+
+OpenRSP previously ignored the requested type, returned its one record for all
+integers, and always overwrote the timestamp with zero. The compatibility layer
+now returns its in-process error only for DLL category 0, records its UTC time
+in microseconds, and leaves the caller's timestamp untouched for unsupported or
+currently empty categories. The compatibility fixture covers -1 through 4,
+then injects a rejected RF update and requires the typed DLL record, message,
+and nonzero timestamp. Separate DLL-device and daemon-side error histories are
+not implemented yet; those categories return null instead of fabricating data.
+
 The API compatibility callback path now allocates its deinterleaving buffers
 once per `Init` session at the protocol's bounded maximum frame size and frees
 them only after the backend reader has stopped. The mock fixture requires the
