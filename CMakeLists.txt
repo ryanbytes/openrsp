@@ -94,6 +94,18 @@ if(UNIX)
     target_compile_options(openrsp-client-timeout-test PRIVATE
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME openrsp-client-timeout COMMAND openrsp-client-timeout-test)
+    add_executable(openrsp-daemon-backend-recovery-test
+        tests/daemon_backend_recovery_test.c
+        compat/daemon_backend.c
+        src/client_posix.c)
+    target_include_directories(openrsp-daemon-backend-recovery-test PRIVATE compat include)
+    target_link_libraries(openrsp-daemon-backend-recovery-test PRIVATE Threads::Threads)
+    target_compile_definitions(openrsp-daemon-backend-recovery-test PRIVATE
+        OPENRSP_SOCKET_TIMEOUT_MILLISECONDS=100)
+    target_compile_options(openrsp-daemon-backend-recovery-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME openrsp-daemon-backend-recovery
+        COMMAND openrsp-daemon-backend-recovery-test)
     add_executable(openrspd-multi-client-test tests/openrspd_multi_client_test.c)
     target_link_libraries(openrspd-multi-client-test PRIVATE openrsp_client)
     target_compile_options(openrspd-multi-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)

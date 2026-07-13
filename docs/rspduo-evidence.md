@@ -280,6 +280,31 @@ The timeout fixture separately verifies silent timeout, shutdown wakeup, and
 truncated-frame classification. A new physical replug is still required to
 validate this change end to end.
 
+That replug kept the same SDRTrunk process alive and the daemon successfully
+cold-booted, identity-resolved, reopened, and resumed socket IQ without an API
+`DeviceFailure`. It did not restore usable reception: after channels returned
+to the RSPduo, both P25 control channels reported no meaningful decode for
+29.5 seconds and SDRTrunk moved them away again. Transport continuity is
+therefore verified, but transparent RF recovery is not.
+
+The trace also identified a concrete ordering difference. Every successful
+fresh SDRTrunk session configured the receiver near 101.1 MHz, started the
+bulk endpoint, received IQ, and only then tuned into the active 800 MHz window.
+The recovery path instead configured the reopened frontend directly at its
+last 855 MHz channel. It produced correctly framed IQ bytes but no decodable
+RF. Recovery now records the session's successful initial configuration,
+replays that bootstrap state after reopen, waits for first IQ, and only then
+restores the newest sample rate, RF, bandwidth, IF, gain-reduction, and LNA
+state. A post-first-IQ restore failure cancels the stream and re-enters bounded
+recovery instead of reporting false success. This ordering change still needs
+a physical replug/decode test.
+
+The API backend now also has a hardware-free recovery-silence regression test.
+Its mock daemon sends IQ, remains silent across three socket receive deadlines,
+then resumes IQ on the same connection. The backend must deliver both frames
+without invoking its failure callback. This protects the application layer,
+where the original low-level timeout fixture alone was insufficient.
+
 ## API update-reason audit (2026-07-12)
 
 The public API 3.15 update-reason surface was compared with SDRplay's published

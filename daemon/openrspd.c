@@ -41,11 +41,13 @@ typedef struct {
     bool logged_usb_iq;
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
-    bool recovery_gain_pending;
+    bool recovery_config_pending;
     int recovery_identity_status;
     uint32_t stream_sequence;
     bool configured;
     openrsp_radio_config config;
+    bool bootstrap_configured;
+    openrsp_radio_config bootstrap_config;
 } daemon_state;
 
 static volatile sig_atomic_t running = 1;
@@ -429,7 +431,7 @@ static void recover_failed_stream(daemon_state *state)
         state->radio = NULL;
     }
     state->configured = false;
-    state->recovery_gain_pending = false;
+    state->recovery_config_pending = false;
     if (state->owner < 0) return;
     uint32_t previous_index = state->acquired_identity.device_index;
     uint32_t resolved_index = 0u;
@@ -456,7 +458,16 @@ static void recover_failed_stream(daemon_state *state)
             previous_index, resolved_index);
     (void)fflush(stderr);
     state->acquired_identity.device_index = resolved_index;
-    uint32_t status = configure_radio(state, &state->config, 3u);
+    /* A fresh application session starts the endpoint with its initial
+     * configuration and only tunes to the active channel after first IQ.  On
+     * the tested RSPduo, configuring a reopened frontend directly at the last
+     * 800 MHz channel can produce bulk data that contains no decodable RF.
+     * Replay the session's proven bootstrap state, then restore the newest
+     * application state after the endpoint is demonstrably alive. */
+    const openrsp_radio_config *bootstrap = state->bootstrap_configured ?
+                                             &state->bootstrap_config :
+                                             &state->config;
+    uint32_t status = configure_radio(state, bootstrap, 3u);
     if (status != OPENRSP_STATUS_OK) {
         (void)mirisdr_close(state->radio);
         state->radio = NULL;
@@ -477,18 +488,40 @@ static void recover_failed_stream(daemon_state *state)
         return;
     }
     state->stream_thread_started = true;
-    state->recovery_gain_pending = true;
+    state->recovery_config_pending = true;
 }
 
-static void finish_recovery_gain(daemon_state *state)
+static void finish_recovery_config(daemon_state *state)
 {
-    if (!state->recovery_gain_pending || !atomic_load(&state->first_iq_seen) ||
+    if (!state->recovery_config_pending || !atomic_load(&state->first_iq_seen) ||
         !state->radio) return;
-    int result = set_gain(state->radio, &state->config);
-    fprintf(stderr, "OPENRSPD_RECOVERY_GAIN status=%d gr=%d lna=%u\n",
-            result, state->config.gain_reduction_db, state->config.lna_state);
+    const openrsp_radio_config *bootstrap = state->bootstrap_configured ?
+                                             &state->bootstrap_config :
+                                             &state->config;
+    const openrsp_radio_config *target = &state->config;
+    int result = 0;
+    if (target->sample_rate_hz != bootstrap->sample_rate_hz)
+        result |= mirisdr_set_sample_rate(state->radio, target->sample_rate_hz);
+    if (target->center_frequency_hz != bootstrap->center_frequency_hz)
+        result |= mirisdr_set_center_freq(state->radio, target->center_frequency_hz);
+    if (target->bandwidth_hz != bootstrap->bandwidth_hz)
+        result |= mirisdr_set_bandwidth(state->radio, target->bandwidth_hz);
+    if (target->if_frequency_hz != bootstrap->if_frequency_hz)
+        result |= mirisdr_set_if_freq(state->radio,
+                                      (uint32_t)target->if_frequency_hz);
+    result |= set_gain(state->radio, target);
+    fprintf(stderr,
+            "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u\n",
+            result, bootstrap->center_frequency_hz, target->sample_rate_hz,
+            target->center_frequency_hz, target->bandwidth_hz,
+            target->if_frequency_hz, target->gain_reduction_db,
+            target->lna_state);
     (void)fflush(stderr);
-    state->recovery_gain_pending = false;
+    state->recovery_config_pending = false;
+    if (result != 0) {
+        atomic_store(&state->stream_error, true);
+        if (state->radio) (void)mirisdr_cancel_async(state->radio);
+    }
 }
 
 static uint32_t apply_update(daemon_state *state, const openrsp_update_request *update)
@@ -684,6 +717,8 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = configure_radio(state, config, 3u);
         if (response.status == OPENRSP_STATUS_OK) {
             state->config = *config;
+            state->bootstrap_config = *config;
+            state->bootstrap_configured = true;
             state->configured = true;
         }
         log_config("CONFIGURE", descriptor, 0u, response.status, config);
@@ -860,7 +895,7 @@ int main(void)
             continue;
         }
         recover_failed_stream(&state);
-        finish_recovery_gain(&state);
+        finish_recovery_config(&state);
         struct pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];
         size_t client_index[OPENRSPD_MAX_CLIENTS + 1u];
         nfds_t count = 1u;
