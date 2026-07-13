@@ -39,14 +39,15 @@ static int send_frame(int descriptor, uint16_t type, uint32_t sequence,
            (bytes == 0u || transfer_exact(descriptor, (void *)payload, bytes, 1) == 0) ? 0 : -1;
 }
 
-static int send_response(int descriptor, uint32_t sequence)
+static int send_response(int descriptor, uint32_t sequence, uint32_t status)
 {
-    const openrsp_response response = {.status = OPENRSP_STATUS_OK, .sequence = sequence};
+    const openrsp_response response = {.status = status, .sequence = sequence};
     return send_frame(descriptor, OPENRSP_MSG_RESPONSE, sequence, &response, sizeof(response));
 }
 
 static int serve_client(int descriptor)
 {
+    int streaming = 0;
     for (;;) {
         openrsp_message_header request;
         unsigned char payload[4096];
@@ -70,14 +71,20 @@ static int serve_client(int descriptor)
                            &device, sizeof(device)) != 0)
                 return -1;
         } else {
-            if (send_response(descriptor, request.sequence) != 0) return -1;
+            uint32_t status = request.type == OPENRSP_CMD_UPDATE && !streaming ?
+                              OPENRSP_STATUS_BAD_REQUEST : OPENRSP_STATUS_OK;
+            if (send_response(descriptor, request.sequence, status) != 0) return -1;
             if (request.type == OPENRSP_CMD_START) {
+                streaming = 1;
                 int16_t iq[2048];
                 for (size_t index = 0u; index < sizeof(iq) / sizeof(iq[0]); ++index)
                     iq[index] = (int16_t)(index - 1024);
                 if (send_frame(descriptor, OPENRSP_EVENT_IQ, request.sequence,
                                iq, sizeof(iq)) != 0)
                     return -1;
+            } else if (request.type == OPENRSP_CMD_STOP ||
+                       request.type == OPENRSP_CMD_RELEASE) {
+                streaming = 0;
             }
         }
     }
@@ -168,8 +175,28 @@ int main(void)
     assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) == sdrplay_api_Success);
     assert(count == 1u && devices[0].hwVer == 3u && devices[0].valid == 1u);
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
+    assert(sdrplay_api_DebugEnable(devices[0].dev, sdrplay_api_DbgLvl_Error) ==
+           sdrplay_api_Success);
+    assert(sdrplay_api_GetLastError(&devices[0]) != NULL);
+    unsigned long long error_time = 1u;
+    assert(sdrplay_api_GetLastErrorByType(&devices[0], 0, &error_time) != NULL);
+    assert(error_time == 0u);
     sdrplay_api_DeviceParamsT *params = NULL;
     assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) == sdrplay_api_Success);
+    sdrplay_api_TunerSelectT active_tuner = sdrplay_api_Tuner_A;
+    assert(sdrplay_api_SwapRspDuoActiveTuner(devices[0].dev, &active_tuner,
+                                              sdrplay_api_RspDuo_AMPORT_2) ==
+           sdrplay_api_InvalidMode);
+    double dual_rate = 2048000.0;
+    assert(sdrplay_api_SwapRspDuoDualTunerModeSampleRate(devices[0].dev, &dual_rate,
+                                                         6000000.0) ==
+           sdrplay_api_InvalidMode);
+    assert(sdrplay_api_SwapRspDuoMode(&devices[0], &params,
+                                      sdrplay_api_RspDuoMode_Dual_Tuner,
+                                      6000000.0, sdrplay_api_Tuner_Both,
+                                      sdrplay_api_BW_1_536, sdrplay_api_IF_Zero,
+                                      sdrplay_api_RspDuo_AMPORT_2) ==
+           sdrplay_api_InvalidMode);
 
     callback_metrics metrics = {.lock = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER};
     sdrplay_api_CallbackFnsT callbacks = {.StreamACbFn = stream_callback};

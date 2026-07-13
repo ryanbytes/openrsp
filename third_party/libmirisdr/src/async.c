@@ -111,6 +111,8 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
 
     /* zpracujeme pouze kompletní přenos */
     if (xfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK)
+            p->bulk_recovery_attempts = 0u;
         if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
             transfer_length > 0) {
             owned_buffer = malloc((size_t)transfer_length);
@@ -236,6 +238,25 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             fprintf( stderr, "error re-submitting URB on device %u\n", p->index);
             goto failed;
         }
+    } else if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
+               (xfer->status == LIBUSB_TRANSFER_OVERFLOW ||
+                xfer->status == LIBUSB_TRANSFER_STALL) &&
+               p->bulk_recovery_attempts < 3u) {
+        ++p->bulk_recovery_attempts;
+        int recovery = 0;
+        if (xfer->status == LIBUSB_TRANSFER_STALL)
+            recovery = libusb_clear_halt(p->dh, 0x81u);
+        if (recovery == 0) recovery = libusb_submit_transfer(xfer);
+        if (recovery == 0) {
+            fprintf(stderr,
+                    "recovering RSPduo bulk transfer status %d attempt %u on device %u\n",
+                    xfer->status, p->bulk_recovery_attempts, p->index);
+            return;
+        }
+        fprintf(stderr,
+                "RSPduo bulk recovery failed status %d attempt %u result %d on device %u\n",
+                xfer->status, p->bulk_recovery_attempts, recovery, p->index);
+        goto failed;
     } else if (xfer->status != LIBUSB_TRANSFER_CANCELLED) {
         fprintf( stderr, "error async transfer status %d on device %u\n", xfer->status, p->index);
         goto failed;
@@ -461,8 +482,7 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
     mirisdr_async_alloc(p);
 
     /* The RSPduo firmware needs its bulk engine explicitly stopped and given
-     * time to drain after tuner configuration. The observed 3.15 service waits
-     * roughly 110 ms before submitting its eight 64 KiB transfers. */
+     * time to drain after tuner configuration. */
     if (p->usb_pid == 0x3020u) {
         if (mirisdr_streaming_stop(p) < 0) goto failed_free;
         usleep(110000);

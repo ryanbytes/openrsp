@@ -12,12 +12,13 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Read public USB descriptors without claiming an interface | Implemented |
 | Machine-readable probe output | Implemented |
 | Original RSP1-class/RSP1A/RSP2 model-ID hints | Discovery only |
-| RSPduo tuner-A direct initialization | Experimental; verified on one unit |
+| RSPduo tuner-A direct initialization | Verified on one unit |
 | RSPdx/RSP1B/RSPdxR2 identification | Awaiting hardware evidence |
-| Frequency, sample-rate, basic gain and bandwidth | Experimental Mirics implementation |
-| IQ streaming | Experimental; bulk capture verified on hardware |
+| Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
+| IQ streaming | Direct and standalone API paths verified on hardware |
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
-| API 3.15 `Init`/IQ callbacks/`Update` | Experimental; hardware callback client verified |
+| API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
+| Windows direct-driver build | Supported by the imported Mirics/libusb backend; local API-compatibility daemon pending |
 
 ## Build and test
 

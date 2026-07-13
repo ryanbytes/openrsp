@@ -152,7 +152,23 @@ typedef struct {
 typedef enum { sdrplay_api_GainChange = 0, sdrplay_api_PowerOverloadChange = 1,
                sdrplay_api_DeviceRemoved = 2, sdrplay_api_RspDuoModeChange = 3,
                sdrplay_api_DeviceFailure = 4 } sdrplay_api_EventT;
-typedef union { unsigned char bytes[24]; } sdrplay_api_EventParamsT;
+typedef enum { sdrplay_api_Overload_Detected = 0,
+               sdrplay_api_Overload_Corrected = 1 } sdrplay_api_PowerOverloadCbEventIdT;
+typedef enum { sdrplay_api_MasterInitialised = 0, sdrplay_api_SlaveAttached = 1,
+               sdrplay_api_SlaveDetached = 2, sdrplay_api_SlaveInitialised = 3,
+               sdrplay_api_SlaveUninitialised = 4,
+               sdrplay_api_MasterDllDisappeared = 5,
+               sdrplay_api_SlaveDllDisappeared = 6 } sdrplay_api_RspDuoModeCbEventIdT;
+typedef struct { unsigned int gRdB, lnaGRdB; double currGain; } sdrplay_api_GainCbParamT;
+typedef struct { sdrplay_api_PowerOverloadCbEventIdT powerOverloadChangeType; }
+    sdrplay_api_PowerOverloadCbParamT;
+typedef struct { sdrplay_api_RspDuoModeCbEventIdT modeChangeType; }
+    sdrplay_api_RspDuoModeCbParamT;
+typedef union {
+    sdrplay_api_GainCbParamT gainParams;
+    sdrplay_api_PowerOverloadCbParamT powerOverloadParams;
+    sdrplay_api_RspDuoModeCbParamT rspDuoModeParams;
+} sdrplay_api_EventParamsT;
 typedef struct {
     unsigned int firstSampleNum; int grChanged, rfChanged, fsChanged; unsigned int numSamples;
 } sdrplay_api_StreamCbParamsT;
@@ -175,6 +191,19 @@ typedef uint32_t sdrplay_api_ReasonForUpdateExtension1T;
 #define sdrplay_api_Update_Dev_Fs 0x00000001u
 #define sdrplay_api_Update_Ctrl_Agc 0x01000000u
 
+typedef enum {
+    sdrplay_api_DbgLvl_Disable = 0, sdrplay_api_DbgLvl_Verbose = 1,
+    sdrplay_api_DbgLvl_Warning = 2, sdrplay_api_DbgLvl_Error = 3,
+    sdrplay_api_DbgLvl_Message = 4
+} sdrplay_api_DbgLvl_t;
+
+typedef struct {
+    char file[256];
+    char function[256];
+    int line;
+    char message[1024];
+} sdrplay_api_ErrorInfoT;
+
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_Open(void);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_Close(void);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_ApiVersion(float *apiVer);
@@ -184,7 +213,11 @@ OPENRSP_API sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices
                                                      unsigned int *numDevs,
                                                      unsigned int maxDevs);
 OPENRSP_API const char *sdrplay_api_GetErrorString(sdrplay_api_ErrT err);
+OPENRSP_API sdrplay_api_ErrorInfoT *sdrplay_api_GetLastError(sdrplay_api_DeviceT *device);
+OPENRSP_API sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(
+    sdrplay_api_DeviceT *device, int type, unsigned long long *time);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_DisableHeartbeat(void);
+OPENRSP_API sdrplay_api_ErrT sdrplay_api_DebugEnable(HANDLE dev, sdrplay_api_DbgLvl_t level);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_ReleaseDevice(sdrplay_api_DeviceT *device);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_GetDeviceParams(HANDLE dev, sdrplay_api_DeviceParamsT **params);
@@ -193,5 +226,15 @@ OPENRSP_API sdrplay_api_ErrT sdrplay_api_Uninit(HANDLE dev);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                                                 sdrplay_api_ReasonForUpdateT reason,
                                                 sdrplay_api_ReasonForUpdateExtension1T extension);
+OPENRSP_API sdrplay_api_ErrT sdrplay_api_SwapRspDuoActiveTuner(
+    HANDLE dev, sdrplay_api_TunerSelectT *current_tuner,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port);
+OPENRSP_API sdrplay_api_ErrT sdrplay_api_SwapRspDuoDualTunerModeSampleRate(
+    HANDLE dev, double *current_sample_rate, double new_sample_rate);
+OPENRSP_API sdrplay_api_ErrT sdrplay_api_SwapRspDuoMode(
+    sdrplay_api_DeviceT *current_device, sdrplay_api_DeviceParamsT **device_params,
+    sdrplay_api_RspDuoModeT mode, double sample_rate, sdrplay_api_TunerSelectT tuner,
+    sdrplay_api_Bw_MHzT bandwidth, sdrplay_api_If_kHzT if_type,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port);
 
 #endif

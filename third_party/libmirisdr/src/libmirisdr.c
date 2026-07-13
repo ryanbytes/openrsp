@@ -162,7 +162,8 @@ failed:
 }
 
 int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
-                             uint32_t if_freq, uint32_t bandwidth, int gain)
+                             uint32_t if_freq, uint32_t bandwidth,
+                             int gain_reduction, unsigned int lna_state)
 {
     if (!p || p->usb_pid != 0x3020u) return -1;
     if (if_freq != 0u && if_freq != 450000u && if_freq != 1620000u &&
@@ -189,7 +190,8 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     int adc_result = mirisdr_adc_init(p);
     int hard_result = mirisdr_set_hard(p);
     int soft_result = mirisdr_set_soft(p);
-    int gain_result = mirisdr_set_tuner_gain(p, gain);
+    (void)lna_state;
+    int gain_result = mirisdr_set_tuner_gain(p, 102 - gain_reduction);
     int frontend_result = mirisdr_rspduo_finish_tuner_a(p);
     int result = adc_result | hard_result | soft_result | gain_result | frontend_result;
     if (result < 0) {

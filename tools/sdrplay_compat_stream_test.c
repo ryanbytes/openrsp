@@ -70,11 +70,17 @@ int main(int argc, char **argv)
     sdrplay_api_DeviceParamsT *params = NULL;
     metrics result = {0};
     sdrplay_api_CallbackFnsT callbacks = {.StreamACbFn = stream_callback};
-    if (sdrplay_api_Open() != sdrplay_api_Success ||
-        sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) != sdrplay_api_Success || count == 0 ||
-        sdrplay_api_SelectDevice(&devices[0]) != sdrplay_api_Success ||
-        sdrplay_api_GetDeviceParams(devices[0].dev, &params) != sdrplay_api_Success) {
-        fputs("COMPAT_SETUP_FAIL\n", stderr);
+    sdrplay_api_ErrT open = sdrplay_api_Open();
+    sdrplay_api_ErrT list = open == sdrplay_api_Success ?
+                             sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) : open;
+    sdrplay_api_ErrT select = list == sdrplay_api_Success && count != 0u ?
+                               sdrplay_api_SelectDevice(&devices[0]) : list;
+    sdrplay_api_ErrT get_params = select == sdrplay_api_Success ?
+                                   sdrplay_api_GetDeviceParams(devices[0].dev, &params) : select;
+    if (open != sdrplay_api_Success || list != sdrplay_api_Success || count == 0u ||
+        select != sdrplay_api_Success || get_params != sdrplay_api_Success) {
+        fprintf(stderr, "COMPAT_SETUP_FAIL open=%d list=%d count=%u select=%d params=%d\n",
+                open, list, count, select, get_params);
         return EXIT_FAILURE;
     }
     params->devParams->fsFreq.fsHz = sample_rate_hz;

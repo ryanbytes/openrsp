@@ -107,4 +107,5 @@ struct mirisdr_dev {
     int                 samples_size;
     int                 sync_loss_cnt;
     int                 firmware_attempted;
+    unsigned int        bulk_recovery_attempts;
 };

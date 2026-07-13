@@ -20,16 +20,20 @@
 
 #define OPENRSPD_MAX_PAYLOAD 4096u
 #define OPENRSPD_MAX_CLIENTS 32
+#define OPENRSPD_STREAM_SLOT_BYTES (OPENRSP_MAX_IQ_SAMPLES * 4u)
 
 typedef struct {
     mirisdr_dev_t *radio;
     int owner;
+    uint32_t acquired_device_index;
     bool streaming;
     bool stream_thread_started;
     bool stream_error;
     int stream_result;
     pthread_t stream_thread;
     pthread_mutex_t write_lock;
+    bool logged_usb_iq;
+    bool logged_socket_iq;
     uint32_t stream_sequence;
     bool configured;
     openrsp_radio_config config;
@@ -81,6 +85,13 @@ static int set_nonblocking(int descriptor)
     return fcntl(descriptor, F_SETFL, flags | O_NONBLOCK);
 }
 
+static int set_blocking(int descriptor)
+{
+    int flags = fcntl(descriptor, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(descriptor, F_SETFL, flags & ~O_NONBLOCK);
+}
+
 static int write_frame(daemon_state *state, int descriptor, uint16_t type,
                        uint32_t sequence, const void *payload, uint32_t payload_bytes)
 {
@@ -102,19 +113,39 @@ static int write_frame(daemon_state *state, int descriptor, uint16_t type,
 static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque)
 {
     daemon_state *state = opaque;
+    if (!state->logged_usb_iq) {
+        state->logged_usb_iq = true;
+        fprintf(stderr, "OPENRSPD_USB_IQ_FIRST bytes=%u\n", length);
+        (void)fflush(stderr);
+    }
+    if (length > OPENRSPD_STREAM_SLOT_BYTES) {
+        fprintf(stderr, "OPENRSPD_IQ_OVERSIZE bytes=%u\n", length);
+        if (state->radio) (void)mirisdr_cancel_async(state->radio);
+        return;
+    }
     uint32_t sequence = ++state->stream_sequence;
     if (write_frame(state, state->owner, OPENRSP_EVENT_IQ, sequence,
-                    buffer, length) != 0 && state->radio)
-        (void)mirisdr_cancel_async(state->radio);
+                    buffer, length) != 0) {
+        if (state->radio) (void)mirisdr_cancel_async(state->radio);
+        return;
+    }
+    if (!state->logged_socket_iq) {
+        state->logged_socket_iq = true;
+        fprintf(stderr, "OPENRSPD_SOCKET_IQ_FIRST bytes=%u sequence=%u\n",
+                length, sequence);
+        (void)fflush(stderr);
+    }
 }
 
 static void *stream_main(void *opaque)
 {
     daemon_state *state = opaque;
-    /* Match the direct RSPduo capture geometry that has streamed reliably:
-     * 32 queued 256 KiB bulk transfers.  Shorter queues repeatedly stalled
-     * endpoint 0x81 on macOS after only a few submissions. */
-    int result = mirisdr_read_async(state->radio, stream_callback, state, 32u, 262144u);
+    fprintf(stderr, "OPENRSPD_STREAM_THREAD_START\n");
+    (void)fflush(stderr);
+    /* Keep the proven 32-transfer USB queue and 64 KiB USB buffers.  Aggregate
+     * converted samples into 64 KiB daemon frames: a 256 KiB first socket
+     * write can fill the macOS Unix-socket window before API startup finishes. */
+    int result = mirisdr_read_async(state->radio, stream_callback, state, 32u, 65536u);
     state->streaming = false;
     state->stream_result = result;
     state->stream_error = result != 0;
@@ -134,14 +165,16 @@ static int clamp_int(int value, int minimum, int maximum)
 
 static int set_gain(mirisdr_dev_t *radio, const openrsp_radio_config *config)
 {
-    /*
-     * Keep RSPduo gain updates on the proven Mirics register path until the
-     * RSPduo-specific LNA GPIO sequence is validated across all states.  The
-     * previous sequence could configure successfully yet stall the USB stream
-     * immediately afterwards on the tested radio.  The generic gain setter
-     * has streamed IQ on this hardware, and the API LNA state still maps to
-     * its documented total gain reduction here.
-     */
+    /* The independently captured RSPduo sequence controls IF gain reduction
+     * and the physical LNA GPIO state separately.  It is applied only after
+     * streaming has started; startup remains on the proven generic state. */
+    if (config->center_frequency_hz >= 420000000u &&
+        config->center_frequency_hz < 1000000000u)
+        return mirisdr_set_rspduo_gain(radio, config->gain_reduction_db,
+                                       config->lna_state);
+
+    /* Other bands retain the calculated total-gain path until their RSPduo
+     * GPIO tables are independently captured and verified. */
     static const int below_60mhz[] = {0, 6, 12, 18, 37, 42, 61};
     static const int below_420mhz[] = {0, 6, 12, 18, 20, 26, 32, 38, 57, 62};
     static const int below_2ghz[] = {0, 6, 12, 20, 26, 32, 38, 43, 62};
@@ -254,14 +287,20 @@ static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *c
     if (config->agc_mode < 0 || config->agc_mode > 4 ||
         config->agc_setpoint_dbfs < -60 || config->agc_setpoint_dbfs > -20)
         return OPENRSP_STATUS_BAD_REQUEST;
+    /* Keep this order identical to the direct openrsp-iq path.  That path is
+     * the hardware gate: it streams at 2.048 MS/s, while the former combined
+     * configure helper left endpoint 0x81 stalled before the first callback. */
     if (mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY) != 0 ||
-        mirisdr_configure_rspduo(radio, config->sample_rate_hz,
-                                 config->center_frequency_hz,
-                                 (uint32_t)config->if_frequency_hz,
-                                 config->bandwidth_hz,
-                                 102 - config->gain_reduction_db) != 0)
-        return OPENRSP_STATUS_IO_ERROR;
-    if (set_gain(radio, config) != 0)
+        mirisdr_set_sample_rate(radio, config->sample_rate_hz) != 0 ||
+        mirisdr_set_center_freq(radio, config->center_frequency_hz) != 0 ||
+        mirisdr_set_sample_format(radio, "AUTO") != 0 ||
+        mirisdr_set_transfer(radio, "BULK") != 0 ||
+        mirisdr_set_if_freq(radio, (uint32_t)config->if_frequency_hz) != 0 ||
+        mirisdr_set_bandwidth(radio, config->bandwidth_hz) != 0 ||
+        mirisdr_set_tuner_gain_mode(radio, 1) != 0 ||
+        /* The direct hardware gate starts at this register state.  The API
+         * applies the caller's requested GR/LNA setting after first IQ. */
+        mirisdr_set_tuner_gain(radio, 102) != 0)
         return OPENRSP_STATUS_IO_ERROR;
     return OPENRSP_STATUS_OK;
 }
@@ -321,13 +360,11 @@ static int serve_request(int descriptor, daemon_state *state)
             response.status = OPENRSP_STATUS_BUSY;
         } else if (state->owner == descriptor) {
             response.status = OPENRSP_STATUS_OK;
-        } else if (state->radio != NULL) {
-            state->owner = descriptor;
-            response.status = OPENRSP_STATUS_OK;
-        } else if (mirisdr_open(&state->radio, acquire->device_index) != 0) {
-            response.status = OPENRSP_STATUS_IO_ERROR;
+        } else if (acquire->device_index >= mirisdr_get_device_count()) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
         } else {
             state->owner = descriptor;
+            state->acquired_device_index = acquire->device_index;
             response.status = OPENRSP_STATUS_OK;
         }
     } else if (request.type == OPENRSP_CMD_START && request.payload_bytes == 0u &&
@@ -346,12 +383,24 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = OPENRSP_STATUS_OK;
     } else if (request.type == OPENRSP_CMD_CONFIGURE &&
                request.payload_bytes == sizeof(openrsp_radio_config) &&
-               state->owner == descriptor && state->radio) {
+               state->owner == descriptor) {
         const openrsp_radio_config *config = (const openrsp_radio_config *)payload;
+        bool opened_here = false;
+        if (!state->radio) {
+            if (mirisdr_open(&state->radio, state->acquired_device_index) != 0) {
+                response.status = OPENRSP_STATUS_IO_ERROR;
+                log_config("CONFIGURE", descriptor, 0u, response.status, config);
+                goto send_response;
+            }
+            opened_here = true;
+        }
         response.status = apply_config(state->radio, config);
         if (response.status == OPENRSP_STATUS_OK) {
             state->config = *config;
             state->configured = true;
+        } else if (opened_here) {
+            (void)mirisdr_close(state->radio);
+            state->radio = NULL;
         }
         log_config("CONFIGURE", descriptor, 0u, response.status, config);
     } else if (request.type == OPENRSP_CMD_UPDATE &&
@@ -365,6 +414,7 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = state->owner >= 0 && state->owner != descriptor ?
                           OPENRSP_STATUS_BUSY : OPENRSP_STATUS_UNSUPPORTED;
     }
+send_response:
     if (write_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                     &response, sizeof(response)) != 0) return -1;
     if (request.type == OPENRSP_CMD_LIST && response.status == OPENRSP_STATUS_OK) {
@@ -384,6 +434,8 @@ static int serve_request(int descriptor, daemon_state *state)
         }
     }
     if (request.type == OPENRSP_CMD_START && response.status == OPENRSP_STATUS_OK) {
+        state->logged_usb_iq = false;
+        state->logged_socket_iq = false;
         if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
             state->streaming = false;
             return -1;
@@ -417,6 +469,13 @@ static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
             if (errno == EINTR) continue;
             if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
             return;
+        }
+        /* macOS may propagate O_NONBLOCK from the listening socket.  Control
+         * frames fit in one write, but IQ frames can otherwise stop at EAGAIN
+         * after a partial payload and leave the receiver waiting forever. */
+        if (set_blocking(client) != 0) {
+            (void)close(client);
+            continue;
         }
         bool stored = false;
         for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
@@ -467,7 +526,10 @@ int main(void)
     printf("OPENRSPD_READY socket=%s protocol=%u\n", path, OPENRSP_PROTOCOL_VERSION);
     (void)fflush(stdout);
 
-    daemon_state state = {.owner = -1, .write_lock = PTHREAD_MUTEX_INITIALIZER};
+    daemon_state state = {
+        .owner = -1,
+        .write_lock = PTHREAD_MUTEX_INITIALIZER
+    };
     int clients[OPENRSPD_MAX_CLIENTS];
     for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
     while (running) {

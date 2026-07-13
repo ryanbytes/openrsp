@@ -63,7 +63,7 @@ int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
         0x1226, 0x1226, 0x1226, 0x1226, 0x1226
     };
     static const uint16_t gpio_13[] = {
-        0x13fe, 0x13fe, 0x13fa, 0x13f6, 0x13fe,
+        0x13fe, 0x13fe, 0x13fa, 0x13b6, 0x13fe,
         0x13fe, 0x13fa, 0x13f6, 0x13ee, 0x13ee
     };
 
@@ -132,6 +132,7 @@ static int mirisdr_rspduo_finish_tuner_a(mirisdr_dev_t *p)
 static int mirisdr_rspduo_shutdown(mirisdr_dev_t *p)
 {
     if (!p || p->usb_pid != 0x3020u) return -1;
+    uint32_t shutdown_status = 0u;
     if (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
         mirisdr_rspduo_gpio(p, 0x4a, 0x1389) < 0 ||
         mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
@@ -148,6 +149,10 @@ static int mirisdr_rspduo_shutdown(mirisdr_dev_t *p)
         mirisdr_rspduo_gpio(p, 0x4b, 0x01ff) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x00001c) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x000000) < 0 ||
+        libusb_control_transfer(p->dh, 0xc0, 0x42, 0x0000, 0x0010,
+                                (unsigned char *)&shutdown_status,
+                                sizeof(shutdown_status), CTRL_TIMEOUT) !=
+            (int)sizeof(shutdown_status) ||
         mirisdr_write_reg(p, 0x09, 0x00000d) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x00000e) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x063000) < 0 ||

@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -80,6 +81,11 @@ static void *reader_main(void *opaque)
     openrsp_message_header header;
     while (openrsp_client_receive(backend->client, &header, payload, sizeof(payload)) == 0) {
         if (header.type == OPENRSP_EVENT_IQ && (header.payload_bytes % 4u) == 0u) {
+            static int logged_first_iq;
+            if (!logged_first_iq) {
+                logged_first_iq = 1;
+                fprintf(stderr, "OPENRSP_API_IQ_FIRST bytes=%u\n", header.payload_bytes);
+            }
             openrsp_daemon_iq_callback callback = backend->callback;
             if (callback) callback((const int16_t *)payload, header.payload_bytes / 4u,
                                    backend->callback_context);
@@ -176,9 +182,18 @@ int openrsp_daemon_backend_start(openrsp_daemon_backend *backend,
     if (!backend || !callback || backend->reader_started) return -1;
     backend->callback = callback;
     backend->callback_context = context;
-    if (pthread_create(&backend->reader_thread, NULL, reader_main, backend) != 0) return -1;
+    /* START's response is emitted before the daemon launches its stream
+     * thread, so receive it synchronously.  Starting the shared response/IQ
+     * reader first creates an avoidable initialization race.  IQ produced
+     * between the response and pthread_create remains buffered by the socket. */
+    int start_result = direct_request(backend, OPENRSP_CMD_START, NULL, 0u);
+    if (start_result != 0) return -1;
+    if (pthread_create(&backend->reader_thread, NULL, reader_main, backend) != 0) {
+        (void)direct_request(backend, OPENRSP_CMD_STOP, NULL, 0u);
+        return -1;
+    }
     backend->reader_started = 1;
-    return async_request(backend, OPENRSP_CMD_START, NULL, 0u);
+    return 0;
 }
 
 int openrsp_daemon_backend_update(openrsp_daemon_backend *backend,

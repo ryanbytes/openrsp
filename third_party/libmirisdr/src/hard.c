@@ -17,6 +17,36 @@
 
 #include "hard.h"
 
+int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3_out, uint32_t *reg4_out)
+{
+	if (!reg3_out || !reg4_out || rate < MIRISDR_SAMPLE_RATE_MIN ||
+	    rate > MIRISDR_SAMPLE_RATE_MAX) return -1;
+	uint64_t i, vco = 0, n, fract;
+	for (i = 4; i < 16; i += 2)
+	{
+		vco = (uint64_t)rate * i * 12;
+		if (vco >= 384000000UL) break;
+	}
+	if (i >= 16)
+	{
+		i = 16;
+		vco = (uint64_t)rate * i * 12;
+	}
+	n = vco / 48000000UL;
+	if (n > 15u) return -1;
+	fract = 0x200000UL * (vco % 48000000UL) / 48000000UL;
+	uint32_t reg3 = 3u;
+	reg3 |= (uint32_t)(i / 2u - 1u) << 2;
+	reg3 |= (uint32_t)((fract >> 20) & 1u) << 7;
+	reg3 |= (uint32_t)n << 8;
+	reg3 |= (rate <= 6048000u ? 0x01u : rate <= 8064000u ? 0x05u :
+	         rate <= 9216000u ? 0x09u : 0x0du) << 12;
+	reg3 |= 1u << 16;
+	*reg3_out = reg3;
+	*reg4_out = (uint32_t)fract & 0xfffffu;
+	return 0;
+}
+
 /* nastavení parametrů které vyžadují restart */
 /* parameters that require restart */
 int mirisdr_set_hard(mirisdr_dev_t *p)
@@ -73,7 +103,7 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 #if MIRISDR_DEBUG >= 1
 		fprintf( stderr, "format: 252\n");
 #endif
-		mirisdr_write_reg(p, 0x07, 0x000094);
+		mirisdr_write_reg(p, 0x07, p->usb_pid == 0x3020u ? 0x000005 : 0x000094);
 		p->addr = 252 + 2;
 		break;
 	case MIRISDR_FORMAT_336_S16:
@@ -120,12 +150,20 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 	 * 		 where you can not switch back rate, as well as setting a lower frequency than 571,429 SPS
 	 * 		 because it will be less than N 2, which is not an acceptable condition.
 	 */
-	for (i = 4; i < 16; i += 2)
+	if (p->usb_pid == 0x3020u)
 	{
-		vco = (uint64_t) p->rate * i * 12;
-
-		if (vco >= 202000000UL) {
-			break;
+		if (mirisdr_rspduo_pll_words(p->rate, &reg3, &reg4) < 0) goto failed;
+		mirisdr_write_reg(p, 0x04, reg4);
+		mirisdr_write_reg(p, 0x03, reg3);
+		if ((streaming) && (mirisdr_start_async(p) < 0)) goto failed;
+		return 0;
+	}
+	else
+	{
+		for (i = 4; i < 16; i += 2)
+		{
+			vco = (uint64_t) p->rate * i * 12;
+			if (vco >= 202000000UL) break;
 		}
 	}
 

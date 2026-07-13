@@ -43,9 +43,10 @@ static void trace_line(const char *operation, int result, uint8_t request_type, 
     }
 }
 
-int libusb_control_transfer(libusb_device_handle *device, uint8_t request_type,
-                            uint8_t request, uint16_t value, uint16_t index,
-                            unsigned char *data, uint16_t length, unsigned int timeout)
+static int trace_libusb_control_transfer(libusb_device_handle *device, uint8_t request_type,
+                                         uint8_t request, uint16_t value, uint16_t index,
+                                         unsigned char *data, uint16_t length,
+                                         unsigned int timeout)
 {
     typedef int (*function_t)(libusb_device_handle *, uint8_t, uint8_t, uint16_t, uint16_t,
                               unsigned char *, uint16_t, unsigned int);
@@ -56,7 +57,7 @@ int libusb_control_transfer(libusb_device_handle *device, uint8_t request_type,
     return result;
 }
 
-int libusb_claim_interface(libusb_device_handle *device, int interface_number)
+static int trace_libusb_claim_interface(libusb_device_handle *device, int interface_number)
 {
     typedef int (*function_t)(libusb_device_handle *, int);
     function_t original = (function_t)dlsym(RTLD_NEXT, "libusb_claim_interface");
@@ -65,8 +66,8 @@ int libusb_claim_interface(libusb_device_handle *device, int interface_number)
     return result;
 }
 
-int libusb_set_interface_alt_setting(libusb_device_handle *device, int interface_number,
-                                     int alternate)
+static int trace_libusb_set_interface_alt_setting(libusb_device_handle *device,
+                                                  int interface_number, int alternate)
 {
     typedef int (*function_t)(libusb_device_handle *, int, int);
     function_t original = (function_t)dlsym(RTLD_NEXT, "libusb_set_interface_alt_setting");
@@ -75,7 +76,7 @@ int libusb_set_interface_alt_setting(libusb_device_handle *device, int interface
     return result;
 }
 
-int libusb_reset_device(libusb_device_handle *device)
+static int trace_libusb_reset_device(libusb_device_handle *device)
 {
     typedef int (*function_t)(libusb_device_handle *);
     function_t original = (function_t)dlsym(RTLD_NEXT, "libusb_reset_device");
@@ -84,7 +85,7 @@ int libusb_reset_device(libusb_device_handle *device)
     return result;
 }
 
-int libusb_submit_transfer(struct libusb_transfer *transfer)
+static int trace_libusb_submit_transfer(struct libusb_transfer *transfer)
 {
     typedef int (*function_t)(struct libusb_transfer *);
     function_t original = (function_t)dlsym(RTLD_NEXT, "libusb_submit_transfer");
@@ -96,7 +97,7 @@ int libusb_submit_transfer(struct libusb_transfer *transfer)
     return result;
 }
 
-int libusb_cancel_transfer(struct libusb_transfer *transfer)
+static int trace_libusb_cancel_transfer(struct libusb_transfer *transfer)
 {
     typedef int (*function_t)(struct libusb_transfer *);
     function_t original = (function_t)dlsym(RTLD_NEXT, "libusb_cancel_transfer");
@@ -107,3 +108,19 @@ int libusb_cancel_transfer(struct libusb_transfer *transfer)
                transfer == NULL ? 0u : (uint16_t)transfer->status, NULL, 0);
     return result;
 }
+
+typedef struct {
+    const void *replacement;
+    const void *replacee;
+} interpose_entry;
+
+__attribute__((used, section("__DATA,__interpose")))
+static const interpose_entry interposers[] = {
+    {(const void *)trace_libusb_control_transfer, (const void *)libusb_control_transfer},
+    {(const void *)trace_libusb_claim_interface, (const void *)libusb_claim_interface},
+    {(const void *)trace_libusb_set_interface_alt_setting,
+     (const void *)libusb_set_interface_alt_setting},
+    {(const void *)trace_libusb_reset_device, (const void *)libusb_reset_device},
+    {(const void *)trace_libusb_submit_transfer, (const void *)libusb_submit_transfer},
+    {(const void *)trace_libusb_cancel_transfer, (const void *)libusb_cancel_transfer}
+};

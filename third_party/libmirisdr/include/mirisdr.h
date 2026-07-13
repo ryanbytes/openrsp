@@ -111,7 +111,10 @@ MIRISDR_API int mirisdr_set_transfer (mirisdr_dev_t *p, const char *v);       /*
 MIRISDR_API const char *mirisdr_get_transfer (mirisdr_dev_t *p);        /* extra */
 MIRISDR_API int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate,
                                           uint32_t freq, uint32_t if_freq,
-                                          uint32_t bandwidth, int gain);
+                                          uint32_t bandwidth, int gain_reduction,
+                                          unsigned int lna_state);
+MIRISDR_API int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3,
+                                          uint32_t *reg4);
 
 /* gain */
 MIRISDR_API int mirisdr_set_gain (mirisdr_dev_t *p);                    /* extra */

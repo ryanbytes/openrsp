@@ -71,35 +71,49 @@ target_include_directories(openrsp_miri PRIVATE third_party/libmirisdr/src)
 target_compile_definitions(openrsp_miri PUBLIC mirisdr_STATIC)
 target_link_libraries(openrsp_miri PUBLIC PkgConfig::LIBUSB Threads::Threads m)
 
+add_executable(rspduo-pll-test tests/rspduo_pll_test.c)
+target_link_libraries(rspduo-pll-test PRIVATE openrsp_miri)
+target_compile_options(rspduo-pll-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME rspduo-pll COMMAND rspduo-pll-test)
+
 add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
 target_link_libraries(openrsp-iq PRIVATE openrsp_miri)
 
 add_executable(openrsp-miri-probe tools/openrsp_miri_probe.c)
 target_link_libraries(openrsp-miri-probe PRIVATE openrsp_miri)
 
-add_library(sdrplay_api_compat SHARED compat/sdrplay_api_compat.c)
-target_include_directories(sdrplay_api_compat PUBLIC compat)
-target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend Threads::Threads m)
-target_compile_options(sdrplay_api_compat PRIVATE -Wall -Wextra -Wpedantic -Werror)
-set_target_properties(sdrplay_api_compat PROPERTIES
-    OUTPUT_NAME sdrplay_api
-    PREFIX "lib"
-    SUFFIX ".so.3.15"
-)
+if(UNIX)
+    add_library(sdrplay_api_compat SHARED compat/sdrplay_api_compat.c)
+    target_include_directories(sdrplay_api_compat PUBLIC compat)
+    target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend Threads::Threads m)
+    target_compile_options(sdrplay_api_compat PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(sdrplay_api_compat PROPERTIES
+        OUTPUT_NAME sdrplay_api
+        PREFIX "lib"
+        SUFFIX ".so.3.15"
+    )
 
-add_executable(sdrplay-api-compat-test tests/sdrplay_api_compat_test.c)
-target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
-target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads)
-target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
-add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
+    add_executable(sdrplay-api-compat-test tests/sdrplay_api_compat_test.c)
+    target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
+    target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads)
+    target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
 
-add_executable(sdrplay-compat-stream-test tools/sdrplay_compat_stream_test.c)
-target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat Threads::Threads m)
-target_compile_options(sdrplay-compat-stream-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_executable(sdrplay-abi-layout-test tools/sdrplay_abi_layout.c)
+    target_include_directories(sdrplay-abi-layout-test PRIVATE compat)
+    target_compile_options(sdrplay-abi-layout-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME sdrplay-abi-layout COMMAND sdrplay-abi-layout-test)
 
-add_executable(sdrplay-gain-sweep-test tools/sdrplay_gain_sweep_test.c)
-target_link_libraries(sdrplay-gain-sweep-test PRIVATE sdrplay_api_compat Threads::Threads)
-target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_executable(sdrplay-compat-stream-test tools/sdrplay_compat_stream_test.c)
+    target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat Threads::Threads m)
+    target_compile_options(sdrplay-compat-stream-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+    add_executable(sdrplay-gain-sweep-test tools/sdrplay_gain_sweep_test.c)
+    target_link_libraries(sdrplay-gain-sweep-test PRIVATE sdrplay_api_compat Threads::Threads)
+    target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+else()
+    message(STATUS "OpenRSP direct driver builds on this platform; the local API-compatibility daemon is currently Unix-only")
+endif()
 
 if(APPLE)
     add_library(openrsp_libusb_trace SHARED tools/libusb_trace_interpose.c)

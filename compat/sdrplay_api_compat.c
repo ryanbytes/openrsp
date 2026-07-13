@@ -39,6 +39,7 @@ typedef struct {
 } compat_device_context;
 
 static compat_device_context rspduo;
+static sdrplay_api_ErrorInfoT last_error;
 
 static int consume_one(atomic_uint *pending)
 {
@@ -239,6 +240,7 @@ _Static_assert(sizeof(sdrplay_api_CallbackFnsT) == 24, "CallbackFnsT ABI mismatc
 static void reset_parameters(void)
 {
     memset(&rspduo, 0, sizeof(rspduo));
+    memset(&last_error, 0, sizeof(last_error));
     atomic_init(&rspduo.pending_gr_changed, 0u);
     atomic_init(&rspduo.pending_rf_changed, 0u);
     atomic_init(&rspduo.pending_fs_changed, 0u);
@@ -363,9 +365,33 @@ const char *sdrplay_api_GetErrorString(sdrplay_api_ErrT err)
     return (unsigned int)err < sizeof(names) / sizeof(names[0]) ? names[err] : "Unknown Error";
 }
 
+sdrplay_api_ErrorInfoT *sdrplay_api_GetLastError(sdrplay_api_DeviceT *device)
+{
+    (void)device;
+    return &last_error;
+}
+
+sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(sdrplay_api_DeviceT *device,
+                                                        int type, unsigned long long *time)
+{
+    (void)device;
+    (void)type;
+    if (time) *time = 0u;
+    return &last_error;
+}
+
 sdrplay_api_ErrT sdrplay_api_DisableHeartbeat(void)
 {
     return api_open ? sdrplay_api_Success : sdrplay_api_NotInitialised;
+}
+
+sdrplay_api_ErrT sdrplay_api_DebugEnable(HANDLE dev, sdrplay_api_DbgLvl_t level)
+{
+    if (!api_open) return sdrplay_api_NotInitialised;
+    if (dev != &rspduo || !rspduo.selected) return sdrplay_api_InvalidParam;
+    if (level < sdrplay_api_DbgLvl_Disable || level > sdrplay_api_DbgLvl_Message)
+        return sdrplay_api_OutOfRange;
+    return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
@@ -454,6 +480,22 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.initialized = 0;
         return sdrplay_api_HwError;
     }
+    /* The tested RSPduo only starts its bulk endpoint reliably in automatic
+     * gain mode.  Apply the caller's requested gain after the first IQ block,
+     * when the endpoint is demonstrably running. */
+    fill_radio_config(&rspduo, &config);
+    if (openrsp_daemon_backend_update(rspduo.backend, &config,
+                                      OPENRSP_CHANGE_GAIN) != 0) {
+        (void)openrsp_daemon_backend_stop(rspduo.backend);
+        atomic_store(&rspduo.agc_stop, 1);
+        pthread_join(rspduo.agc_thread, NULL);
+        openrsp_daemon_backend_close(rspduo.backend);
+        rspduo.backend = NULL;
+        rspduo.thread_started = 0;
+        rspduo.agc_thread_started = 0;
+        rspduo.initialized = 0;
+        return sdrplay_api_HwError;
+    }
     return sdrplay_api_Success;
 }
 
@@ -508,10 +550,55 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                                                 protocol_change_flags(reason));
     }
     if (result >= 0) {
+        if (gr_changed) {
+            int lna_reduction = 0;
+            sdrplay_api_GainT *gain = &rspduo.channel_a.tunerParams.gain;
+            if (rspduo_lna_gain_reduction(
+                    rspduo.channel_a.tunerParams.rfFreq.rfHz,
+                    gain->LNAstate, &lna_reduction) == 0) {
+                gain->gainVals.curr = (float)clamp_int(
+                    105 - gain->gRdB - lna_reduction, -20, 105);
+                gain->gainVals.max = 85.0f;
+                gain->gainVals.min = -18.0f;
+            }
+        }
         if (fs_changed) atomic_fetch_add(&rspduo.pending_fs_changed, 1u);
         if (rf_changed) atomic_fetch_add(&rspduo.pending_rf_changed, 1u);
         if (gr_changed) atomic_fetch_add(&rspduo.pending_gr_changed, 1u);
     }
     pthread_mutex_unlock(&hardware_lock);
     return result < 0 ? sdrplay_api_HwError : sdrplay_api_Success;
+}
+
+sdrplay_api_ErrT sdrplay_api_SwapRspDuoActiveTuner(
+    HANDLE dev, sdrplay_api_TunerSelectT *current_tuner,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port)
+{
+    (void)tuner1_am_port;
+    if (dev != &rspduo || current_tuner == NULL) return sdrplay_api_InvalidParam;
+    return sdrplay_api_InvalidMode;
+}
+
+sdrplay_api_ErrT sdrplay_api_SwapRspDuoDualTunerModeSampleRate(
+    HANDLE dev, double *current_sample_rate, double new_sample_rate)
+{
+    (void)new_sample_rate;
+    if (dev != &rspduo || current_sample_rate == NULL) return sdrplay_api_InvalidParam;
+    return sdrplay_api_InvalidMode;
+}
+
+sdrplay_api_ErrT sdrplay_api_SwapRspDuoMode(
+    sdrplay_api_DeviceT *current_device, sdrplay_api_DeviceParamsT **device_params,
+    sdrplay_api_RspDuoModeT mode, double sample_rate, sdrplay_api_TunerSelectT tuner,
+    sdrplay_api_Bw_MHzT bandwidth, sdrplay_api_If_kHzT if_type,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port)
+{
+    (void)mode;
+    (void)sample_rate;
+    (void)tuner;
+    (void)bandwidth;
+    (void)if_type;
+    (void)tuner1_am_port;
+    if (current_device == NULL || device_params == NULL) return sdrplay_api_InvalidParam;
+    return sdrplay_api_InvalidMode;
 }
