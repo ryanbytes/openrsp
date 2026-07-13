@@ -126,8 +126,27 @@ int mirisdr_get_device_usb_strings (uint32_t index, char *manufact, char *produc
             strcpy(manufact, device->manufacturer);
             strcpy(product, device->product);
 
-            // because all known SDRplay clones do not have an EEPROM chip with the serial number,
-            // use the physical location of the USB port
+            /* Genuine RSP receivers expose a stable USB serial descriptor.
+             * Preserve it for application configuration identity.  Older
+             * Mirics-compatible devices without one retain the physical-port
+             * fallback below. */
+            if (dd.iSerialNumber != 0u) {
+                libusb_device_handle *handle = NULL;
+                if (libusb_open(list[i], &handle) == 0) {
+                    int length = libusb_get_string_descriptor_ascii(
+                        handle, dd.iSerialNumber, (unsigned char *)serial, 255);
+                    libusb_close(handle);
+                    if (length > 0) {
+                        serial[length] = '\0';
+                        libusb_free_device_list(list, 1);
+                        libusb_exit(ctx);
+                        return 0;
+                    }
+                }
+            }
+
+            /* No readable serial: use the physical USB location as a stable
+             * identity only while the receiver remains on the same port. */
 
             char *serial_cursor = serial;
             size_t serial_remaining = 256u;

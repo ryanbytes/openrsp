@@ -1,5 +1,7 @@
 # OpenRSP
 
+**This project is vibecoded experimental software. Do not mistake rapid development or passing tests for broad hardware validation.**
+
 OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes tuner A, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
 
 That limitation is deliberate. SDRplay's public API is documented, but its USB protocol and hardware-control implementation are proprietary. SoapySDRPlay3 and gr-sdrplay3 are open application adapters that still require SDRplay's closed API. Claiming this repository is a working replacement before independently documenting USB initialization, tuner register programming, sample framing, and calibration would be bullshit.
@@ -18,10 +20,26 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | IQ streaming | Direct and standalone API paths verified on hardware |
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
+| API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
 | Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
+
+### API update coverage
+
+The compatibility library implements live sample-rate, RF, bandwidth, IF,
+gain/LNA, AGC, and PPM updates for RSPduo tuner A. It accepts the API's required
+AUTO-LO, x1 decimation, DC/IQ configuration, reset-flag, and overload-message
+acknowledgement calls. PPM correction retunes the synthesizer by the inverse
+crystal-error factor and reports the completion through `fsChanged`, matching
+the documented API callback contract.
+
+Software decimation above x1, RSPduo bias-T/antenna/notch/external-reference
+switching, RSPdx extensions, and controls belonging to other RSP models are not
+implemented. Those calls return a specific API error. They do not return false
+success. The complete 3.15 update-reason values are exposed in the compatibility
+header so applications can compile against the implemented ABI.
 
 ## Build and test
 
@@ -64,33 +82,6 @@ sudo ./scripts/install-macos.sh
 The installer places the versioned library under `/Library/OpenRSP/0.1` and creates `/opt/homebrew/lib/libsdrplay_api.dylib`, which SDRTrunk checks on Apple Silicon. It refuses to proceed while `com.sdrplay.service` is loaded or when the loader path is a regular file.
 
 Some RSPduo USB states do not expose the factory serial descriptor. Set `OPENRSP_SERIAL` in the application environment to preserve a previously known stable identity; otherwise OpenRSP uses the physical USB port path. Do not commit a receiver serial to a public configuration.
-
-## Development path
-
-1. Identify one exact receiver revision from USB descriptors and physical labeling.
-2. Capture USB traffic from documented application actions on a sacrificial/test receiver.
-3. Record observations as test fixtures without copying proprietary code or confidential material.
-4. Implement device initialization and validate every transfer against captures.
-5. Implement bounded tuning and gain controls, then verify with RF measurements.
-6. Decode bulk IQ framing and test sample rate, loss, DC offset, spectrum orientation, and sustained operation.
-7. Add SoapySDR and SDRTrunk integration only after the core transport is stable.
-
-## Definition of better
-
-A replacement is not better merely because its source is available. Before an RSPduo backend is called usable, it must pass automated tests for:
-
-- 24-hour continuous IQ streaming with sequence/loss accounting;
-- service-free startup and deterministic cleanup after application crashes;
-- repeated open/tune/stream/close cycles without reconnecting the radio;
-- unplug/replug recovery without rebooting macOS;
-- bounded USB timeouts with cancellation that cannot deadlock shutdown;
-- tuner A and tuner B isolation, followed by dual-tuner operation;
-- sample-rate, center-frequency, gain, overload, and dropped-sample measurements;
-- failure injection for short transfers, stalls, cancellation, and device removal.
-
-Until those measurements exist, OpenRSP is research software—not a stable driver.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the clean-room rules and evidence required for support claims.
 
 ## Licensing and trademarks
 

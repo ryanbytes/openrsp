@@ -32,6 +32,7 @@ typedef struct {
     atomic_int stream_result;
     pthread_t stream_thread;
     pthread_mutex_t write_lock;
+    atomic_bool control_write_pending;
     bool logged_usb_iq;
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
@@ -112,9 +113,27 @@ static int write_frame(daemon_state *state, int descriptor, uint16_t type,
     return result;
 }
 
+static int write_control_frame(daemon_state *state, int descriptor, uint16_t type,
+                               uint32_t sequence, const void *payload,
+                               uint32_t payload_bytes)
+{
+    /* IQ is a continuous high-rate producer.  Without an explicit priority
+     * gate it can reacquire write_lock indefinitely and leave a tiny command
+     * response queued for seconds, making a successful hardware update look
+     * like an API timeout. */
+    atomic_store(&state->control_write_pending, true);
+    int result = write_frame(state, descriptor, type, sequence, payload, payload_bytes);
+    atomic_store(&state->control_write_pending, false);
+    return result;
+}
+
 static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque)
 {
     daemon_state *state = opaque;
+    while (atomic_load(&state->control_write_pending)) {
+        const struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000L};
+        (void)nanosleep(&pause, NULL);
+    }
     if (!state->logged_usb_iq) {
         state->logged_usb_iq = true;
         atomic_store(&state->first_iq_seen, true);
@@ -499,8 +518,8 @@ static int serve_request(int descriptor, daemon_state *state)
                           OPENRSP_STATUS_BUSY : OPENRSP_STATUS_UNSUPPORTED;
     }
 send_response:
-    if (write_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
-                    &response, sizeof(response)) != 0) return -1;
+    if (write_control_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
+                            &response, sizeof(response)) != 0) return -1;
     if (request.type == OPENRSP_CMD_LIST && response.status == OPENRSP_STATUS_OK) {
         for (uint32_t index = 0; index < response.changed_flags; ++index) {
             openrsp_device_record record = {
@@ -513,8 +532,9 @@ send_response:
             (void)snprintf(record.serial, sizeof(record.serial), "%s", serial);
             (void)snprintf(record.model, sizeof(record.model), "%s",
                            mirisdr_get_device_name(index));
-            if (write_frame(state, descriptor, OPENRSP_EVENT_DEVICE, request.sequence,
-                            &record, sizeof(record)) != 0) return -1;
+            if (write_control_frame(state, descriptor, OPENRSP_EVENT_DEVICE,
+                                    request.sequence, &record, sizeof(record)) != 0)
+                return -1;
         }
     }
     if (request.type == OPENRSP_CMD_START && response.status == OPENRSP_STATUS_OK) {
@@ -618,6 +638,7 @@ int main(void)
     atomic_init(&state.stream_error, false);
     atomic_init(&state.stream_result, 0);
     atomic_init(&state.first_iq_seen, false);
+    atomic_init(&state.control_write_pending, false);
     int clients[OPENRSPD_MAX_CLIENTS];
     for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
     while (running) {

@@ -184,12 +184,48 @@ typedef struct {
 
 typedef uint32_t sdrplay_api_ReasonForUpdateT;
 typedef uint32_t sdrplay_api_ReasonForUpdateExtension1T;
+#define sdrplay_api_Update_None 0x00000000u
+#define sdrplay_api_Update_Dev_Fs 0x00000001u
+#define sdrplay_api_Update_Dev_Ppm 0x00000002u
+#define sdrplay_api_Update_Dev_SyncUpdate 0x00000004u
+#define sdrplay_api_Update_Dev_ResetFlags 0x00000008u
+#define sdrplay_api_Update_Rsp1a_BiasTControl 0x00000010u
+#define sdrplay_api_Update_Rsp1a_RfNotchControl 0x00000020u
+#define sdrplay_api_Update_Rsp1a_RfDabNotchControl 0x00000040u
+#define sdrplay_api_Update_Rsp2_BiasTControl 0x00000080u
+#define sdrplay_api_Update_Rsp2_AmPortSelect 0x00000100u
+#define sdrplay_api_Update_Rsp2_AntennaControl 0x00000200u
+#define sdrplay_api_Update_Rsp2_RfNotchControl 0x00000400u
+#define sdrplay_api_Update_Rsp2_ExtRefControl 0x00000800u
+#define sdrplay_api_Update_RspDuo_ExtRefControl 0x00001000u
+#define sdrplay_api_Update_Master_Spare_1 0x00002000u
+#define sdrplay_api_Update_Master_Spare_2 0x00004000u
 #define sdrplay_api_Update_Tuner_Gr 0x00008000u
+#define sdrplay_api_Update_Tuner_GrLimits 0x00010000u
 #define sdrplay_api_Update_Tuner_Frf 0x00020000u
 #define sdrplay_api_Update_Tuner_BwType 0x00040000u
 #define sdrplay_api_Update_Tuner_IfType 0x00080000u
-#define sdrplay_api_Update_Dev_Fs 0x00000001u
+#define sdrplay_api_Update_Tuner_DcOffset 0x00100000u
+#define sdrplay_api_Update_Tuner_LoMode 0x00200000u
+#define sdrplay_api_Update_Ctrl_DCoffsetIQimbalance 0x00400000u
+#define sdrplay_api_Update_Ctrl_Decimation 0x00800000u
 #define sdrplay_api_Update_Ctrl_Agc 0x01000000u
+#define sdrplay_api_Update_Ctrl_AdsbMode 0x02000000u
+#define sdrplay_api_Update_Ctrl_OverloadMsgAck 0x04000000u
+#define sdrplay_api_Update_RspDuo_BiasTControl 0x08000000u
+#define sdrplay_api_Update_RspDuo_AmPortSelect 0x10000000u
+#define sdrplay_api_Update_RspDuo_Tuner1AmNotchControl 0x20000000u
+#define sdrplay_api_Update_RspDuo_RfNotchControl 0x40000000u
+#define sdrplay_api_Update_RspDuo_RfDabNotchControl 0x80000000u
+
+#define sdrplay_api_Update_Ext1_None 0x00000000u
+#define sdrplay_api_Update_RspDx_HdrEnable 0x00000001u
+#define sdrplay_api_Update_RspDx_BiasTControl 0x00000002u
+#define sdrplay_api_Update_RspDx_AntennaControl 0x00000004u
+#define sdrplay_api_Update_RspDx_RfNotchControl 0x00000008u
+#define sdrplay_api_Update_RspDx_RfDabNotchControl 0x00000010u
+#define sdrplay_api_Update_RspDx_HdrBw 0x00000020u
+#define sdrplay_api_Update_RspDuo_ResetSlaveFlags 0x00000040u
 
 typedef enum {
     sdrplay_api_DbgLvl_Disable = 0, sdrplay_api_DbgLvl_Verbose = 1,

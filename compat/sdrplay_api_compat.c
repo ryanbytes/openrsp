@@ -89,9 +89,11 @@ static int rspduo_lna_gain_reduction(double rf_hz, unsigned int state, int *redu
 
 static void fill_radio_config(const compat_device_context *device, openrsp_radio_config *config)
 {
+    double correction = 1.0 + device->dev_params.ppm / 1000000.0;
     memset(config, 0, sizeof(*config));
     config->sample_rate_hz = (uint32_t)device->dev_params.fsFreq.fsHz;
-    config->center_frequency_hz = (uint32_t)device->channel_a.tunerParams.rfFreq.rfHz;
+    config->center_frequency_hz = (uint32_t)(device->channel_a.tunerParams.rfFreq.rfHz /
+                                             correction);
     config->bandwidth_hz = (uint32_t)device->channel_a.tunerParams.bwType * 1000u;
     config->if_frequency_hz = (int32_t)device->channel_a.tunerParams.ifType * 1000;
     config->gain_reduction_db = device->channel_a.tunerParams.gain.gRdB;
@@ -104,12 +106,61 @@ static uint32_t protocol_change_flags(sdrplay_api_ReasonForUpdateT reason)
 {
     uint32_t flags = 0u;
     if ((reason & sdrplay_api_Update_Dev_Fs) != 0u) flags |= OPENRSP_CHANGE_SAMPLE_RATE;
-    if ((reason & sdrplay_api_Update_Tuner_Frf) != 0u) flags |= OPENRSP_CHANGE_RF;
+    if ((reason & (sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Dev_Ppm)) != 0u)
+        flags |= OPENRSP_CHANGE_RF;
     if ((reason & sdrplay_api_Update_Tuner_BwType) != 0u) flags |= OPENRSP_CHANGE_BANDWIDTH;
     if ((reason & sdrplay_api_Update_Tuner_IfType) != 0u) flags |= OPENRSP_CHANGE_IF;
     if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u) flags |= OPENRSP_CHANGE_GAIN;
     if ((reason & sdrplay_api_Update_Ctrl_Agc) != 0u) flags |= OPENRSP_CHANGE_AGC;
     return flags;
+}
+
+static sdrplay_api_ErrT validate_update(const compat_device_context *device,
+                                        sdrplay_api_ReasonForUpdateT reason,
+                                        sdrplay_api_ReasonForUpdateExtension1T extension)
+{
+    const uint32_t other_models =
+        sdrplay_api_Update_Rsp1a_BiasTControl |
+        sdrplay_api_Update_Rsp1a_RfNotchControl |
+        sdrplay_api_Update_Rsp1a_RfDabNotchControl |
+        sdrplay_api_Update_Rsp2_BiasTControl |
+        sdrplay_api_Update_Rsp2_AmPortSelect |
+        sdrplay_api_Update_Rsp2_AntennaControl |
+        sdrplay_api_Update_Rsp2_RfNotchControl |
+        sdrplay_api_Update_Rsp2_ExtRefControl;
+    const uint32_t unsupported_duo_hardware =
+        sdrplay_api_Update_RspDuo_ExtRefControl |
+        sdrplay_api_Update_RspDuo_BiasTControl |
+        sdrplay_api_Update_RspDuo_AmPortSelect |
+        sdrplay_api_Update_RspDuo_Tuner1AmNotchControl |
+        sdrplay_api_Update_RspDuo_RfNotchControl |
+        sdrplay_api_Update_RspDuo_RfDabNotchControl;
+
+    if ((extension & ~0x7fu) != 0u) return sdrplay_api_InvalidParam;
+    if (extension != sdrplay_api_Update_Ext1_None)
+        return sdrplay_api_InvalidMode;
+    if ((reason & other_models) != 0u) return sdrplay_api_HwVerError;
+    if ((reason & unsupported_duo_hardware) != 0u)
+        return sdrplay_api_InvalidMode;
+    if ((reason & (sdrplay_api_Update_Master_Spare_1 |
+                   sdrplay_api_Update_Master_Spare_2)) != 0u)
+        return sdrplay_api_InvalidParam;
+    if ((reason & sdrplay_api_Update_Dev_Ppm) != 0u &&
+        (!isfinite(device->dev_params.ppm) || device->dev_params.ppm < -300.0 ||
+         device->dev_params.ppm > 300.0))
+        return sdrplay_api_OutOfRange;
+    if ((reason & sdrplay_api_Update_Tuner_LoMode) != 0u &&
+        device->channel_a.tunerParams.loMode != sdrplay_api_LO_Auto)
+        return sdrplay_api_InvalidMode;
+    if ((reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
+        const sdrplay_api_DecimationT *decimation = &device->channel_a.ctrlParams.decimation;
+        if (decimation->enable != 0u || decimation->decimationFactor != 1u)
+            return sdrplay_api_InvalidMode;
+    }
+    if ((reason & sdrplay_api_Update_Ctrl_AdsbMode) != 0u &&
+        device->channel_a.ctrlParams.adsbMode != sdrplay_api_ADSB_DECIMATION)
+        return sdrplay_api_InvalidMode;
+    return sdrplay_api_Success;
 }
 
 static int apply_rspduo_gain_locked(compat_device_context *device)
@@ -532,11 +583,15 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                                      sdrplay_api_ReasonForUpdateT reason,
                                      sdrplay_api_ReasonForUpdateExtension1T extension)
 {
-    (void)extension;
     if (dev != &rspduo || tuner != sdrplay_api_Tuner_A) return sdrplay_api_InvalidParam;
     if (!rspduo.initialized || rspduo.backend == NULL) return sdrplay_api_NotInitialised;
+    sdrplay_api_ErrT validation = validate_update(&rspduo, reason, extension);
+    if (validation != sdrplay_api_Success) return validation;
     int result = 0;
-    int fs_changed = (reason & sdrplay_api_Update_Dev_Fs) != 0u;
+    /* The vendor API reports a PPM update through fsChanged, even though the
+     * correction also requires retuning the synthesizer in our backend. */
+    int fs_changed = (reason & (sdrplay_api_Update_Dev_Fs |
+                                sdrplay_api_Update_Dev_Ppm)) != 0u;
     int rf_changed = (reason & sdrplay_api_Update_Tuner_Frf) != 0u;
     int gr_changed = (reason & sdrplay_api_Update_Tuner_Gr) != 0u || rf_changed;
     pthread_mutex_lock(&hardware_lock);

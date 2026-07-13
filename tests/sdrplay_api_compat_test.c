@@ -219,6 +219,44 @@ int main(void)
     assert(metrics.rf_changed == 1);
     assert(metrics.gain_changed == 1);
     (void)pthread_mutex_unlock(&metrics.lock);
+
+    /* Required application setup calls are accepted when their values are supported. */
+    params->rxChannelA->tunerParams.loMode = sdrplay_api_LO_Auto;
+    params->rxChannelA->ctrlParams.decimation.enable = 0u;
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_LoMode |
+                              sdrplay_api_Update_Ctrl_Decimation |
+                              sdrplay_api_Update_Ctrl_DCoffsetIQimbalance |
+                              sdrplay_api_Update_Dev_ResetFlags |
+                              sdrplay_api_Update_Ctrl_OverloadMsgAck,
+                              sdrplay_api_Update_Ext1_None) == sdrplay_api_Success);
+
+    /* Do not lie to callers about controls that the standalone backend lacks. */
+    params->rxChannelA->ctrlParams.decimation.enable = 1u;
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = 2u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Ctrl_Decimation, 0u) ==
+           sdrplay_api_InvalidMode);
+    params->rxChannelA->ctrlParams.decimation.enable = 0u;
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Rsp1a_BiasTControl, 0u) ==
+           sdrplay_api_HwVerError);
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_BiasTControl, 0u) ==
+           sdrplay_api_InvalidMode);
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A, 0u,
+                              0x80u) == sdrplay_api_InvalidParam);
+
+    params->devParams->ppm = 2.5;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Dev_Ppm, 0u) ==
+           sdrplay_api_Success);
+    params->devParams->ppm = 301.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Dev_Ppm, 0u) ==
+           sdrplay_api_OutOfRange);
     assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_Close() == sdrplay_api_Success);

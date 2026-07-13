@@ -151,3 +151,39 @@ resumed 65,536-byte IQ frames and restored GR 50/LNA 0, SDRTrunk logged no
 terminal update failure or tuner removal, and decoding resumed.  This is one
 successful recovery cycle on one RSPduo; repeated-cycle and long-disconnect
 testing remain required before claiming general recovery stability.
+
+## API update-reason audit (2026-07-12)
+
+The public API 3.15 update-reason surface was compared with SDRplay's published
+API specification and SDRTrunk's generated 3.15 bindings. The compatibility
+header now exposes all 32 primary reason bits and all seven extension bits.
+Previously, reasons outside sample rate, RF, bandwidth, IF, gain, and AGC were
+silently accepted as no-ops. That was incorrect application behavior.
+
+The compatibility layer now validates values and distinguishes wrong-model,
+invalid-mode, invalid-parameter, and out-of-range requests. Required RSPduo
+tuner-A setup calls for AUTO LO, disabled/x1 decimation, DC/IQ configuration,
+reset flags, and overload acknowledgement remain accepted. PPM correction is
+applied to the synthesizer command and acknowledged using the API's
+`fsChanged` callback convention. Unsupported hardware switches and enabled
+software decimation now fail explicitly instead of pretending to work.
+
+Debug, Release, and ASan/UBSan builds each pass all five tests. The sanitizer
+run uses `ASAN_OPTIONS=detect_leaks=0` because Apple AddressSanitizer does not
+support leak detection on this platform.
+
+The first live deployment exposed command-response starvation under continuous
+10 MS/s IQ output. The daemon had correctly applied the initial gain command,
+but its small response competed with the stream thread for the same socket
+write mutex and missed the API's five-second timeout. SDRTrunk therefore saw a
+hardware initialization error despite active IQ. Control responses now raise a
+writer-priority gate before taking that mutex, and the IQ callback briefly
+waits behind the pending response. A second live launch completed discovery,
+initial gain, repeated RF updates, and channel startup without the false
+hardware error or update timeout.
+
+The same launch also confirmed that the inherited libmirisdr USB-path fallback
+is not an acceptable receiver identity: bypassing the normal launch environment
+changed the apparent serial from the saved receiver serial to its bus path.
+Device discovery now reads the actual USB serial descriptor when available and
+uses the physical path only for hardware that has no readable serial.
