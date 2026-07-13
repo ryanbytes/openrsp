@@ -233,6 +233,10 @@ if(UNIX)
     target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat Threads::Threads m)
     target_compile_options(sdrplay-compat-stream-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+    add_executable(sdrplay-rate-probe tools/sdrplay_rate_probe.c)
+    target_link_libraries(sdrplay-rate-probe PRIVATE sdrplay_api_compat Threads::Threads m)
+    target_compile_options(sdrplay-rate-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
     add_executable(sdrplay-gain-sweep-test tools/sdrplay_gain_sweep_test.c)
     target_link_libraries(sdrplay-gain-sweep-test PRIVATE sdrplay_api_compat Threads::Threads)
     target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)

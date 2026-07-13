@@ -85,6 +85,15 @@ Use `--rates` to measure every rate advertised by the module, or `--rate SPS`
 to test one rate. These modes compare delivered IQ against wall-clock time and
 restore the normal 2 MS/s configuration and AGC after a successful run.
 
+The standalone compatibility path has an independent verifier that does not
+load SoapySDR. With other radio applications stopped, it measures native API
+callback throughput from 2 through 10 MS/s and restores 2 MS/s plus AGC on
+success or failure:
+
+```sh
+./build/sdrplay-rate-probe --rates
+```
+
 The `openrsp-probe` USB descriptor probe is read-only. The official SDRplay
 service may prevent string-descriptor access; that tool reports the libusb
 error instead of stopping or detaching anything. Do not stop a production

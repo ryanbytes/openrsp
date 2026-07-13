@@ -407,6 +407,14 @@ from 0.0026 percent at 6 MS/s to 0.353 percent at 2.048 MS/s. The probe restored
 2 MS/s and AGC after the sweep. This verifies single-tuner sample delivery rate
 on one RSPduo; it does not establish RF bandwidth flatness or dual-tuner support.
 
+The same core mappings then passed an independent verifier through OpenRSP's
+standalone SDRplay-compatible API, without loading SoapySDR. One continuous
+stream was updated through 2, 2.048, 3, 4, 5, 6, 7, 8, 9, and 10 MS/s. Native
+callback throughput stayed within 0.0071 percent at 9 MS/s and 0.5204 percent
+at 2.048 MS/s of wall-clock rate. The tool restored 2 MS/s and AGC before
+uninitializing, and SDRTrunk subsequently restarted with its saved RSPduo
+disabled state, channel configuration, and JMBE library intact.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
