@@ -87,8 +87,8 @@ restore the normal 2 MS/s configuration and AGC after a successful run.
 
 The standalone compatibility path has an independent verifier that does not
 load SoapySDR. With other radio applications stopped, it measures native API
-callback throughput from 2 through 10 MS/s and restores 2 MS/s plus AGC on
-success or failure:
+callback throughput from 2 through the API maximum of 10.66 MS/s and restores
+2 MS/s plus AGC on success or failure:
 
 ```sh
 ./build/sdrplay-rate-probe --rates

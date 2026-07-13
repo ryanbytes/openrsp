@@ -415,6 +415,11 @@ at 2.048 MS/s of wall-clock rate. The tool restored 2 MS/s and AGC before
 uninitializing, and SDRTrunk subsequently restarted with its saved RSPduo
 disabled state, channel configuration, and JMBE library intact.
 
+The API's upper boundary of 10.66 MS/s was then measured separately at
+10.6466 MS/s, a 0.1253 percent error, with the same successful restoration and
+SDRTrunk restart. This covers the accepted API sample-rate endpoints as well as
+the rate set advertised by the current Soapy adapter.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
