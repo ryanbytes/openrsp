@@ -186,7 +186,7 @@ static const struct rspduo_gain_row rspduo_gain_below_420mhz[] = {
 static const struct rspduo_gain_row rspduo_gain_below_1ghz[] = {
     GAIN_ROW(0xc000, 0x12df, 0x1224, 0x13fe, 0x13c8, 0x13fe),
     GAIN_ROW(0xe000, 0x12df, 0x12a4, 0x13ff, 0x13c8, 0x13fe),
-    GAIN_ROW(0xe000, 0x12df, 0x1224, 0x13fa, 0x13c8, 0x13de),
+    GAIN_ROW(0xe000, 0x12df, 0x12a4, 0x13fb, 0x13c8, 0x13de),
     GAIN_ROW(0xe000, 0x12df, 0x1224, 0x13b6, 0x13c8, 0x13be),
     GAIN_ROW(0xc000, 0x12df, 0x1226, 0x13fe, 0x13cc, 0x13ff),
     GAIN_ROW(0xe000, 0x12df, 0x1226, 0x13fe, 0x13cc, 0x13ff),
@@ -325,6 +325,20 @@ static int mirisdr_rspduo_frontend_init(mirisdr_dev_t *p)
     return 0;
 }
 
+static int mirisdr_rspduo_frontend_ready(mirisdr_dev_t *p)
+{
+    if (!p || !p->dh || p->usb_pid != 0x3020u) return -1;
+    /* The device returns 0x0a for both API 3.15 reads on tuner A. */
+    for (unsigned int i = 0u; i < 2u; ++i) {
+        uint8_t ready = 0u;
+        if (libusb_control_transfer(p->dh, 0xc0, 0x48, 0x0000, 0x0000,
+                                    &ready, sizeof(ready), CTRL_TIMEOUT) !=
+            (int)sizeof(ready))
+            return -1;
+    }
+    return 0;
+}
+
 static int mirisdr_rspduo_route_tuner(mirisdr_dev_t *p)
 {
     static const struct {
@@ -403,7 +417,6 @@ static int mirisdr_rspduo_shutdown(mirisdr_dev_t *p)
         (mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
          mirisdr_rspduo_gpio(p, 0x4b, 0x13bf) < 0) :
         (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
-         mirisdr_rspduo_gpio(p, 0x4a, 0x1389) < 0 ||
          mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0);
     if (frontend_stop ||
         mirisdr_write_reg(p, 0x09, 0x073000) < 0 ||

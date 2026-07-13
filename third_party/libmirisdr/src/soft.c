@@ -343,15 +343,23 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
     p->reg8=switch_plan.band_select_word;
     update_reg_8(p);
 
+    /* Program the RF mode before switching the RSPduo frontend route, as in
+     * API 3.15 initialization. */
+    if (p->usb_pid == 0x3020u)
+        mirisdr_write_reg(p, 0x09, reg0);
+
     if (mirisdr_rspduo_route_tuner(p) < 0) return -1;
 
-    mirisdr_write_reg(p, 0x09, 0x0e);
     mirisdr_write_reg(p, 0x09, reg3);
-
-    mirisdr_write_reg(p, 0x09, reg0);
-    mirisdr_write_reg(p, 0x09, reg5);
+    if (p->usb_pid != 0x3020u) {
+        mirisdr_write_reg(p, 0x09, 0x0e);
+        mirisdr_write_reg(p, 0x09, reg0);
+        mirisdr_write_reg(p, 0x09, reg5);
+    }
     mirisdr_write_reg(p, 0x09, reg2);
     mirisdr_write_reg(p, 0x09, regd);
+    if (p->usb_pid == 0x3020u)
+        mirisdr_write_reg(p, 0x09, 0x0e);
 
 //    if (band_select[i] != 0)
 //    {

@@ -144,7 +144,10 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
                 mirisdr_rspduo_load_firmware_and_reopen(dev) < 0) goto failed;
             return mirisdr_setup(out_dev, dev);
         }
-        if (libusb_set_interface_alt_setting(dev->dh, 0, 3) < 0) goto failed;
+        /* API 3.15 completes frontend GPIO setup, selects the bulk
+         * alternate, and only then performs its two readiness reads. */
+        if (libusb_set_interface_alt_setting(dev->dh, 0, 3) < 0 ||
+            mirisdr_rspduo_frontend_ready(dev) < 0) goto failed;
     }
 
     if (dev->usb_pid != 0x3020u) {
@@ -201,15 +204,36 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
                    bandwidth <= 7000000u ? MIRISDR_BW_7MHZ : MIRISDR_BW_8MHZ;
 
     int adc_result = mirisdr_adc_init(p);
-    int hard_result = mirisdr_set_hard(p);
+    uint32_t samples = mirisdr_rspduo_format_samples(rate);
+    int format_result = mirisdr_write_reg(p, 0x07,
+                                          mirisdr_rspduo_format_word(rate));
+    p->addr = samples + 2u;
+    format_result |= mirisdr_write_reg(p, 0x09, 0x200016u);
     int soft_result = mirisdr_set_soft(p);
     int gain_result = mirisdr_set_rspduo_gain(p, gain_reduction, lna_state);
-    int final_hard_result = mirisdr_set_hard(p);
-    int result = adc_result | hard_result | soft_result | gain_result |
-                 final_hard_result;
+
+    uint32_t reg3 = 0u, reg4 = 0u;
+    int hard_result = mirisdr_rspduo_pll_words(rate, &reg3, &reg4);
+    if (hard_result == 0) {
+        /* API 3.15 first clocks the converter through the adjacent format
+         * mode, pulses streaming twice, and then commits complex output. */
+        hard_result |= mirisdr_write_reg(p, 0x04, reg4);
+        hard_result |= mirisdr_write_reg(p, 0x03, reg3 + 0x1000u);
+        hard_result |= mirisdr_streaming_stop(p);
+        hard_result |= mirisdr_streaming_start(p);
+        hard_result |= mirisdr_streaming_stop(p);
+        hard_result |= mirisdr_streaming_start(p);
+        hard_result |= mirisdr_write_reg(p, 0x04, reg4);
+        hard_result |= mirisdr_write_reg(p, 0x03, reg3);
+    }
+    int final_gain_result = mirisdr_set_rspduo_gain(p, gain_reduction,
+                                                    lna_state);
+    int result = adc_result | format_result | soft_result | gain_result |
+                 hard_result | final_gain_result;
     if (result < 0) {
-        fprintf(stderr, "RSPduo configure failed adc=%d hard=%d soft=%d gain=%d final_hard=%d\n",
-                adc_result, hard_result, soft_result, gain_result, final_hard_result);
+        fprintf(stderr, "RSPduo configure failed adc=%d format=%d soft=%d gain=%d hard=%d final_gain=%d\n",
+                adc_result, format_result, soft_result, gain_result, hard_result,
+                final_gain_result);
     }
     return result < 0 ? -1 : 0;
 }
