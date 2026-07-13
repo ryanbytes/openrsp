@@ -33,7 +33,7 @@ if [ -e "$loader_path" ] && [ ! -L "$loader_path" ]; then
     exit 1
 fi
 
-mkdir -p "$prefix/lib" "$prefix/bin" "$prefix/include" /opt/homebrew/lib
+mkdir -p "$prefix/lib" "$prefix/bin" "$prefix/include" "$prefix/firmware" /opt/homebrew/lib
 install -m 0755 "$source_library" "$prefix/lib/libsdrplay_api.so.3.15"
 install -m 0755 "$source_daemon" "$prefix/bin/openrspd"
 install -m 0644 compat/sdrplay_api*.h "$prefix/include/"

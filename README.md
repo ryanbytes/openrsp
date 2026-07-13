@@ -84,18 +84,61 @@ The output is interleaved little-endian signed 16-bit IQ. RSPduo support is pres
 
 ## macOS replacement install
 
-Build first, uninstall SDRplay's proprietary package using its supplied uninstaller, then install OpenRSP:
+Build OpenRSP first. Before uninstalling SDRplay's package, extract the RSPduo
+firmware from the official service already installed on the same machine:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
+./build/openrsp-extract-firmware /Library/SDRplayAPI/3.15.1 \
+  --output /tmp/rspduo-3020.bin
+test "$(wc -c < /tmp/rspduo-3020.bin | tr -d ' ')" = 6115
+shasum -a 256 /tmp/rspduo-3020.bin
+```
+
+The extractor accepts either the versioned official install directory or the
+full path to its `bin/sdrplay_apiService` executable. It reads that file only;
+it does not launch the proprietary service. The extractor requires both known
+firmware signatures, rejects conflicting embedded copies, and writes exactly
+6,115 bytes.
+
+If the official package is downloaded but not installed, expand it and point
+the extractor at the service inside its payload:
+
+```sh
+pkgutil --expand-full /path/to/SDRplayAPI-macos-installer.pkg \
+  /tmp/sdrplay-api-expanded
+service=$(find /tmp/sdrplay-api-expanded -type f \
+  -name sdrplay_apiService -print -quit)
+test -n "$service"
+./build/openrsp-extract-firmware "$service" --output /tmp/rspduo-3020.bin
+test "$(wc -c < /tmp/rspduo-3020.bin | tr -d ' ')" = 6115
+```
+
+Keep the extracted firmware local. It is not distributed by OpenRSP and must
+not be committed to this repository. Obtain the official package yourself and
+comply with its license.
+
+Now uninstall SDRplay's proprietary package using its supplied uninstaller,
+install OpenRSP, and place the extracted firmware at the driver's default path:
+
+```sh
 sudo ./scripts/install-macos.sh
+sudo install -m 0644 /tmp/rspduo-3020.bin \
+  /Library/OpenRSP/0.1/firmware/rspduo-3020.bin
 ```
 
 The installer places the versioned library under `/Library/OpenRSP/0.1` and creates `/opt/homebrew/lib/libsdrplay_api.dylib`, which SDRTrunk checks on Apple Silicon. It refuses to proceed while `com.sdrplay.service` is loaded or when the loader path is a regular file.
 When given a library from a non-default build directory, it installs the daemon
 and reset utility from that same directory so build configurations cannot be
 mixed accidentally.
+
+The RSPduo backend reads `/Library/OpenRSP/0.1/firmware/rspduo-3020.bin` only
+when normal frontend initialization indicates a cold-boot firmware load is
+needed. Development runs can override that location with the
+`OPENRSP_RSPDUO_FIRMWARE` environment variable. A missing or incorrectly sized
+file makes cold-boot initialization fail explicitly; OpenRSP does not download
+firmware from the network or silently substitute another image.
 
 Some RSPduo USB states do not expose the factory serial descriptor. Set `OPENRSP_SERIAL` in the application environment to preserve a previously known stable identity; otherwise OpenRSP uses the physical USB port path. Do not commit a receiver serial to a public configuration.
 
