@@ -40,6 +40,7 @@ typedef struct {
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
     bool recovery_gain_pending;
+    int recovery_identity_status;
     uint32_t stream_sequence;
     bool configured;
     openrsp_radio_config config;
@@ -332,19 +333,80 @@ static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *c
     /* Keep this order identical to the direct openrsp-iq path.  That path is
      * the hardware gate: it streams at 2.048 MS/s, while the former combined
      * configure helper left endpoint 0x81 stalled before the first callback. */
-    if (mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY) != 0 ||
-        mirisdr_set_sample_rate(radio, config->sample_rate_hz) != 0 ||
-        mirisdr_set_center_freq(radio, config->center_frequency_hz) != 0 ||
-        mirisdr_set_sample_format(radio, "AUTO") != 0 ||
-        mirisdr_set_transfer(radio, "BULK") != 0 ||
-        mirisdr_set_if_freq(radio, (uint32_t)config->if_frequency_hz) != 0 ||
-        mirisdr_set_bandwidth(radio, config->bandwidth_hz) != 0 ||
-        mirisdr_set_tuner_gain_mode(radio, 1) != 0 ||
-        /* The direct hardware gate starts at this register state.  The API
-         * applies the caller's requested GR/LNA setting after first IQ. */
-        mirisdr_set_tuner_gain(radio, 102) != 0)
-        return OPENRSP_STATUS_IO_ERROR;
+#define OPENRSPD_CONFIG_STEP(name, expression) do { \
+        int step_result = (expression); \
+        if (step_result != 0) { \
+            fprintf(stderr, "OPENRSPD_CONFIGURE_STAGE stage=%s result=%d\n", \
+                    (name), step_result); \
+            (void)fflush(stderr); \
+            return OPENRSP_STATUS_IO_ERROR; \
+        } \
+    } while (0)
+    OPENRSPD_CONFIG_STEP("hw-flavour",
+                        mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY));
+    OPENRSPD_CONFIG_STEP("sample-rate",
+                        mirisdr_set_sample_rate(radio, config->sample_rate_hz));
+    OPENRSPD_CONFIG_STEP("center-frequency",
+                        mirisdr_set_center_freq(radio, config->center_frequency_hz));
+    OPENRSPD_CONFIG_STEP("sample-format", mirisdr_set_sample_format(radio, "AUTO"));
+    OPENRSPD_CONFIG_STEP("transfer", mirisdr_set_transfer(radio, "BULK"));
+    OPENRSPD_CONFIG_STEP("if-frequency",
+                        mirisdr_set_if_freq(radio, (uint32_t)config->if_frequency_hz));
+    OPENRSPD_CONFIG_STEP("bandwidth",
+                        mirisdr_set_bandwidth(radio, config->bandwidth_hz));
+    OPENRSPD_CONFIG_STEP("gain-mode", mirisdr_set_tuner_gain_mode(radio, 1));
+    /* The direct hardware gate starts at this register state.  The API
+     * applies the caller's requested GR/LNA setting after first IQ. */
+    OPENRSPD_CONFIG_STEP("initial-gain", mirisdr_set_tuner_gain(radio, 102));
+#undef OPENRSPD_CONFIG_STEP
     return OPENRSP_STATUS_OK;
+}
+
+static uint32_t configure_radio(daemon_state *state,
+                                const openrsp_radio_config *config,
+                                unsigned int max_attempts)
+{
+    if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
+    if (max_attempts == 0u) max_attempts = 1u;
+
+    for (unsigned int attempt = 1u; attempt <= max_attempts; ++attempt) {
+        if (!state->radio) {
+            uint32_t resolved_index = 0u;
+            if (resolve_acquired_device(state, &resolved_index) != 0) {
+                return OPENRSP_STATUS_BAD_REQUEST;
+            }
+            int open_result = mirisdr_open(&state->radio, resolved_index);
+            if (open_result != 0) {
+                fprintf(stderr,
+                        "OPENRSPD_CONFIGURE_STAGE stage=open result=%d attempt=%u/%u\n",
+                        open_result, attempt, max_attempts);
+                (void)fflush(stderr);
+            }
+        }
+
+        uint32_t status = state->radio ? apply_config(state->radio, config) :
+                                        OPENRSP_STATUS_IO_ERROR;
+        if (status == OPENRSP_STATUS_OK) {
+            if (attempt > 1u) {
+                fprintf(stderr, "OPENRSPD_CONFIGURE_RETRY status=recovered attempt=%u/%u\n",
+                        attempt, max_attempts);
+                (void)fflush(stderr);
+            }
+            return status;
+        }
+
+        if (state->radio) {
+            (void)mirisdr_close(state->radio);
+            state->radio = NULL;
+        }
+        if (attempt < max_attempts) {
+            fprintf(stderr, "OPENRSPD_CONFIGURE_RETRY status=waiting attempt=%u/%u\n",
+                    attempt, max_attempts);
+            (void)fflush(stderr);
+            (void)usleep(250000u);
+        }
+    }
+    return OPENRSP_STATUS_IO_ERROR;
 }
 
 static void recover_failed_stream(daemon_state *state)
@@ -366,17 +428,28 @@ static void recover_failed_stream(daemon_state *state)
     uint32_t resolved_index = 0u;
     int identity_result = resolve_acquired_device(state, &resolved_index);
     if (identity_result != 0) {
-        fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=%s\n",
-                identity_result == OPENRSP_IDENTITY_AMBIGUOUS ? "ambiguous" : "not-found");
-        (void)fflush(stderr);
+        if (state->recovery_identity_status != identity_result) {
+            fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=%s\n",
+                    identity_result == OPENRSP_IDENTITY_AMBIGUOUS ?
+                    "ambiguous" : "not-found");
+            (void)fflush(stderr);
+            state->recovery_identity_status = identity_result;
+        }
         return;
+    }
+
+    if (state->recovery_identity_status != 0) {
+        fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=resolved index=%u\n",
+                resolved_index);
+        (void)fflush(stderr);
+        state->recovery_identity_status = 0;
     }
 
     fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u\n",
             previous_index, resolved_index);
     (void)fflush(stderr);
-    if (mirisdr_open(&state->radio, resolved_index) != 0) return;
-    uint32_t status = apply_config(state->radio, &state->config);
+    state->acquired_identity.device_index = resolved_index;
+    uint32_t status = configure_radio(state, &state->config, 3u);
     if (status != OPENRSP_STATUS_OK) {
         (void)mirisdr_close(state->radio);
         state->radio = NULL;
@@ -574,28 +647,10 @@ static int serve_request(int descriptor, daemon_state *state)
                request.payload_bytes == sizeof(openrsp_radio_config) &&
                state->owner == descriptor) {
         const openrsp_radio_config *config = (const openrsp_radio_config *)payload;
-        bool opened_here = false;
-        if (!state->radio) {
-            uint32_t resolved_index = 0u;
-            if (resolve_acquired_device(state, &resolved_index) != 0) {
-                response.status = OPENRSP_STATUS_BAD_REQUEST;
-                log_config("CONFIGURE", descriptor, 0u, response.status, config);
-                goto send_response;
-            }
-            if (mirisdr_open(&state->radio, resolved_index) != 0) {
-                response.status = OPENRSP_STATUS_IO_ERROR;
-                log_config("CONFIGURE", descriptor, 0u, response.status, config);
-                goto send_response;
-            }
-            opened_here = true;
-        }
-        response.status = apply_config(state->radio, config);
+        response.status = configure_radio(state, config, 3u);
         if (response.status == OPENRSP_STATUS_OK) {
             state->config = *config;
             state->configured = true;
-        } else if (opened_here) {
-            (void)mirisdr_close(state->radio);
-            state->radio = NULL;
         }
         log_config("CONFIGURE", descriptor, 0u, response.status, config);
     } else if (request.type == OPENRSP_CMD_UPDATE &&
@@ -631,7 +686,6 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = state->owner >= 0 && state->owner != descriptor ?
                           OPENRSP_STATUS_BUSY : OPENRSP_STATUS_UNSUPPORTED;
     }
-send_response:
     if (write_control_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                             &response, sizeof(response)) != 0) return -1;
     if (request.type == OPENRSP_CMD_LIST && response.status == OPENRSP_STATUS_OK) {
