@@ -486,6 +486,11 @@ reboot. Each replacement lifecycle reported one initial reset, zero sample
 discontinuities, exact sample-rate/RF/gain acknowledgements, and zero device
 failures. This is recovery by a replacement daemon and new API session, not
 transparent continuation of the client connection that died with the daemon.
+The compatibility regression also kills its mock daemon, waits for
+`DeviceFailure`, tears down the failed session, starts a replacement daemon,
+and requires the same application process to Open, select, Init, receive IQ,
+Uninit, release, and Close again. This covers in-process API recreation in CI;
+the three physical daemon-kill tests used a fresh verifier process.
 
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,

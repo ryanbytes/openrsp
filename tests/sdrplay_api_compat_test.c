@@ -951,6 +951,44 @@ int main(void)
     assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_Close() == sdrplay_api_Success);
 
+    /* A process that received DeviceFailure must be able to tear down the dead
+     * session and create a working one after the daemon is replaced. */
+    (void)unlink(socket_path);
+    daemon = fork();
+    assert(daemon >= 0);
+    if (daemon == 0) _exit(mock_daemon(socket_path));
+    for (int attempt = 0; attempt < 100 && access(socket_path, F_OK) != 0; ++attempt)
+        delay_milliseconds(10);
+    assert(access(socket_path, F_OK) == 0);
+    assert(sdrplay_api_Open() == sdrplay_api_Success);
+    count = 0u;
+    assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) ==
+           sdrplay_api_Success);
+    assert(count == 4u);
+    assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
+    params = NULL;
+    assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==
+           sdrplay_api_Success);
+    params->devParams->fsFreq.fsHz = 2000000.0;
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
+    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_0_200;
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
+    params->rxChannelA->tunerParams.gain.gRdB = 42;
+    params->rxChannelA->tunerParams.gain.LNAstate = 0u;
+    params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    (void)pthread_mutex_lock(&metrics.lock);
+    metrics.validate_pointer_reuse = 0;
+    metrics.stream_i_pointer = NULL;
+    metrics.stream_q_pointer = NULL;
+    unsigned int daemon_restart_callback_baseline = metrics.callbacks;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
+           sdrplay_api_Success);
+    assert(wait_for_callbacks_above(&metrics, daemon_restart_callback_baseline) == 0);
+    assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
+    assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
+    assert(sdrplay_api_Close() == sdrplay_api_Success);
+
     if (daemon > 0) {
         (void)kill(daemon, SIGTERM);
         (void)waitpid(daemon, NULL, 0);
