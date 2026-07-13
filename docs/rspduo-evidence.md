@@ -321,6 +321,53 @@ five-second watchdog again remained quiet beyond its 25-second stall limit.
 Two cycles are useful regression evidence, not a soak or broad reliability
 claim.
 
+A third consecutive physical cycle again retained both PIDs, resumed IQ at
+sequence 304,405, restored 855.312333 MHz with GR 50/LNA state 0, and passed
+the same decoder-watchdog interval without failure or reallocation. All three
+cycles cold-booted the RSPduo firmware and returned to meaningful P25 activity
+without restarting SDRTrunk or `openrspd`. Extended cycling and soak time are
+still required.
+
+## SoapySDRPlay3 compatibility (2026-07-13)
+
+Upstream `pothosware/SoapySDRPlay3` commit
+`6cc31316b730503cee3e30906ff1975175a16400` compiled and linked against the
+OpenRSP public headers and compatibility library with no missing types,
+fields, constants, or symbols. `SoapySDRUtil --info` loaded that exact module
+and registered its `sdrplay` factory. A read-only `--find=driver=sdrplay`
+enumeration through the running OpenRSP daemon reported the physical unit as
+an RSPduo in single-tuner mode with its factory serial.
+
+The first live `SoapySDRUtil` receive test acquired that unit and produced IQ,
+but it also exposed two API-compatibility defects. The upstream module requests
+6 MS/s at a 1.620 MHz low IF and expects the API to shift and decimate that to
+2 MS/s. OpenRSP initially passed the low-IF samples through unchanged, so the
+utility reported about 4.48 MS/s for a 2 MS/s request. Adding a continuous
+complex mixer and FIR decimator corrected the API semantics, but the resulting
+rate was only about 1.49 MS/s. A temporary official 3.15.1 reference run on the
+same receiver established the comparison: 23,999,472 zero-IF samples and
+7,967,316 low-IF output samples in separate four-second runs, confirming that
+the expected rates are approximately 6 MS/s and 2 MS/s respectively.
+
+The remaining error was the RSPduo's 252-word USB-format register. The captured
+`0x05` value remains in use for previously tested rates, while the hardware-
+verified 6,000,000-sample tuple uses `0x94`. With that change, the same upstream
+Soapy module measured 1.98459 MS/s after startup convergence for a 2.00000 MS/s
+request during a bounded live run. The daemon logged first USB and socket IQ,
+and repeated successful gain updates from the active AGC path. No API callback
+drop, IQ-gap, device-failure, or stream-stop error was observed. This verifies
+single-tuner RSPduo receive streaming at that one rate and mode; it does not
+verify every advertised Soapy rate, manual gain control, antennas, dual-tuner
+operation, or the currently unsupported bias-tee/notch/external-reference
+controls. SDRTrunk was restarted afterward, rediscovered the RSPduo, restored
+the Wabash channel, and loaded JMBE normally.
+
+Ubuntu CI now checks out that pinned upstream commit, builds it against the
+current OpenRSP artifacts, loads the module, and requires the `sdrplay`
+factory. This verifies source/ABI integration but not Soapy stream behavior or
+future unpinned upstream changes. Hardware streaming remains a separate local
+gate because hosted CI has no receiver.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames

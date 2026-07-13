@@ -53,15 +53,19 @@ int main(int argc, char **argv)
     double sample_rate_hz = 2048000.0;
     double updated_sample_rate_hz = 0.0;
     unsigned int update_count = 1u;
+    long if_frequency_khz = 0;
     if (argc > 1) initial_rf_hz = strtod(argv[1], NULL);
     if (argc > 2) updated_rf_hz = strtod(argv[2], NULL);
     if (argc > 3) run_seconds = strtol(argv[3], NULL, 10);
     if (argc > 4) sample_rate_hz = strtod(argv[4], NULL);
     if (argc > 5) updated_sample_rate_hz = strtod(argv[5], NULL);
     if (argc > 6) update_count = (unsigned int)strtoul(argv[6], NULL, 10);
+    if (argc > 7) if_frequency_khz = strtol(argv[7], NULL, 10);
     if (initial_rf_hz <= 0.0 || updated_rf_hz <= 0.0 || run_seconds < 2 ||
-        sample_rate_hz <= 0.0 || update_count == 0u) {
-        fputs("usage: sdrplay-compat-stream-test [initial-rf-hz [updated-rf-hz [seconds [sample-rate-hz [updated-sample-rate-hz [update-count]]]]]]\n",
+        sample_rate_hz <= 0.0 || update_count == 0u ||
+        (if_frequency_khz != 0 && if_frequency_khz != 450 &&
+         if_frequency_khz != 1620 && if_frequency_khz != 2048)) {
+        fputs("usage: sdrplay-compat-stream-test [initial-rf-hz [updated-rf-hz [seconds [sample-rate-hz [updated-sample-rate-hz [update-count [if-frequency-khz]]]]]]]\n",
               stderr);
         return EXIT_FAILURE;
     }
@@ -87,7 +91,7 @@ int main(int argc, char **argv)
     params->devParams->mode = sdrplay_api_BULK;
     params->rxChannelA->tunerParams.rfFreq.rfHz = initial_rf_hz;
     params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_1_536;
-    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
+    params->rxChannelA->tunerParams.ifType = (sdrplay_api_If_kHzT)if_frequency_khz;
     params->rxChannelA->tunerParams.gain.gRdB = 40;
     params->rxChannelA->tunerParams.gain.LNAstate = 3;
     params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;

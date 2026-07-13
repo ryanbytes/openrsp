@@ -32,7 +32,8 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Device API locking | Recursive in-process lock plus daemon-owned cross-process lease with crash release |
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
-| Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for two consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
+| Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
+| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, open/configure, AGC activity, and 2 MS/s receive streaming are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |

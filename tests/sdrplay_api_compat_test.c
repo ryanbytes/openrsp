@@ -214,6 +214,7 @@ typedef struct {
     pthread_cond_t ready;
     unsigned int callbacks;
     unsigned int samples;
+    unsigned int last_samples;
     int rf_changed;
     int gain_changed;
     int validate_samples;
@@ -302,6 +303,7 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     }
     ++metrics->callbacks;
     metrics->samples += samples;
+    metrics->last_samples = samples;
     metrics->last_callback_end_sample = params->firstSampleNum + samples;
     metrics->rf_changed += params->rfChanged;
     metrics->gain_changed += params->grChanged;
@@ -628,6 +630,24 @@ int main(void)
         assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
         assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     }
+    /* Applications such as SoapySDRPlay3 set 6 MS/s and 1.620 MHz IF before
+     * Init and expect the API callback stream at 2 MS/s. */
+    params->devParams->fsFreq.fsHz = 6000000.0;
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_1_620;
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int low_if_callback_baseline = metrics.callbacks;
+    metrics.validate_samples = 0;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
+           sdrplay_api_Success);
+    assert(wait_for_callbacks_above(&metrics, low_if_callback_baseline) == 0);
+    assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.last_samples >= 340u && metrics.last_samples <= 342u);
+    metrics.validate_samples = 1;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    params->devParams->fsFreq.fsHz = 2000000.0;
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
     (void)pthread_mutex_lock(&metrics.lock);
     unsigned int callback_baseline = metrics.callbacks;
     metrics.validate_pointer_reuse = 1;

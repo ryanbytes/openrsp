@@ -17,6 +17,11 @@
 
 #include "hard.h"
 
+uint32_t mirisdr_rspduo_252_format_word(uint32_t rate)
+{
+	return rate == 6000000u ? 0x000094u : 0x000005u;
+}
+
 int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3_out, uint32_t *reg4_out)
 {
 	if (!reg3_out || !reg4_out || rate < MIRISDR_SAMPLE_RATE_MIN ||
@@ -103,7 +108,11 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 #if MIRISDR_DEBUG >= 1
 		fprintf( stderr, "format: 252\n");
 #endif
-		mirisdr_write_reg(p, 0x07, p->usb_pid == 0x3020u ? 0x000005 : 0x000094);
+		/* The live RSPduo delivers the full six-megasample stream with the
+		 * standard 252-word format value.  Retain the captured 0x05 value for
+		 * other rates until each tuple has its own hardware evidence. */
+		mirisdr_write_reg(p, 0x07, p->usb_pid == 0x3020u ?
+		                  mirisdr_rspduo_252_format_word(p->rate) : 0x000094);
 		p->addr = 252 + 2;
 		break;
 	case MIRISDR_FORMAT_336_S16:

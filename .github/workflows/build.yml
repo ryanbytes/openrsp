@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config libsoapysdr-dev soapysdr-tools
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew install libusb pkg-config
@@ -49,3 +49,16 @@ jobs:
           else
             test -f "$prefix/lib/libsdrplay_api.so.3.15"
           fi
+      - name: Verify SoapySDRPlay3 compatibility
+        if: runner.os == 'Linux'
+        run: |
+          git clone --filter=blob:none https://github.com/pothosware/SoapySDRPlay3.git "$RUNNER_TEMP/SoapySDRPlay3"
+          git -C "$RUNNER_TEMP/SoapySDRPlay3" checkout 6cc31316b730503cee3e30906ff1975175a16400
+          cmake -S "$RUNNER_TEMP/SoapySDRPlay3" -B "$RUNNER_TEMP/SoapySDRPlay3-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBSDRPLAY_FOUND=TRUE \
+            -DLIBSDRPLAY_INCLUDE_DIRS="$GITHUB_WORKSPACE/compat" \
+            -DLIBSDRPLAY_LIBRARIES="$GITHUB_WORKSPACE/build/libsdrplay_api.so.3.15"
+          cmake --build "$RUNNER_TEMP/SoapySDRPlay3-build" --parallel
+          SOAPY_SDR_PLUGIN_PATH="$RUNNER_TEMP/SoapySDRPlay3-build" SoapySDRUtil --info 2>&1 | tee "$RUNNER_TEMP/soapy-info.txt"
+          grep -q 'Available factories.*sdrplay' "$RUNNER_TEMP/soapy-info.txt"

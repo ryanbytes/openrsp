@@ -154,7 +154,8 @@ add_executable(openrsp-miri-probe tools/openrsp_miri_probe.c)
 target_link_libraries(openrsp-miri-probe PRIVATE openrsp_miri)
 
 if(UNIX)
-    add_library(sdrplay_api_compat SHARED compat/sdrplay_api_compat.c)
+    add_library(sdrplay_api_compat SHARED
+        compat/sdrplay_api_compat.c compat/low_if_dsp.c)
     target_compile_definitions(sdrplay_api_compat PRIVATE OPENRSP_SDRPLAY_API_BUILD=1)
     target_include_directories(sdrplay_api_compat PUBLIC compat)
     target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend Threads::Threads m)
@@ -178,6 +179,12 @@ if(UNIX)
     target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(sdrplay-api-compat-test PRIVATE -UNDEBUG)
     add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
+    add_executable(low-if-dsp-test tests/low_if_dsp_test.c compat/low_if_dsp.c)
+    target_include_directories(low-if-dsp-test PRIVATE compat)
+    target_link_libraries(low-if-dsp-test PRIVATE m)
+    target_compile_options(low-if-dsp-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME low-if-dsp COMMAND low-if-dsp-test)
 
     add_executable(sdrplay-api-cross-process-lock-test
         tests/sdrplay_api_cross_process_lock_test.c)

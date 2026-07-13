@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "sdrplay_api_compat.h"
 #include "daemon_backend.h"
+#include "low_if_dsp.h"
 
 
 #include <pthread.h>
@@ -97,6 +98,7 @@ typedef struct {
     atomic_int overload_event_pending;
     atomic_int overload_reported_state;
     atomic_uint decimation_factor;
+    openrsp_low_if_dsp low_if_dsp;
     unsigned int decimation_taps;
     unsigned int decimation_position;
     unsigned int decimation_phase;
@@ -830,6 +832,9 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
                                            &expected_pending, 1))
             emit_overload_event(device, next_overload);
     }
+    (void)pthread_mutex_lock(&decimation_lock);
+    samples = openrsp_low_if_process(&device->low_if_dsp, xi, xq, samples);
+    (void)pthread_mutex_unlock(&decimation_lock);
     samples = decimate_iq(device, xi, xq, samples);
     if (missing_frames != 0u)
         (void)atomic_fetch_add(&device->sample_number,
@@ -891,6 +896,7 @@ static void reset_parameters(void)
     atomic_init(&rspduo.overload_event_pending, 0);
     atomic_init(&rspduo.overload_reported_state, 0);
     atomic_init(&rspduo.decimation_factor, 1u);
+    (void)openrsp_low_if_configure(&rspduo.low_if_dsp, 2000000.0, 0);
     rspduo.params.devParams = &rspduo.dev_params;
     rspduo.params.rxChannelA = &rspduo.channel_a;
     rspduo.params.rxChannelB = &rspduo.channel_b;
@@ -1169,6 +1175,17 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     if (callbacks == NULL || callbacks->StreamACbFn == NULL) return sdrplay_api_InvalidParam;
     if (rspduo.initialized) return sdrplay_api_AlreadyInitialised;
     if (allocate_stream_buffers(&rspduo) != 0) return sdrplay_api_HwError;
+    const sdrplay_api_DecimationT *decimation = &rspduo.channel_a.ctrlParams.decimation;
+    unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
+    (void)pthread_mutex_lock(&decimation_lock);
+    int dsp_result = openrsp_low_if_configure(
+        &rspduo.low_if_dsp, rspduo.dev_params.fsFreq.fsHz,
+        (int)rspduo.channel_a.tunerParams.ifType * 1000);
+    (void)pthread_mutex_unlock(&decimation_lock);
+    if (dsp_result != 0 || configure_decimator(&rspduo, factor) != 0) {
+        free_stream_buffers(&rspduo);
+        return sdrplay_api_OutOfRange;
+    }
     int result = openrsp_daemon_backend_open(&rspduo.backend, &rspduo.identity);
     if (result < 0 || rspduo.backend == NULL) {
         free_stream_buffers(&rspduo);
@@ -1336,6 +1353,15 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
         const sdrplay_api_DecimationT *decimation = &rspduo.channel_a.ctrlParams.decimation;
         unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
         if (configure_decimator(&rspduo, factor) != 0) result = -1;
+    }
+    if (result >= 0 &&
+        (reason & (sdrplay_api_Update_Dev_Fs |
+                   sdrplay_api_Update_Tuner_IfType)) != 0u) {
+        (void)pthread_mutex_lock(&decimation_lock);
+        result = openrsp_low_if_configure(
+            &rspduo.low_if_dsp, rspduo.dev_params.fsFreq.fsHz,
+            (int)rspduo.channel_a.tunerParams.ifType * 1000);
+        (void)pthread_mutex_unlock(&decimation_lock);
     }
     if (result >= 0) {
         openrsp_radio_config config;
