@@ -56,6 +56,10 @@ int openrsp_client_connect(const char *socket_path, openrsp_client **out_client)
 void openrsp_client_close(openrsp_client *client)
 {
     if (!client) return;
+    /* close() from another thread does not reliably wake a blocking read() on
+     * Linux.  shutdown() terminates both directions first so the API reader
+     * thread can exit and be joined deterministically. */
+    (void)shutdown(client->descriptor, SHUT_RDWR);
     (void)close(client->descriptor);
     free(client);
 }
