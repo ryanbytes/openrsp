@@ -246,6 +246,12 @@ wait forever. A private-socket fixture uses a 100 ms test deadline and requires
 a silent peer to time out, `shutdown` to wake and join a blocked reader in under
 one second, and a truncated response payload to fail instead of being accepted.
 
+The inherited libmirisdr asynchronous cancellation state was a plain integer
+read and written by the daemon and USB event threads, which is a C data race.
+It is now atomic. A hardware-free fixture requires a running-to-canceling
+transition to be visible across threads and requires synchronous cancellation
+to return after the event-thread side marks the state inactive.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

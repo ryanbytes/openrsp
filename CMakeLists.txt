@@ -98,6 +98,14 @@ target_compile_options(rspduo-pll-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_compile_options(rspduo-pll-test PRIVATE -UNDEBUG)
 add_test(NAME rspduo-pll COMMAND rspduo-pll-test)
 
+add_executable(rspduo-async-state-test tests/rspduo_async_state_test.c)
+target_include_directories(rspduo-async-state-test PRIVATE
+    third_party/libmirisdr/include third_party/libmirisdr/src)
+target_link_libraries(rspduo-async-state-test PRIVATE openrsp_miri Threads::Threads)
+target_compile_options(rspduo-async-state-test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+add_test(NAME rspduo-async-state COMMAND rspduo-async-state-test)
+
 add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
 target_link_libraries(openrsp-iq PRIVATE openrsp_miri)
 

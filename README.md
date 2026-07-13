@@ -25,6 +25,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
 | Socket stalls and shutdown | Five-second send/receive deadlines; shutdown wakes blocked readers; timeout/short-frame fixtures |
+| USB cancellation state | Atomic cross-thread state with cancellation visibility fixture |
 | IQ loss indication | Daemon frame-sequence gaps set the API stream reset flag and advance sample numbering |
 | AGC gain events | Applied software-AGC changes emit API `GainChange` payloads |
 | Device API locking | Owner-aware recursive lock blocks competing enumeration/selection threads |

@@ -15,6 +15,16 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdatomic.h>
+
+enum {
+    MIRISDR_ASYNC_INACTIVE = 0,
+    MIRISDR_ASYNC_CANCELING,
+    MIRISDR_ASYNC_RUNNING,
+    MIRISDR_ASYNC_PAUSED,
+    MIRISDR_ASYNC_FAILED
+};
+
 typedef struct mirisdr_device {
     uint16_t            vid;
     uint16_t            pid;
@@ -83,13 +93,7 @@ struct mirisdr_dev {
     } transfer;
 
     /* async */
-    enum {
-        MIRISDR_ASYNC_INACTIVE = 0,
-        MIRISDR_ASYNC_CANCELING,
-        MIRISDR_ASYNC_RUNNING,
-        MIRISDR_ASYNC_PAUSED,
-        MIRISDR_ASYNC_FAILED
-    } async_status;
+    atomic_int          async_status;
     mirisdr_read_async_cb_t cb;
     void                *cb_ctx;
     size_t              xfer_buf_num;
