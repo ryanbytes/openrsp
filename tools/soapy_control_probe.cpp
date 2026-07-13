@@ -338,6 +338,31 @@ int main(int argc, char **argv)
             if (device->activateStream(stream_b) != 0)
                 throw std::runtime_error("dual activateStream failed");
             active_b = true;
+            const double frequencies[] = {frequency, frequency + 150000.0};
+            const double ifgr[] = {35.0, 55.0};
+            const double rfgr[] = {1.0, 5.0};
+            for (size_t channel = 0u; channel < 2u; ++channel) {
+                device->setGainMode(SOAPY_SDR_RX, channel, false);
+                device->setFrequency(SOAPY_SDR_RX, channel,
+                                     frequencies[channel]);
+                device->setGain(SOAPY_SDR_RX, channel, "IFGR", ifgr[channel]);
+                device->setGain(SOAPY_SDR_RX, channel, "RFGR", rfgr[channel]);
+            }
+            for (size_t channel = 0u; channel < 2u; ++channel) {
+                if (device->getGainMode(SOAPY_SDR_RX, channel) ||
+                    device->getFrequency(SOAPY_SDR_RX, channel) !=
+                        frequencies[channel] ||
+                    device->getGain(SOAPY_SDR_RX, channel, "IFGR") !=
+                        ifgr[channel] ||
+                    device->getGain(SOAPY_SDR_RX, channel, "RFGR") !=
+                        rfgr[channel])
+                    throw std::runtime_error(
+                        "dual channel did not retain independent controls");
+                std::cout << "dual controls channel=" << channel
+                          << " frequency=" << frequencies[channel]
+                          << " ifgr=" << ifgr[channel]
+                          << " rfgr=" << rfgr[channel] << '\n';
+            }
             SoapySDR::Stream *streams[] = {stream, stream_b};
             const DualMeasurement dual = measure_dual(device, streams);
             for (size_t channel = 0u; channel < 2u; ++channel) {

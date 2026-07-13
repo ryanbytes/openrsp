@@ -38,7 +38,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
-| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live single/dual RSPduo discovery, concurrent 2 MS/s A/B streaming, every advertised single-tuner rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
+| SoapySDRPlay3 compatibility | The pinned upstream module plus the included dual-control patch builds/loads against OpenRSP; live single/dual RSPduo discovery, independent A/B frequency and gain settings, concurrent 2 MS/s A/B streaming, every advertised single-tuner rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
@@ -98,6 +98,17 @@ RSPduo IFGR and RFGR, requires IQ to continue, verifies monotonic measured
 sample levels, and restores AGC. Stop other radio applications before running
 it:
 
+The pinned upstream SoapySDRPlay3 revision keeps only one channel-parameter
+pointer and sends dual-mode updates to tuner `Both`, so its channel 1 frequency
+and gain methods actually modify channel 0. Apply OpenRSP's small MIT-licensed
+adapter patch before building that revision:
+
+```sh
+git -C /path/to/SoapySDRPlay3 checkout 6cc31316b730503cee3e30906ff1975175a16400
+git -C /path/to/SoapySDRPlay3 apply \
+  /path/to/openrsp/contrib/soapysdrplay3-rspduo-dual-controls.patch
+```
+
 ```sh
 SOAPY_SDR_PLUGIN_PATH=/path/to/SoapySDRPlay3/build \
   ./build/openrsp-soapy-control-probe --serial YOUR_SERIAL
@@ -107,8 +118,9 @@ Use `--rates` to measure every rate advertised by the module, or `--rate SPS`
 to test one rate. These modes compare delivered IQ against wall-clock time and
 restore the normal 2 MS/s configuration and AGC after a successful run. Use
 `--frequency HZ` to run the same control test at a specific RF center.
-Use `--dual` to require the upstream module to discover `mode=DT`, expose two
-RX channels, and deliver live IQ concurrently through both Soapy streams.
+Use `--dual` to require the patched module to discover `mode=DT`, expose two
+RX channels, retain distinct live frequency/IFGR/RFGR settings, and deliver IQ
+concurrently through both Soapy streams.
 
 The standalone compatibility path has an independent verifier that does not
 load SoapySDR. With other radio applications stopped, it measures native API

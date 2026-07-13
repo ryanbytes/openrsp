@@ -1635,9 +1635,26 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
 {
     if (dev != &rspduo ||
         (rspduo.mode == sdrplay_api_RspDuoMode_Dual_Tuner ?
-         (tuner != sdrplay_api_Tuner_A && tuner != sdrplay_api_Tuner_B) :
+         (tuner != sdrplay_api_Tuner_A && tuner != sdrplay_api_Tuner_B &&
+          tuner != sdrplay_api_Tuner_Both) :
          tuner != rspduo.tuner)) return sdrplay_api_InvalidParam;
     if (!rspduo.initialized || rspduo.backend == NULL) return sdrplay_api_NotInitialised;
+    if (tuner == sdrplay_api_Tuner_Both) {
+        /* API 3.15.1 accepts Both in direct-dual mode and applies the current
+         * parameter block for each tuner.  Validate both sides before sending
+         * either update so a bad B parameter cannot leave only A changed. */
+        sdrplay_api_ErrT validation = validate_update(
+            &rspduo, sdrplay_api_Tuner_A, reason, extension);
+        if (validation == sdrplay_api_Success)
+            validation = validate_update(
+                &rspduo, sdrplay_api_Tuner_B, reason, extension);
+        if (validation != sdrplay_api_Success) return validation;
+        sdrplay_api_ErrT result = sdrplay_api_Update(
+            dev, sdrplay_api_Tuner_A, reason, extension);
+        if (result != sdrplay_api_Success) return result;
+        return sdrplay_api_Update(
+            dev, sdrplay_api_Tuner_B, reason, extension);
+    }
     sdrplay_api_ErrT validation = validate_update(&rspduo, tuner, reason, extension);
     if (validation != sdrplay_api_Success) return validation;
     int result = 0;

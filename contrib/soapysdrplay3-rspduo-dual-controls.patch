@@ -1,0 +1,127 @@
+diff --git a/Settings.cpp b/Settings.cpp
+index 4df5b52..9f48b71 100644
+--- a/Settings.cpp
++++ b/Settings.cpp
+@@ -41,6 +41,30 @@ std::set<std::string> &SoapySDRPlay_getClaimedSerials(void)
+    return serials;
+ }
+ 
++sdrplay_api_RxChannelParamsT *SoapySDRPlay::channelParams(const size_t channel) const
++{
++    if (device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
++    {
++        if (channel == 0) return deviceParams->rxChannelA;
++        if (channel == 1) return deviceParams->rxChannelB;
++        throw std::out_of_range("invalid RSPduo RX channel");
++    }
++    if (channel != 0) throw std::out_of_range("invalid RSP RX channel");
++    return chParams;
++}
++
++sdrplay_api_TunerSelectT SoapySDRPlay::channelTuner(const size_t channel) const
++{
++    if (device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
++    {
++        if (channel == 0) return sdrplay_api_Tuner_A;
++        if (channel == 1) return sdrplay_api_Tuner_B;
++        throw std::out_of_range("invalid RSPduo RX channel");
++    }
++    if (channel != 0) throw std::out_of_range("invalid RSP RX channel");
++    return device.tuner;
++}
++
+ SoapySDRPlay::SoapySDRPlay(const SoapySDR::Kwargs &args)
+ {
+     if (args.count("serial") == 0) throw std::runtime_error("no available RSP devices found");
+@@ -515,6 +539,8 @@ bool SoapySDRPlay::hasGainMode(const int direction, const size_t channel) const
+ void SoapySDRPlay::setGainMode(const int direction, const size_t channel, const bool automatic)
+ {
+     std::lock_guard <std::mutex> lock(_general_state_mutex);
++    sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
++    sdrplay_api_TunerSelectT tuner = channelTuner(channel);
+ 
+     sdrplay_api_AgcControlT agc_control = automatic ? sdrplay_api_AGC_CTRL_EN : sdrplay_api_AGC_DISABLE;
+     if (chParams->ctrlParams.agc.enable != agc_control)
+@@ -522,7 +548,7 @@ void SoapySDRPlay::setGainMode(const int direction, const size_t channel, const
+         chParams->ctrlParams.agc.enable = agc_control;
+         if (streamActive)
+         {
+-            sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
++            sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
+         }
+     }
+ }
+@@ -530,6 +556,7 @@ void SoapySDRPlay::setGainMode(const int direction, const size_t channel, const
+ bool SoapySDRPlay::getGainMode(const int direction, const size_t channel) const
+ {
+     std::lock_guard <std::mutex> lock(_general_state_mutex);
++    sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
+ 
+     return chParams->ctrlParams.agc.enable != sdrplay_api_AGC_DISABLE;
+ }
+@@ -537,6 +564,8 @@ bool SoapySDRPlay::getGainMode(const int direction, const size_t channel) const
+ void SoapySDRPlay::setGain(const int direction, const size_t channel, const std::string &name, const double value)
+ {
+     std::lock_guard <std::mutex> lock(_general_state_mutex);
++    sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
++    sdrplay_api_TunerSelectT tuner = channelTuner(channel);
+ 
+    bool doUpdate = false;
+ 
+@@ -566,7 +595,7 @@ void SoapySDRPlay::setGain(const int direction, const size_t channel, const std:
+    if ((doUpdate == true) && (streamActive))
+    {
+       gr_changed = 0;
+-      sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
++      sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
+       if (err != sdrplay_api_Success)
+       {
+          SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api_Update(Tuner_Gr) Error: %s", sdrplay_api_GetErrorString(err));
+@@ -589,6 +618,7 @@ void SoapySDRPlay::setGain(const int direction, const size_t channel, const std:
+ double SoapySDRPlay::getGain(const int direction, const size_t channel, const std::string &name) const
+ {
+     std::lock_guard <std::mutex> lock(_general_state_mutex);
++    sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
+ 
+    if (name == "IFGR")
+    {
+@@ -659,6 +689,8 @@ void SoapySDRPlay::setFrequency(const int direction,
+                                  const SoapySDR::Kwargs &args)
+ {
+    std::lock_guard <std::mutex> lock(_general_state_mutex);
++   sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
++   sdrplay_api_TunerSelectT tuner = channelTuner(channel);
+ 
+ 
+    if (direction == SOAPY_SDR_RX)
+@@ -677,7 +709,7 @@ void SoapySDRPlay::setFrequency(const int direction,
+             if (streamActive)
+             {
+                rf_changed = 0;
+-               sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
++               sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
+                if (err != sdrplay_api_Success)
+                {
+                   SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api_Update(Tuner_FrF) Error: %s", sdrplay_api_GetErrorString(err));
+@@ -719,6 +751,7 @@ double SoapySDRPlay::getFrequency(const int direction, const size_t channel) con
+ double SoapySDRPlay::getFrequency(const int direction, const size_t channel, const std::string &name) const
+ {
+     std::lock_guard <std::mutex> lock(_general_state_mutex);
++    sdrplay_api_RxChannelParamsT *chParams = channelParams(channel);
+ 
+     if (name == "RF")
+     {
+diff --git a/SoapySDRPlay.hpp b/SoapySDRPlay.hpp
+index f1e3f1a..dc4622a 100644
+--- a/SoapySDRPlay.hpp
++++ b/SoapySDRPlay.hpp
+@@ -272,6 +272,9 @@ private:
+                       double rspDuoSampleFreq,
+                       sdrplay_api_DeviceParamsT *thisDeviceParams);
+ 
++    sdrplay_api_RxChannelParamsT *channelParams(const size_t channel) const;
++    sdrplay_api_TunerSelectT channelTuner(const size_t channel) const;
++
+     void releaseDevice();
+ 
+ #ifdef SHOW_SERIAL_NUMBER_IN_MESSAGES

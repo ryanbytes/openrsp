@@ -54,6 +54,7 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/pothosware/SoapySDRPlay3.git "$RUNNER_TEMP/SoapySDRPlay3"
           git -C "$RUNNER_TEMP/SoapySDRPlay3" checkout 6cc31316b730503cee3e30906ff1975175a16400
+          git -C "$RUNNER_TEMP/SoapySDRPlay3" apply "$GITHUB_WORKSPACE/contrib/soapysdrplay3-rspduo-dual-controls.patch"
           cmake -S "$RUNNER_TEMP/SoapySDRPlay3" -B "$RUNNER_TEMP/SoapySDRPlay3-build" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLIBSDRPLAY_FOUND=TRUE \

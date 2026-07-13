@@ -35,6 +35,13 @@ an already selected operating mode. OpenRSP advertises both tuners and the
 direct single/dual modes it implements. It deliberately omits the official
 master capability until cross-process master/slave ownership exists, preventing
 SoapySDR and other clients from presenting a mode that cannot be selected.
+In direct-dual mode, `sdrplay_api_Update(..., Tuner_Both, ...)` validates both
+public channel blocks before issuing either hardware update, then applies the A
+and B configurations independently and routes acknowledgements to both stream
+callbacks. Calls addressed explicitly to A or B remain isolated to that tuner.
+The included SoapySDRPlay3 patch maps each Soapy channel to the corresponding
+parameter block and explicit API tuner; this is necessary because the pinned
+upstream adapter otherwise stores only the A pointer in dual mode.
 
 The core owns no unbounded wait. Every submitted transfer has one owner, one completion path, and a cancellation path. Device removal is a normal state transition. Callbacks never perform blocking control transfers. Recovery happens inside a device session, not through a machine-wide privileged service restart.
 

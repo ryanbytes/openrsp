@@ -742,7 +742,6 @@ static void run_dual_fixture(void)
     assert(wait_for_callbacks_above(&metrics.b, 0u) == 0);
     assert(metrics.a.last_samples > metrics.b.last_samples);
     assert(metrics.b.last_samples > 0u);
-    unsigned int decimated_a_samples = metrics.a.last_samples;
     channels[0]->tunerParams.rfFreq.rfHz = 853812500.0;
     channels[0]->tunerParams.gain.LNAstate = 2u;
     channels[1]->tunerParams.rfFreq.rfHz = 853962500.0;
@@ -762,6 +761,28 @@ static void run_dual_fixture(void)
     assert(wait_for_callbacks_above(&metrics.b, callbacks_b) == 0);
     assert(wait_for_update_flags(&metrics.b, 1, 1) == 0);
     assert(metrics.a.reset_callbacks == 1u && metrics.b.reset_callbacks == 1u);
+    unsigned int rf_changed_a = metrics.a.rf_changed;
+    unsigned int gr_changed_a = metrics.a.gain_changed;
+    unsigned int rf_changed_b = metrics.b.rf_changed;
+    unsigned int gr_changed_b = metrics.b.gain_changed;
+    channels[0]->tunerParams.rfFreq.rfHz = 853912500.0;
+    channels[0]->tunerParams.gain.LNAstate = 4u;
+    channels[1]->tunerParams.rfFreq.rfHz = 0.0;
+    channels[1]->tunerParams.gain.LNAstate = 6u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_Both,
+                              sdrplay_api_Update_Tuner_Frf |
+                              sdrplay_api_Update_Tuner_Gr, 0u) ==
+           sdrplay_api_OutOfRange);
+    channels[1]->tunerParams.rfFreq.rfHz = 854062500.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_Both,
+                              sdrplay_api_Update_Tuner_Frf |
+                              sdrplay_api_Update_Tuner_Gr, 0u) ==
+           sdrplay_api_Success);
+    assert(wait_for_update_flags(&metrics.a, (int)rf_changed_a + 1,
+                                 (int)gr_changed_a + 1) == 0);
+    assert(wait_for_update_flags(&metrics.b, (int)rf_changed_b + 1,
+                                 (int)gr_changed_b + 1) == 0);
+    unsigned int decimated_a_samples = metrics.a.last_samples;
     unsigned int samples_b_before_decimation = metrics.b.samples;
     channels[1]->ctrlParams.decimation.decimationFactor = 8u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,

@@ -366,6 +366,64 @@ static int run_dual_defaults(sdrplay_api_DeviceT *device)
     return finish(device, 0, status);
 }
 
+static int run_dual_both_updates(sdrplay_api_DeviceT *device)
+{
+    device->tuner = sdrplay_api_Tuner_Both;
+    device->rspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    device->rspDuoSampleFreq = 6000000.0;
+    sdrplay_api_ErrT status = sdrplay_api_SelectDevice(device);
+    sdrplay_api_DeviceParamsT *params = NULL;
+    if (status == sdrplay_api_Success)
+        status = sdrplay_api_GetDeviceParams(device->dev, &params);
+    if (status != sdrplay_api_Success || params == NULL ||
+        params->devParams == NULL || params->rxChannelA == NULL ||
+        params->rxChannelB == NULL)
+        return finish(device, 0, status);
+
+    params->devParams->fsFreq.fsHz = 6000000.0;
+    params->devParams->mode = sdrplay_api_BULK;
+    configure_channel(params->rxChannelA, 853712500.0, 40, 0u);
+    configure_channel(params->rxChannelB, 853862500.0, 55, 3u);
+    probe_metrics metrics = {0};
+    sdrplay_api_CallbackFnsT callbacks = {
+        .StreamACbFn = stream_a, .StreamBCbFn = stream_b,
+        .EventCbFn = event_callback
+    };
+    status = sdrplay_api_Init(device->dev, &callbacks, &metrics);
+    if (status != sdrplay_api_Success) return finish(device, 0, status);
+    delay_ms(1200);
+
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 853812500.0;
+    params->rxChannelA->tunerParams.gain.LNAstate = 2u;
+    sdrplay_api_ErrT a_only = sdrplay_api_Update(
+        device->dev, sdrplay_api_Tuner_Both,
+        sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Tuner_Gr, 0u);
+    delay_ms(400);
+    unsigned int a_rf_after_a = atomic_load(&metrics.rf_changed[0]);
+    unsigned int a_gr_after_a = atomic_load(&metrics.gr_changed[0]);
+    unsigned int b_rf_after_a = atomic_load(&metrics.rf_changed[1]);
+    unsigned int b_gr_after_a = atomic_load(&metrics.gr_changed[1]);
+
+    params->rxChannelB->tunerParams.rfFreq.rfHz = 853962500.0;
+    params->rxChannelB->tunerParams.gain.LNAstate = 5u;
+    sdrplay_api_ErrT b_only = sdrplay_api_Update(
+        device->dev, sdrplay_api_Tuner_Both,
+        sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Tuner_Gr, 0u);
+    delay_ms(400);
+    fprintf(stderr,
+            "MODE_DUAL_BOTH_UPDATE a_only=%d b_only=%d "
+            "a_rf_after_a=%u a_gr_after_a=%u b_rf_after_a=%u b_gr_after_a=%u "
+            "a_rf_final=%u a_gr_final=%u b_rf_final=%u b_gr_final=%u "
+            "a_samples=%llu b_samples=%llu\n",
+            a_only, b_only, a_rf_after_a, a_gr_after_a, b_rf_after_a,
+            b_gr_after_a, atomic_load(&metrics.rf_changed[0]),
+            atomic_load(&metrics.gr_changed[0]),
+            atomic_load(&metrics.rf_changed[1]),
+            atomic_load(&metrics.gr_changed[1]),
+            atomic_load(&metrics.samples[0]), atomic_load(&metrics.samples[1]));
+    return finish(device, 1, sdrplay_api_Success);
+}
+
 static int run_mode_swap(sdrplay_api_DeviceT *device)
 {
     device->tuner = sdrplay_api_Tuner_A;
@@ -507,6 +565,7 @@ int main(int argc, char **argv)
     if (argc != 2 || (strcmp(argv[1], "enumerate") != 0 &&
         strcmp(argv[1], "dual") != 0 &&
         strcmp(argv[1], "dual-defaults") != 0 &&
+        strcmp(argv[1], "dual-both-updates") != 0 &&
         strcmp(argv[1], "dual-controls") != 0 &&
         strcmp(argv[1], "dual-init") != 0 && strcmp(argv[1], "dual-a") != 0 &&
         strcmp(argv[1], "dual-b") != 0 && strcmp(argv[1], "swap") != 0 &&
@@ -514,7 +573,7 @@ int main(int argc, char **argv)
         strcmp(argv[1], "mode-swap") != 0 &&
         strcmp(argv[1], "mode-to-dual") != 0 &&
         strcmp(argv[1], "mode-to-single") != 0)) {
-        fprintf(stderr, "usage: %s enumerate|dual-defaults|dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
+        fprintf(stderr, "usage: %s enumerate|dual-defaults|dual-both-updates|dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
         return EXIT_FAILURE;
     }
     sdrplay_api_ErrT status = sdrplay_api_Open();
@@ -546,6 +605,8 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "swap") == 0) return run_swap(&devices[0]);
     if (strcmp(argv[1], "dual-defaults") == 0)
         return run_dual_defaults(&devices[0]);
+    if (strcmp(argv[1], "dual-both-updates") == 0)
+        return run_dual_both_updates(&devices[0]);
     if (strcmp(argv[1], "dual-rate-swap") == 0)
         return run_dual_rate_swap(&devices[0]);
     if (strcmp(argv[1], "mode-swap") == 0) return run_mode_swap(&devices[0]);

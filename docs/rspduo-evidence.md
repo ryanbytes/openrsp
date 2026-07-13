@@ -1011,3 +1011,41 @@ streams, and alternated reads for three seconds. Each stream delivered
 and released cleanly. This verifies Soapy discovery and concurrent A/B stream
 routing. It does not yet verify independent per-channel frequency/gain control
 through the upstream adapter's Soapy control surface.
+
+## Dual `Both` updates and independent Soapy controls (2026-07-13)
+
+A follow-up public-API reference probe tested the ambiguous tuner target used
+by SoapySDRPlay3. In initialized direct-dual mode, the probe changed only A's
+public RF/gain fields and called `sdrplay_api_Update` with tuner `Both`, then
+changed only B's fields and repeated the call. API 3.15.1 returned success both
+times. Each call reported `rfChanged` and `grChanged` through both Stream A and
+Stream B. The observable contract therefore treats `Both` as a two-tuner
+update; it does not mean “choose whichever block changed.” Both streams delivered
+5,805,072 samples during the bounded reference run and cleanup succeeded.
+
+OpenRSP now accepts the same `Both` target in direct-dual mode. It validates A
+and B before sending either command, then applies each tuner configuration and
+routes the corresponding update acknowledgement to its stream. A deterministic
+fixture first gives B an invalid frequency and proves the combined call fails
+before either update, then installs valid, distinct A/B RF and LNA settings and
+requires RF/gain acknowledgements on both callbacks. The OpenRSP hardware probe
+repeated the two `Both` calls successfully; both callbacks reported both update
+flags and each delivered 4,064,256 samples before clean shutdown.
+
+Source inspection of pinned upstream SoapySDRPlay3 commit
+`6cc31316b730503cee3e30906ff1975175a16400` found a separate application bug:
+the adapter stores one `chParams` pointer, selects A for dual mode, ignores the
+Soapy channel argument in frequency/gain methods, and passes tuner `Both` to
+the API. The compatibility library cannot infer the discarded channel number.
+The included MIT-licensed patch selects `rxChannelA`/tuner A for Soapy channel
+0 and `rxChannelB`/tuner B for channel 1. CI applies this patch to that exact
+upstream revision before compiling it.
+
+With the patched adapter and installed Release library, the hardware verifier
+set channel 0 to 853.7125 MHz, IFGR 35, RFGR 1 and channel 1 to 853.8625 MHz,
+IFGR 55, RFGR 5 after both streams were active. All six getters retained their
+independent values. The two streams then each delivered 5,935,104 samples in
+the same three-second interval (1.978 MS/s measured), with nonzero RMS, and
+closed cleanly. This verifies the complete Soapy-to-API-to-daemon live control
+path for independent A/B frequency and gain settings; it does not imply that
+unpatched upstream SoapySDRPlay3 has corrected its channel-selection bug.
