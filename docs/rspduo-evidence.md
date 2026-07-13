@@ -195,6 +195,27 @@ requires the full RSPduo VID/PID/serial tuple in its acquire request. Debug,
 Release, and ASan/UBSan test suites pass; this section does not claim a new live
 unplug/replug result.
 
+### Live protocol-v2 deployment
+
+Commit `e3d652b` passed the hosted macOS and Ubuntu jobs before deployment. The
+installed compatibility library and daemon matched the tested Release build at
+SHA-256 `feb2d497fc447646c3658f4105a2b43291456a03044d85dd43e166bee7f5c9c5`
+and `eceb6013a871078c8d623c1fa8830263702f3423cb3bcde9aaa8ffd21c0990a4`,
+respectively. The fresh daemon session reported protocol 2, discovered the
+RSPduo by factory serial, configured 10 MSPS at GR 50/LNA 0, delivered its first
+65,536-byte USB and socket IQ frames, applied the initial gain update, and
+accepted repeated RF updates without a recovery or I/O error.
+
+SDRTrunk's live tuner view then showed the RSPduo as the control tuner centered
+at 855.01250 MHz with eight locked P25 channels. The eight listed RSPduo-backed
+channels included six control channels and two active traffic channels, with
+live signal and frequency-error measurements. The session also accumulated
+successful SAFE-T, Wabash, Somerset, and Howard County upload counts. The only
+other active tuner was an RTL receiver at 155 MHz, so the displayed 800 MHz P25
+chains were specifically allocated to the RSPduo. This proves post-deployment
+streaming, tuning, gain application, and live P25 use; stable-identity recovery
+after a new physical replug remains unverified.
+
 ## API update-reason audit (2026-07-12)
 
 The public API 3.15 update-reason surface was compared with SDRplay's published
