@@ -90,6 +90,10 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
     }
 
     hw_switch_freq_plan_t switch_plan = hw_switch_freq_plan[(int) p->hw_flavour][i-1];
+    if (p->usb_pid == 0x3020u && p->rspduo_tuner == 1u &&
+        switch_plan.mode == MIRISDR_MODE_AM)
+        switch_plan.am_port = p->rspduo_am_port == 1u ?
+                              MIRISDR_AM_PORT1 : MIRISDR_AM_PORT2;
 
 #if MIRISDR_DEBUG >= 1
     fprintf(stderr, "mirisdr_set_soft: i:%d flavour:%d flow:%u mode:%d up:%d port:%d lo:%d\n",

@@ -500,6 +500,8 @@ static void fill_radio_config_tuner(const compat_device_context *device,
     config->rf_notch_enabled = channel->rspDuoTunerParams.rfNotchEnable;
     config->dab_notch_enabled = channel->rspDuoTunerParams.rfDabNotchEnable;
     config->external_reference_enabled = device->dev_params.rspDuoParams.extRefOutputEn;
+    config->am_port_select = channel->rspDuoTunerParams.tuner1AmPortSel;
+    config->am_notch_enabled = channel->rspDuoTunerParams.tuner1AmNotchEnable;
 }
 
 static void fill_radio_config(const compat_device_context *device,
@@ -515,6 +517,9 @@ static uint32_t enabled_rspduo_control_flags(const openrsp_radio_config *config)
     if (config->rf_notch_enabled != 0u) flags |= OPENRSP_CHANGE_RF_NOTCH;
     if (config->dab_notch_enabled != 0u) flags |= OPENRSP_CHANGE_DAB_NOTCH;
     if (config->external_reference_enabled != 0u) flags |= OPENRSP_CHANGE_EXT_REF;
+    if (config->am_port_select == sdrplay_api_RspDuo_AMPORT_1)
+        flags |= OPENRSP_CHANGE_AM_PORT;
+    if (config->am_notch_enabled != 0u) flags |= OPENRSP_CHANGE_AM_NOTCH;
     return flags;
 }
 
@@ -536,6 +541,10 @@ static uint32_t protocol_change_flags(sdrplay_api_ReasonForUpdateT reason)
         flags |= OPENRSP_CHANGE_DAB_NOTCH;
     if ((reason & sdrplay_api_Update_RspDuo_ExtRefControl) != 0u)
         flags |= OPENRSP_CHANGE_EXT_REF;
+    if ((reason & sdrplay_api_Update_RspDuo_AmPortSelect) != 0u)
+        flags |= OPENRSP_CHANGE_AM_PORT;
+    if ((reason & sdrplay_api_Update_RspDuo_Tuner1AmNotchControl) != 0u)
+        flags |= OPENRSP_CHANGE_AM_NOTCH;
     return flags;
 }
 
@@ -554,22 +563,23 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
         sdrplay_api_Update_Rsp2_AntennaControl |
         sdrplay_api_Update_Rsp2_RfNotchControl |
         sdrplay_api_Update_Rsp2_ExtRefControl;
-    const uint32_t unsupported_duo_hardware =
-        sdrplay_api_Update_RspDuo_AmPortSelect |
-        sdrplay_api_Update_RspDuo_Tuner1AmNotchControl;
-
     if ((extension & ~0x7fu) != 0u) return sdrplay_api_InvalidParam;
     if (extension != sdrplay_api_Update_Ext1_None)
         return sdrplay_api_InvalidMode;
     if ((reason & other_models) != 0u) return sdrplay_api_HwVerError;
-    if ((reason & unsupported_duo_hardware) != 0u)
-        return sdrplay_api_InvalidMode;
+    if ((reason & (sdrplay_api_Update_RspDuo_AmPortSelect |
+                   sdrplay_api_Update_RspDuo_Tuner1AmNotchControl)) != 0u &&
+        tuner != sdrplay_api_Tuner_A)
+        return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_RspDuo_BiasTControl) != 0u &&
         tuner != sdrplay_api_Tuner_B)
         return sdrplay_api_InvalidParam;
     if (channel->rspDuoTunerParams.biasTEnable > 1u ||
         channel->rspDuoTunerParams.rfNotchEnable > 1u ||
         channel->rspDuoTunerParams.rfDabNotchEnable > 1u ||
+        (channel->rspDuoTunerParams.tuner1AmPortSel != sdrplay_api_RspDuo_AMPORT_1 &&
+         channel->rspDuoTunerParams.tuner1AmPortSel != sdrplay_api_RspDuo_AMPORT_2) ||
+        channel->rspDuoTunerParams.tuner1AmNotchEnable > 1u ||
         (device->dev_params.rspDuoParams.extRefOutputEn != 0 &&
          device->dev_params.rspDuoParams.extRefOutputEn != 1))
         return sdrplay_api_InvalidParam;
@@ -1082,6 +1092,8 @@ static void reset_parameters(void)
     rspduo.channel_a.ctrlParams.decimation.decimationFactor = 1;
     rspduo.channel_a.ctrlParams.agc.enable = sdrplay_api_AGC_CTRL_EN;
     rspduo.channel_a.ctrlParams.agc.setPoint_dBfs = -60;
+    rspduo.channel_a.rspDuoTunerParams.tuner1AmPortSel =
+        sdrplay_api_RspDuo_AMPORT_2;
     rspduo.channel_b = rspduo.channel_a;
 }
 

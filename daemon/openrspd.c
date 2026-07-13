@@ -268,7 +268,9 @@ static void describe_flags(uint32_t flags, char *buffer, size_t bytes)
         {OPENRSP_CHANGE_BIAS_TEE, "BIAS"},
         {OPENRSP_CHANGE_RF_NOTCH, "RF_NOTCH"},
         {OPENRSP_CHANGE_DAB_NOTCH, "DAB_NOTCH"},
-        {OPENRSP_CHANGE_EXT_REF, "EXT_REF"}
+        {OPENRSP_CHANGE_EXT_REF, "EXT_REF"},
+        {OPENRSP_CHANGE_AM_PORT, "AM_PORT"},
+        {OPENRSP_CHANGE_AM_NOTCH, "AM_NOTCH"}
     };
     size_t used = 0u;
     for (size_t index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
@@ -291,13 +293,14 @@ static void log_config(const char *operation, int descriptor, uint32_t flags,
     char flag_text[64];
     describe_flags(flags, flag_text, sizeof(flag_text));
     fprintf(stderr,
-            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d bias=%u rf_notch=%u dab_notch=%u ext_ref=%u\n",
+            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d bias=%u rf_notch=%u dab_notch=%u ext_ref=%u am_port=%u am_notch=%u\n",
             operation, descriptor, status, flag_text, config->sample_rate_hz,
             config->center_frequency_hz, config->bandwidth_hz,
             config->if_frequency_hz, config->gain_reduction_db,
             config->lna_state, config->agc_mode, config->agc_setpoint_dbfs,
             config->bias_tee_enabled, config->rf_notch_enabled,
-            config->dab_notch_enabled, config->external_reference_enabled);
+            config->dab_notch_enabled, config->external_reference_enabled,
+            config->am_port_select, config->am_notch_enabled);
     (void)fflush(stderr);
 }
 
@@ -367,7 +370,11 @@ static bool valid_config(const openrsp_radio_config *config)
            config->bias_tee_enabled <= 1u && config->rf_notch_enabled <= 1u &&
            config->dab_notch_enabled <= 1u &&
            config->external_reference_enabled <= 1u &&
+           config->am_port_select <= 1u &&
+           config->am_notch_enabled <= 1u &&
            !(config->tuner == OPENRSP_TUNER_A && config->bias_tee_enabled != 0u) &&
+           !(config->tuner == OPENRSP_TUNER_B &&
+             (config->am_port_select != 0u || config->am_notch_enabled != 0u)) &&
            (config->tuner == OPENRSP_TUNER_A || config->tuner == OPENRSP_TUNER_B);
 }
 
@@ -382,6 +389,10 @@ static unsigned int rspduo_control_flags(uint32_t flags)
         result |= MIRISDR_RSPDUO_CHANGE_DAB_NOTCH;
     if ((flags & OPENRSP_CHANGE_EXT_REF) != 0u)
         result |= MIRISDR_RSPDUO_CHANGE_EXT_REF;
+    if ((flags & OPENRSP_CHANGE_AM_PORT) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_AM_PORT;
+    if ((flags & OPENRSP_CHANGE_AM_NOTCH) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_AM_NOTCH;
     return result;
 }
 
@@ -389,12 +400,16 @@ static int set_rspduo_controls(mirisdr_dev_t *radio,
                                const openrsp_radio_config *config,
                                uint32_t flags)
 {
+    if (config->tuner == OPENRSP_TUNER_B)
+        flags &= ~(OPENRSP_CHANGE_AM_PORT | OPENRSP_CHANGE_AM_NOTCH);
     unsigned int control_flags = rspduo_control_flags(flags);
     if (control_flags == 0u) return 0;
     return mirisdr_set_rspduo_controls(
         radio, config->tuner, config->bias_tee_enabled,
         config->rf_notch_enabled, config->dab_notch_enabled,
-        config->external_reference_enabled, control_flags);
+        config->external_reference_enabled,
+        config->am_port_select != 0u ? 1u : 2u,
+        config->am_notch_enabled, control_flags);
 }
 
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
@@ -674,6 +689,9 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
     const openrsp_radio_config *next = &update->config;
     const openrsp_radio_config *old = &state->config;
     uint32_t flags = update->changed_flags;
+    if (next->tuner == OPENRSP_TUNER_B &&
+        (flags & (OPENRSP_CHANGE_AM_PORT | OPENRSP_CHANGE_AM_NOTCH)) != 0u)
+        return OPENRSP_STATUS_BAD_REQUEST;
     int result = 0;
     if (state->dual_mode) {
         if (next->tuner != OPENRSP_TUNER_A && next->tuner != OPENRSP_TUNER_B)

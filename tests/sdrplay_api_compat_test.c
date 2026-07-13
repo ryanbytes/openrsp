@@ -159,7 +159,13 @@ static int serve_client(int descriptor)
                 ((update->changed_flags & OPENRSP_CHANGE_DAB_NOTCH) != 0u &&
                  update->config.dab_notch_enabled != 1u) ||
                 ((update->changed_flags & OPENRSP_CHANGE_EXT_REF) != 0u &&
-                 update->config.external_reference_enabled != 1u);
+                 update->config.external_reference_enabled != 1u) ||
+                ((update->changed_flags & OPENRSP_CHANGE_AM_PORT) != 0u &&
+                 (update->config.tuner != OPENRSP_TUNER_A ||
+                  update->config.am_port_select != sdrplay_api_RspDuo_AMPORT_1)) ||
+                ((update->changed_flags & OPENRSP_CHANGE_AM_NOTCH) != 0u &&
+                 (update->config.tuner != OPENRSP_TUNER_A ||
+                  update->config.am_notch_enabled != 1u));
             const int reject_update =
                 update->config.center_frequency_hz == 123456789u || invalid_controls;
             if (invalid_controls) {
@@ -1040,6 +1046,13 @@ int main(void)
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_RspDuo_ExtRefControl, 0u) ==
            sdrplay_api_Success);
+    params->rxChannelA->rspDuoTunerParams.tuner1AmPortSel =
+        sdrplay_api_RspDuo_AMPORT_1;
+    params->rxChannelA->rspDuoTunerParams.tuner1AmNotchEnable = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_AmPortSelect |
+                              sdrplay_api_Update_RspDuo_Tuner1AmNotchControl,
+                              0u) == sdrplay_api_Success);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A, 0u,
                               0x80u) == sdrplay_api_InvalidParam);
 
@@ -1255,6 +1268,12 @@ int main(void)
                               sdrplay_api_Update_RspDuo_RfDabNotchControl |
                               sdrplay_api_Update_RspDuo_ExtRefControl, 0u) ==
            sdrplay_api_Success);
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
+                              sdrplay_api_Update_RspDuo_AmPortSelect, 0u) ==
+           sdrplay_api_OutOfRange);
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
+                              sdrplay_api_Update_RspDuo_Tuner1AmNotchControl,
+                              0u) == sdrplay_api_OutOfRange);
     active_tuner = sdrplay_api_Tuner_B;
     assert(sdrplay_api_SwapRspDuoActiveTuner(devices[0].dev, &active_tuner,
                                               sdrplay_api_RspDuo_AMPORT_2) ==

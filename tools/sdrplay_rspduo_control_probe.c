@@ -43,14 +43,14 @@ static void delay_ms(long milliseconds)
     while (nanosleep(&delay, &delay) != 0) {}
 }
 
-static long initial_settle_ms(void)
+static long environment_delay_ms(const char *name, long fallback)
 {
-    const char *value = getenv("OPENRSP_CONTROL_PROBE_SETTLE_MS");
-    if (value == NULL || value[0] == '\0') return 500;
+    const char *value = getenv(name);
+    if (value == NULL || value[0] == '\0') return fallback;
     char *end = NULL;
     long milliseconds = strtol(value, &end, 10);
     return end != value && *end == '\0' && milliseconds >= 0 &&
-           milliseconds <= 30000 ? milliseconds : 500;
+           milliseconds <= 30000 ? milliseconds : fallback;
 }
 
 static int set_control(sdrplay_api_DeviceParamsT *params,
@@ -70,6 +70,13 @@ static int set_control(sdrplay_api_DeviceParamsT *params,
     } else if (strcmp(control, "extref") == 0) {
         params->devParams->rspDuoParams.extRefOutputEn = (int)enabled;
         *reason = sdrplay_api_Update_RspDuo_ExtRefControl;
+    } else if (strcmp(control, "am-port") == 0) {
+        channel->rspDuoTunerParams.tuner1AmPortSel = enabled != 0u ?
+            sdrplay_api_RspDuo_AMPORT_1 : sdrplay_api_RspDuo_AMPORT_2;
+        *reason = sdrplay_api_Update_RspDuo_AmPortSelect;
+    } else if (strcmp(control, "am-notch") == 0) {
+        channel->rspDuoTunerParams.tuner1AmNotchEnable = (unsigned char)enabled;
+        *reason = sdrplay_api_Update_RspDuo_Tuner1AmNotchControl;
     } else {
         return -1;
     }
@@ -93,7 +100,9 @@ static int cleanup(sdrplay_api_DeviceT *device, int initialized,
 int main(int argc, char **argv)
 {
     if (argc != 3 || (strcmp(argv[2], "A") != 0 && strcmp(argv[2], "B") != 0)) {
-        fprintf(stderr, "usage: %s bias|rf-notch|dab-notch|extref A|B\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s bias|rf-notch|dab-notch|extref|am-port|am-notch A|B\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
     sdrplay_api_TunerSelectT tuner = strcmp(argv[2], "B") == 0 ?
@@ -123,7 +132,9 @@ int main(int argc, char **argv)
 
     params->devParams->fsFreq.fsHz = 2048000.0;
     params->devParams->mode = sdrplay_api_BULK;
-    channel->tunerParams.rfFreq.rfHz = 853862500.0;
+    int am_control = strcmp(argv[1], "am-port") == 0 ||
+                     strcmp(argv[1], "am-notch") == 0;
+    channel->tunerParams.rfFreq.rfHz = am_control ? 10000000.0 : 853862500.0;
     channel->tunerParams.bwType = sdrplay_api_BW_1_536;
     channel->tunerParams.ifType = sdrplay_api_IF_Zero;
     channel->tunerParams.loMode = sdrplay_api_LO_Auto;
@@ -141,10 +152,10 @@ int main(int argc, char **argv)
     };
     status = sdrplay_api_Init(devices[0].dev, &callbacks, &metrics);
     if (status != sdrplay_api_Success) return cleanup(&devices[0], 0, status);
-    delay_ms(initial_settle_ms());
+    delay_ms(environment_delay_ms("OPENRSP_CONTROL_PROBE_SETTLE_MS", 500));
     (void)set_control(params, channel, argv[1], 1u, &reason);
     sdrplay_api_ErrT enable = sdrplay_api_Update(devices[0].dev, tuner, reason, 0u);
-    delay_ms(500);
+    delay_ms(environment_delay_ms("OPENRSP_CONTROL_PROBE_UPDATE_HOLD_MS", 500));
     (void)set_control(params, channel, argv[1], 0u, &reason);
     sdrplay_api_ErrT disable = sdrplay_api_Update(devices[0].dev, tuner, reason, 0u);
     delay_ms(500);
@@ -154,9 +165,11 @@ int main(int argc, char **argv)
             argv[1], argv[2], enable, disable,
             atomic_load(&metrics.samples), atomic_load(&metrics.callbacks),
             atomic_load(&metrics.resets));
-    sdrplay_api_ErrT expected = strcmp(argv[1], "bias") == 0 &&
-                                tuner == sdrplay_api_Tuner_A ?
-                                sdrplay_api_InvalidParam : sdrplay_api_Success;
+    int tuner_b_am_control = tuner == sdrplay_api_Tuner_B &&
+        (strcmp(argv[1], "am-port") == 0 || strcmp(argv[1], "am-notch") == 0);
+    sdrplay_api_ErrT expected = tuner_b_am_control ? sdrplay_api_OutOfRange :
+        (strcmp(argv[1], "bias") == 0 && tuner == sdrplay_api_Tuner_A ?
+         sdrplay_api_InvalidParam : sdrplay_api_Success);
     if (enable != expected || disable != expected ||
         atomic_load(&metrics.samples) == 0u) status = sdrplay_api_Fail;
     return cleanup(&devices[0], 1, status);

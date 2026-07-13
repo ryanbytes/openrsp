@@ -49,6 +49,8 @@
 #endif
 #endif
 
+int mirisdr_set_soft(mirisdr_dev_t *p);
+
 /* interní funkce - inline */
 #include "reg.c"
 #include "adc.c"
@@ -390,6 +392,7 @@ int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
     if (!(dev = malloc(sizeof(*dev)))) return -ENOMEM;
 
     memset(dev, 0, sizeof(*dev));
+    dev->rspduo_am_port = 2u;
 
     if (tuner != 1u && tuner != 2u && tuner != 3u) {
         free(dev);

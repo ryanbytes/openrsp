@@ -61,18 +61,46 @@ int mirisdr_set_rspduo_controls(mirisdr_dev_t *p, unsigned int tuner,
                                 unsigned int bias_tee, unsigned int rf_notch,
                                 unsigned int dab_notch,
                                 unsigned int external_reference,
+                                unsigned int am_port, unsigned int am_notch,
                                 unsigned int changed_flags)
 {
     if (!p || p->usb_pid != 0x3020u || (tuner != 1u && tuner != 2u) ||
         bias_tee > 1u || rf_notch > 1u || dab_notch > 1u ||
-        external_reference > 1u ||
+        external_reference > 1u || am_port < 1u || am_port > 2u ||
+        am_notch > 1u ||
         (tuner == 1u && bias_tee != 0u)) return -1;
+    if (tuner != 1u &&
+        (changed_flags & (MIRISDR_RSPDUO_CHANGE_AM_PORT |
+                          MIRISDR_RSPDUO_CHANGE_AM_NOTCH)) != 0u) return -1;
 
     unsigned int index = tuner - 1u;
     p->rspduo_bias_tee[index] = bias_tee;
     p->rspduo_rf_notch[index] = rf_notch;
     p->rspduo_dab_notch[index] = dab_notch;
     p->rspduo_external_reference = external_reference;
+    p->rspduo_am_port = am_port;
+    p->rspduo_am_notch = am_notch;
+
+    /* API 3.15 reprograms the tuner when the tuner-1 AM input changes.  The
+     * clean-room trace differs in register 0 bit 11 (0x04f610 for AM1 versus
+     * 0x04fe10 for AM2 at 10 MHz); mirisdr_set_soft derives the rest from the
+     * active frequency instead of replaying a frequency-specific capture. */
+    if ((changed_flags & MIRISDR_RSPDUO_CHANGE_AM_PORT) != 0u &&
+        mirisdr_set_soft(p) < 0) return -1;
+    /* On tuner A, API 3.15.1 emits this frequency-independent GPIO pulse
+     * sequence when the AM notch is enabled at 10 MHz.  Disabling it returns
+     * success without an observable USB control transfer. */
+    if ((changed_flags & MIRISDR_RSPDUO_CHANGE_AM_NOTCH) != 0u &&
+        am_notch != 0u) {
+        if (mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4a, 0x00df) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4a, 0x01ff) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x00ff) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x01ff) < 0)
+            return -1;
+    }
 
     /* Clean-room API 3.15.1 traces show active-low GPIO controls.  Coalesce
      * controls sharing a GPIO bank so a combined API update cannot restore a

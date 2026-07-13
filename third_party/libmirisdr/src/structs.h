@@ -124,6 +124,8 @@ struct mirisdr_dev {
     unsigned int        rspduo_rf_notch[2];
     unsigned int        rspduo_dab_notch[2];
     unsigned int        rspduo_external_reference;
+    unsigned int        rspduo_am_port;
+    unsigned int        rspduo_am_notch;
     mirisdr_rspduo_analytic_state analytic_state;
     mirisdr_rspduo_analytic_state analytic_state_b;
     int                 rspduo_dual;

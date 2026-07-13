@@ -841,3 +841,42 @@ spectrum analyzer, or frequency counter was attached, so the evidence proves
 API return parity, GPIO command parity, stream continuity, cleanup, and
 recovery—not bias voltage, notch attenuation, or reference-output amplitude and
 frequency.
+
+## RSPduo tuner-1 AM controls (2026-07-13)
+
+A public-API probe ran at 10 MHz, 2.048 MS/s, 1.536 MHz bandwidth, zero IF,
+GR 45, and LNA state 2. Against API 3.15.1, AM-port and tuner-1 AM-notch enable
+and disable returned success on tuner A. The same initialized calls on tuner B
+returned `OutOfRange`. Every bounded reference session continued streaming,
+reported one initial reset, and uninitialized, released, and closed cleanly.
+
+The official service was isolated from OpenRSP and observed only at the
+`libusb_control_transfer` argument boundary. AM-port selection reprogrammed the
+tuner and changed register 0 bit 11: the independently reconstructed register
+word was `0x04f610` for AM port 1 and `0x04fe10` for AM port 2 at the tested
+frequency. OpenRSP stores the selection and derives the complete register word
+from the active frequency instead of replaying a frequency-specific capture.
+Enabling the AM notch emitted the following GPIO pulse sequence: request
+`0x4b` value `0x12ff` three times, then `0x4a` values `0x00df` and `0x01ff`,
+then `0x4b` values `0x00ff` and `0x01ff`. Disabling returned success without an
+observable control transfer. No raw capture or receiver identity was retained.
+
+Protocol version 6 adds persistent AM-port and AM-notch fields plus distinct
+update flags. The compatibility library maps both API reasons, enforces the
+observed tuner-A-only behavior, and preserves the controls through the daemon
+configuration and recovery state. Deterministic fixtures verify flag mapping,
+combined A updates, and tuner-B rejection.
+
+The installed Release build was exercised on the physical RSPduo. Each tuner-A
+AM-port and AM-notch enable/disable session delivered 3,112,960 samples in
+2,470 callbacks with one reset and clean cleanup. Tuner-B sessions delivered
+the same stream volume while both updates returned `OutOfRange`. Killing the
+daemon during an active AM-notch session produced `DeviceFailure`; launchd
+started a new protocol-v6 daemon, and a fresh AM-port session reopened and
+streamed without a USB reset or physical replug. A subsequent dual-control run
+delivered 8,069,376 A samples and 8,064,000 B samples, independently
+acknowledged both RF/gain updates, and cleaned up successfully.
+
+No AM antenna, calibrated signal source, or spectrum analyzer was connected.
+These results verify API return behavior, register/GPIO command parity, stream
+continuity, cleanup, and recovery, not AM-port sensitivity or notch attenuation.
