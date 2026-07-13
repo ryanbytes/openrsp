@@ -53,6 +53,16 @@ static int list_client(const char *socket_path, uint32_t sequence)
     return result == 0 && response.status == OPENRSP_STATUS_OK ? 0 : -1;
 }
 
+static int command(openrsp_client *client, uint16_t type, uint32_t sequence,
+                   uint32_t expected_status)
+{
+    openrsp_response response;
+    if (openrsp_client_send(client, type, sequence, NULL, 0u) != 0 ||
+        receive_response(client, sequence, &response) != 0)
+        return -1;
+    return response.status == expected_status ? 0 : -1;
+}
+
 static int wait_for_daemon(const char *socket_path)
 {
     const struct timespec delay = {.tv_sec = 0, .tv_nsec = 50000000L};
@@ -94,14 +104,30 @@ int main(int argc, char **argv)
         result = 5;
     if (result == 0 && ping_client(socket_path, 43u) != 0) result = 6;
     if (result == 0 && list_client(socket_path, 44u) != 0) result = 7;
+
+    openrsp_client *contender = NULL;
+    if (result == 0 && command(held, OPENRSP_CMD_LOCK_API, 45u,
+                               OPENRSP_STATUS_OK) != 0) result = 8;
+    if (result == 0 && openrsp_client_connect(socket_path, &contender) != 0) result = 9;
+    if (result == 0 && command(contender, OPENRSP_CMD_LOCK_API, 46u,
+                               OPENRSP_STATUS_BUSY) != 0) result = 10;
+    if (result == 0 && ping_client(socket_path, 47u) != 0) result = 11;
+    if (result == 0 && list_client(socket_path, 48u) != 0) result = 12;
+    /* Closing without UNLOCK simulates an application crash. */
     openrsp_client_close(held);
+    held = NULL;
+    if (result == 0 && command(contender, OPENRSP_CMD_LOCK_API, 49u,
+                               OPENRSP_STATUS_OK) != 0) result = 13;
+    if (result == 0 && command(contender, OPENRSP_CMD_UNLOCK_API, 50u,
+                               OPENRSP_STATUS_OK) != 0) result = 14;
+    openrsp_client_close(contender);
 
     (void)kill(child, SIGTERM);
     int status = 0;
     (void)waitpid(child, &status, 0);
     (void)unlink(socket_path);
     if (result != 0) return result;
-    if (!WIFEXITED(status) && !WIFSIGNALED(status)) return 8;
+    if (!WIFEXITED(status) && !WIFSIGNALED(status)) return 15;
     puts("OPENRSPD_MULTI_CLIENT_OK");
     return 0;
 }

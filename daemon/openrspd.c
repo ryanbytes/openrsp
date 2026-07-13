@@ -25,6 +25,7 @@
 typedef struct {
     mirisdr_dev_t *radio;
     int owner;
+    int api_lock_owner;
     uint32_t acquired_device_index;
     atomic_bool streaming;
     bool stream_thread_started;
@@ -290,6 +291,15 @@ static void release_client(daemon_state *state, int descriptor)
     state->stream_result = 0;
 }
 
+static void release_api_lock(daemon_state *state, int descriptor,
+                             const char *reason)
+{
+    if (state->api_lock_owner != descriptor) return;
+    state->api_lock_owner = -1;
+    fprintf(stderr, "OPENRSPD_API_UNLOCK fd=%d reason=%s\n", descriptor, reason);
+    (void)fflush(stderr);
+}
+
 static void shutdown_radio(daemon_state *state)
 {
     if (!state->radio) return;
@@ -434,6 +444,19 @@ static int serve_request(int descriptor, daemon_state *state)
     } else if (request.type == OPENRSP_CMD_LIST && request.payload_bytes == 0u) {
         response.status = OPENRSP_STATUS_OK;
         response.changed_flags = mirisdr_get_device_count();
+    } else if (request.type == OPENRSP_CMD_LOCK_API && request.payload_bytes == 0u) {
+        if (state->api_lock_owner >= 0 && state->api_lock_owner != descriptor) {
+            response.status = OPENRSP_STATUS_BUSY;
+        } else {
+            state->api_lock_owner = descriptor;
+            response.status = OPENRSP_STATUS_OK;
+            fprintf(stderr, "OPENRSPD_API_LOCK fd=%d\n", descriptor);
+            (void)fflush(stderr);
+        }
+    } else if (request.type == OPENRSP_CMD_UNLOCK_API && request.payload_bytes == 0u &&
+               state->api_lock_owner == descriptor) {
+        release_api_lock(state, descriptor, "request");
+        response.status = OPENRSP_STATUS_OK;
     } else if (request.type == OPENRSP_CMD_ACQUIRE &&
                request.payload_bytes == sizeof(openrsp_acquire_request)) {
         const openrsp_acquire_request *acquire = (const openrsp_acquire_request *)payload;
@@ -555,6 +578,7 @@ static void remove_client(daemon_state *state, int clients[OPENRSPD_MAX_CLIENTS]
     int descriptor = clients[index];
     if (descriptor < 0) return;
     release_client(state, descriptor);
+    release_api_lock(state, descriptor, "disconnect");
     (void)close(descriptor);
     clients[index] = -1;
 }
@@ -632,6 +656,7 @@ int main(void)
 
     daemon_state state = {
         .owner = -1,
+        .api_lock_owner = -1,
         .write_lock = PTHREAD_MUTEX_INITIALIZER
     };
     atomic_init(&state.streaming, false);

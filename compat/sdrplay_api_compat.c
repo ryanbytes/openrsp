@@ -17,6 +17,7 @@ static pthread_mutex_t hardware_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t decimation_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t device_api_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local unsigned int device_api_lock_depth;
+static openrsp_daemon_api_lock *daemon_api_lock;
 
 #define OPENRSP_EVENT_QUEUE_CAPACITY 32u
 
@@ -778,6 +779,12 @@ sdrplay_api_ErrT sdrplay_api_LockDeviceApi(void)
             (void)pthread_mutex_unlock(&device_api_lock);
             return sdrplay_api_NotInitialised;
         }
+        int result = openrsp_daemon_api_lock_acquire(&daemon_api_lock);
+        if (result != 0) {
+            (void)pthread_mutex_unlock(&device_api_lock);
+            return result == -(int)OPENRSP_STATUS_BUSY ? sdrplay_api_Fail :
+                                                        sdrplay_api_ServiceNotResponding;
+        }
     }
     ++device_api_lock_depth;
     return sdrplay_api_Success;
@@ -788,8 +795,12 @@ sdrplay_api_ErrT sdrplay_api_UnlockDeviceApi(void)
     if (device_api_lock_depth == 0u)
         return atomic_load(&api_open) ? sdrplay_api_Fail : sdrplay_api_NotInitialised;
     --device_api_lock_depth;
-    if (device_api_lock_depth == 0u && pthread_mutex_unlock(&device_api_lock) != 0)
-        return sdrplay_api_Fail;
+    if (device_api_lock_depth == 0u) {
+        int result = openrsp_daemon_api_lock_release(daemon_api_lock);
+        daemon_api_lock = NULL;
+        if (pthread_mutex_unlock(&device_api_lock) != 0) return sdrplay_api_Fail;
+        if (result != 0) return sdrplay_api_ServiceNotResponding;
+    }
     return sdrplay_api_Success;
 }
 
@@ -804,7 +815,9 @@ sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices,
         return sdrplay_api_InvalidParam;
     }
 
-    int count = openrsp_daemon_backend_list(NULL, 0);
+    int count = device_api_lock_depth != 0u && daemon_api_lock != NULL ?
+                openrsp_daemon_api_lock_list(daemon_api_lock, NULL, 0) :
+                openrsp_daemon_backend_list(NULL, 0);
     if (count < 0) {
         return sdrplay_api_HwError;
     }
@@ -812,7 +825,10 @@ sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices,
     if (count > 0 && found == NULL) {
         return sdrplay_api_OutOfMemError;
     }
-    int discovered = openrsp_daemon_backend_list(found, (size_t)count);
+    int discovered = device_api_lock_depth != 0u && daemon_api_lock != NULL ?
+                     openrsp_daemon_api_lock_list(daemon_api_lock, found,
+                                                  (size_t)count) :
+                     openrsp_daemon_backend_list(found, (size_t)count);
     if (discovered < 0) {
         free(found);
         return sdrplay_api_HwError;

@@ -144,6 +144,9 @@ AddressSanitizer leak detection is unavailable, so the sanitizer run uses
 The documented pre-selection lifecycle is also exercised: debug logging accepts
 a null device handle before selection, while heartbeat disabling fails unless
 the calling thread holds the device API lock and no device has been selected.
+The device API lock is a daemon-owned, cross-process lease rather than only an
+in-process mutex. Contending clients receive a busy response, and disconnecting
+the owner releases the lease so an application crash cannot strand discovery.
 
 ## Live unplug/replug recovery (2026-07-12)
 

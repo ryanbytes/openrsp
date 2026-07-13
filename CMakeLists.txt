@@ -139,6 +139,16 @@ if(UNIX)
     target_compile_options(sdrplay-api-compat-test PRIVATE -UNDEBUG)
     add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
 
+    add_executable(sdrplay-api-cross-process-lock-test
+        tests/sdrplay_api_cross_process_lock_test.c)
+    target_include_directories(sdrplay-api-cross-process-lock-test PRIVATE include compat)
+    target_link_libraries(sdrplay-api-cross-process-lock-test PRIVATE
+        sdrplay_api_compat openrsp_client)
+    target_compile_options(sdrplay-api-cross-process-lock-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME sdrplay-api-cross-process-lock
+        COMMAND sdrplay-api-cross-process-lock-test $<TARGET_FILE:openrspd>)
+
     add_executable(sdrplay-abi-layout-test tools/sdrplay_abi_layout.c)
     target_include_directories(sdrplay-abi-layout-test PRIVATE compat)
     target_compile_options(sdrplay-abi-layout-test PRIVATE -Wall -Wextra -Wpedantic -Werror)

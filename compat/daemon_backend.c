@@ -32,49 +32,113 @@ struct openrsp_daemon_backend {
     void *callback_context;
 };
 
+struct openrsp_daemon_api_lock {
+    openrsp_client *client;
+    uint32_t next_sequence;
+};
+
+static int receive_response(openrsp_client *client, uint32_t sequence,
+                            openrsp_response *response)
+{
+    openrsp_message_header header;
+    if (openrsp_client_receive(client, &header, response, sizeof(*response)) != 0 ||
+        header.type != OPENRSP_MSG_RESPONSE || header.sequence != sequence ||
+        header.payload_bytes != sizeof(*response) || response->sequence != sequence)
+        return -1;
+    return 0;
+}
+
+static int request_on_client(openrsp_client *client, uint16_t command,
+                             uint32_t sequence, const void *payload,
+                             uint32_t payload_bytes)
+{
+    openrsp_response response;
+    if (openrsp_client_send(client, command, sequence, payload, payload_bytes) != 0 ||
+        receive_response(client, sequence, &response) != 0)
+        return -1;
+    return response.status == OPENRSP_STATUS_OK ? 0 : -(int)response.status;
+}
+
+static int list_on_client(openrsp_client *client, uint32_t sequence,
+                          openrsp_device_record *devices, size_t capacity)
+{
+    openrsp_response response;
+    if (openrsp_client_send(client, OPENRSP_CMD_LIST, sequence, NULL, 0u) != 0 ||
+        receive_response(client, sequence, &response) != 0 ||
+        response.status != OPENRSP_STATUS_OK)
+        return -1;
+    uint32_t count = response.changed_flags;
+    for (uint32_t index = 0; index < count; ++index) {
+        openrsp_message_header header;
+        openrsp_device_record record;
+        if (openrsp_client_receive(client, &header, &record, sizeof(record)) != 0 ||
+            header.type != OPENRSP_EVENT_DEVICE || header.sequence != sequence ||
+            header.payload_bytes != sizeof(record))
+            return -1;
+        if (devices && index < capacity) devices[index] = record;
+    }
+    return (int)count;
+}
+
 int openrsp_daemon_backend_list(openrsp_device_record *devices, size_t capacity)
 {
     openrsp_client *client = NULL;
     const char *socket_path = getenv("OPENRSPD_SOCKET");
-    if (openrsp_client_connect(socket_path, &client) != 0 ||
-        openrsp_client_send(client, OPENRSP_CMD_LIST, 1u, NULL, 0u) != 0) {
+    if (openrsp_client_connect(socket_path, &client) != 0) {
         openrsp_client_close(client);
         return -1;
     }
-    openrsp_message_header header;
-    openrsp_response response;
-    if (openrsp_client_receive(client, &header, &response, sizeof(response)) != 0 ||
-        header.type != OPENRSP_MSG_RESPONSE || response.status != OPENRSP_STATUS_OK) {
-        openrsp_client_close(client);
-        return -1;
-    }
-    uint32_t count = response.changed_flags;
-    for (uint32_t index = 0; index < count; ++index) {
-        openrsp_device_record record;
-        if (openrsp_client_receive(client, &header, &record, sizeof(record)) != 0 ||
-            header.type != OPENRSP_EVENT_DEVICE || header.payload_bytes != sizeof(record)) {
-            openrsp_client_close(client);
-            return -1;
-        }
-        if (devices && index < capacity) devices[index] = record;
-    }
+    int count = list_on_client(client, 1u, devices, capacity);
     openrsp_client_close(client);
-    return (int)count;
+    return count;
+}
+
+int openrsp_daemon_api_lock_acquire(openrsp_daemon_api_lock **out_lock)
+{
+    if (!out_lock) return -1;
+    *out_lock = NULL;
+    openrsp_daemon_api_lock *lock = calloc(1, sizeof(*lock));
+    if (!lock) return -1;
+    const char *socket_path = getenv("OPENRSPD_SOCKET");
+    if (openrsp_client_connect(socket_path, &lock->client) != 0) {
+        free(lock);
+        return -1;
+    }
+    lock->next_sequence = 1u;
+    int result = request_on_client(lock->client, OPENRSP_CMD_LOCK_API,
+                                   lock->next_sequence++, NULL, 0u);
+    if (result != 0) {
+        openrsp_client_close(lock->client);
+        free(lock);
+        return result;
+    }
+    *out_lock = lock;
+    return 0;
+}
+
+int openrsp_daemon_api_lock_list(openrsp_daemon_api_lock *lock,
+                                 openrsp_device_record *devices, size_t capacity)
+{
+    if (!lock || !lock->client) return -1;
+    return list_on_client(lock->client, lock->next_sequence++, devices, capacity);
+}
+
+int openrsp_daemon_api_lock_release(openrsp_daemon_api_lock *lock)
+{
+    if (!lock) return -1;
+    int result = lock->client ?
+        request_on_client(lock->client, OPENRSP_CMD_UNLOCK_API,
+                          lock->next_sequence++, NULL, 0u) : -1;
+    openrsp_client_close(lock->client);
+    free(lock);
+    return result;
 }
 
 static int direct_request(openrsp_daemon_backend *backend, uint16_t command,
                           const void *payload, uint32_t payload_bytes)
 {
     uint32_t sequence = atomic_fetch_add(&backend->next_sequence, 1u);
-    if (openrsp_client_send(backend->client, command, sequence, payload, payload_bytes) != 0)
-        return -1;
-    openrsp_message_header header;
-    openrsp_response response;
-    if (openrsp_client_receive(backend->client, &header, &response, sizeof(response)) != 0 ||
-        header.type != OPENRSP_MSG_RESPONSE || header.sequence != sequence ||
-        header.payload_bytes != sizeof(response) || response.sequence != sequence)
-        return -1;
-    return response.status == OPENRSP_STATUS_OK ? 0 : -(int)response.status;
+    return request_on_client(backend->client, command, sequence, payload, payload_bytes);
 }
 
 static void *reader_main(void *opaque)
