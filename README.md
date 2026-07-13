@@ -18,6 +18,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | IQ streaming | Direct and standalone API paths verified on hardware |
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
+| Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |

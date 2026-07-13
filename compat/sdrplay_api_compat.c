@@ -229,6 +229,21 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples, v
     free(xq);
 }
 
+static void emit_update_ack(compat_device_context *device, int fs_changed,
+                            int rf_changed, int gr_changed)
+{
+    short empty_sample = 0;
+    sdrplay_api_StreamCbParamsT params = {
+        .firstSampleNum = device->sample_number,
+        .grChanged = gr_changed,
+        .rfChanged = rf_changed,
+        .fsChanged = fs_changed,
+        .numSamples = 0u
+    };
+    device->callbacks.StreamACbFn(&empty_sample, &empty_sample, &params, 0u, 0u,
+                                  device->callback_context);
+}
+
 _Static_assert(sizeof(sdrplay_api_DeviceT) == 96, "DeviceT ABI mismatch");
 _Static_assert(sizeof(sdrplay_api_DevParamsT) == 64, "DevParamsT ABI mismatch");
 _Static_assert(sizeof(sdrplay_api_TunerParamsT) == 72, "TunerParamsT ABI mismatch");
@@ -485,7 +500,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
      * when the endpoint is demonstrably running. */
     fill_radio_config(&rspduo, &config);
     if (openrsp_daemon_backend_update(rspduo.backend, &config,
-                                      OPENRSP_CHANGE_GAIN) != 0) {
+                                      OPENRSP_CHANGE_GAIN) < 0) {
         (void)openrsp_daemon_backend_stop(rspduo.backend);
         atomic_store(&rspduo.agc_stop, 1);
         pthread_join(rspduo.agc_thread, NULL);
@@ -562,9 +577,13 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                 gain->gainVals.min = -18.0f;
             }
         }
-        if (fs_changed) atomic_fetch_add(&rspduo.pending_fs_changed, 1u);
-        if (rf_changed) atomic_fetch_add(&rspduo.pending_rf_changed, 1u);
-        if (gr_changed) atomic_fetch_add(&rspduo.pending_gr_changed, 1u);
+        if (result > 0) {
+            emit_update_ack(&rspduo, fs_changed, rf_changed, gr_changed);
+        } else {
+            if (fs_changed) atomic_fetch_add(&rspduo.pending_fs_changed, 1u);
+            if (rf_changed) atomic_fetch_add(&rspduo.pending_rf_changed, 1u);
+            if (gr_changed) atomic_fetch_add(&rspduo.pending_gr_changed, 1u);
+        }
     }
     pthread_mutex_unlock(&hardware_lock);
     return result < 0 ? sdrplay_api_HwError : sdrplay_api_Success;

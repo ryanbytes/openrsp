@@ -131,3 +131,23 @@ SDRplay API 3.15 header used for the audit.  Structure layout checks include
 alignment on the tested arm64 macOS ABI.  Unit tests and an ASan/UBSan build
 pass; Apple AddressSanitizer leak detection is unavailable, so the sanitizer
 run uses `detect_leaks=0` and must not be described as a leak check.
+
+## Live unplug/replug recovery (2026-07-12)
+
+The first live replug attempt exposed a stale-handle failure: libusb ended the
+bulk stream, the daemon retained the old device handle, and later updates
+returned an I/O error.  Reopening the re-enumerated device restored IQ, but a
+second attempt showed that a transient update error made SDRTrunk permanently
+discard the tuner.  Queuing the latest requested configuration avoided that
+error, but a third attempt exposed SDRTrunk's two-second wait for the matching
+RF-change callback while no IQ callbacks existed to carry the change flag.
+
+The final recovery path closes the failed handle, polls for the selected device
+index, reapplies the latest queued configuration, restarts the stream, restores
+gain after first IQ, and explicitly acknowledges recovery-queued update flags
+through a zero-sample API callback.  A fourth physical unplug/replug passed on
+the live scanner: OpenRSP and SDRTrunk retained their original PIDs, the daemon
+resumed 65,536-byte IQ frames and restored GR 50/LNA 0, SDRTrunk logged no
+terminal update failure or tuner removal, and decoding resumed.  This is one
+successful recovery cycle on one RSPduo; repeated-cycle and long-disconnect
+testing remain required before claiming general recovery stability.

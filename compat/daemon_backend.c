@@ -23,6 +23,7 @@ struct openrsp_daemon_backend {
     atomic_uint next_sequence;
     uint32_t waiting_sequence;
     uint32_t waiting_status;
+    uint32_t waiting_changed_flags;
     int response_received;
     atomic_int reader_failed;
     openrsp_daemon_iq_callback callback;
@@ -95,6 +96,7 @@ static void *reader_main(void *opaque)
             (void)pthread_mutex_lock(&backend->response_lock);
             if (response->sequence == backend->waiting_sequence) {
                 backend->waiting_status = response->status;
+                backend->waiting_changed_flags = response->changed_flags;
                 backend->response_received = 1;
                 (void)pthread_cond_signal(&backend->response_ready);
             }
@@ -115,6 +117,7 @@ static int async_request(openrsp_daemon_backend *backend, uint16_t command,
     uint32_t sequence = atomic_fetch_add(&backend->next_sequence, 1u);
     (void)pthread_mutex_lock(&backend->response_lock);
     backend->waiting_sequence = sequence;
+    backend->waiting_changed_flags = 0u;
     backend->response_received = 0;
     (void)pthread_mutex_unlock(&backend->response_lock);
     int result = openrsp_client_send(backend->client, command, sequence, payload, payload_bytes);
@@ -139,9 +142,13 @@ static int async_request(openrsp_daemon_backend *backend, uint16_t command,
             }
         }
         if (result == 0) {
-            result = backend->response_received && backend->waiting_status == OPENRSP_STATUS_OK ?
-                     0 : -(int)(backend->response_received ? backend->waiting_status :
-                                                        OPENRSP_STATUS_IO_ERROR);
+            if (backend->response_received && backend->waiting_status == OPENRSP_STATUS_OK) {
+                result = (backend->waiting_changed_flags &
+                          OPENRSP_RESPONSE_RECOVERY_QUEUED) != 0u ? 1 : 0;
+            } else {
+                result = -(int)(backend->response_received ? backend->waiting_status :
+                                                           OPENRSP_STATUS_IO_ERROR);
+            }
         }
         (void)pthread_mutex_unlock(&backend->response_lock);
     }

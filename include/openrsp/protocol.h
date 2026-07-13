@@ -84,6 +84,8 @@ typedef struct {
     uint32_t reserved;
 } openrsp_response;
 
+#define OPENRSP_RESPONSE_RECOVERY_QUEUED (1u << 31)
+
 typedef struct {
     uint32_t magic;
     uint16_t version;

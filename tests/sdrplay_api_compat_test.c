@@ -70,6 +70,14 @@ static int serve_client(int descriptor)
                 send_frame(descriptor, OPENRSP_EVENT_DEVICE, request.sequence,
                            &device, sizeof(device)) != 0)
                 return -1;
+        } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
+            const openrsp_response response = {
+                .status = OPENRSP_STATUS_OK,
+                .sequence = request.sequence,
+                .changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED
+            };
+            if (send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
+                           &response, sizeof(response)) != 0) return -1;
         } else {
             uint32_t status = request.type == OPENRSP_CMD_UPDATE && !streaming ?
                               OPENRSP_STATUS_BAD_REQUEST : OPENRSP_STATUS_OK;
@@ -126,7 +134,7 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     (void)reset;
     callback_metrics *metrics = opaque;
     assert(samples == params->numSamples);
-    assert(xi[0] == -1024 && xq[0] == -1023);
+    if (samples != 0u) assert(xi[0] == -1024 && xq[0] == -1023);
     (void)pthread_mutex_lock(&metrics->lock);
     ++metrics->callbacks;
     metrics->samples += samples;
@@ -207,6 +215,10 @@ int main(void)
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Tuner_Gr,
                               0u) == sdrplay_api_Success);
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.rf_changed == 1);
+    assert(metrics.gain_changed == 1);
+    (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_Close() == sdrplay_api_Success);

@@ -26,14 +26,16 @@ typedef struct {
     mirisdr_dev_t *radio;
     int owner;
     uint32_t acquired_device_index;
-    bool streaming;
+    atomic_bool streaming;
     bool stream_thread_started;
-    bool stream_error;
-    int stream_result;
+    atomic_bool stream_error;
+    atomic_int stream_result;
     pthread_t stream_thread;
     pthread_mutex_t write_lock;
     bool logged_usb_iq;
     bool logged_socket_iq;
+    atomic_bool first_iq_seen;
+    bool recovery_gain_pending;
     uint32_t stream_sequence;
     bool configured;
     openrsp_radio_config config;
@@ -115,6 +117,7 @@ static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque
     daemon_state *state = opaque;
     if (!state->logged_usb_iq) {
         state->logged_usb_iq = true;
+        atomic_store(&state->first_iq_seen, true);
         fprintf(stderr, "OPENRSPD_USB_IQ_FIRST bytes=%u\n", length);
         (void)fflush(stderr);
     }
@@ -280,13 +283,17 @@ static void shutdown_radio(daemon_state *state)
     state->stream_result = 0;
 }
 
+static bool valid_config(const openrsp_radio_config *config)
+{
+    return config && config->sample_rate_hz != 0u && config->center_frequency_hz != 0u &&
+           config->gain_reduction_db >= 20 && config->gain_reduction_db <= 59 &&
+           config->lna_state <= 9u && config->agc_mode >= 0 && config->agc_mode <= 4 &&
+           config->agc_setpoint_dbfs >= -60 && config->agc_setpoint_dbfs <= -20;
+}
+
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
 {
-    if (config->sample_rate_hz == 0u || config->center_frequency_hz == 0u)
-        return OPENRSP_STATUS_BAD_REQUEST;
-    if (config->agc_mode < 0 || config->agc_mode > 4 ||
-        config->agc_setpoint_dbfs < -60 || config->agc_setpoint_dbfs > -20)
-        return OPENRSP_STATUS_BAD_REQUEST;
+    if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
     /* Keep this order identical to the direct openrsp-iq path.  That path is
      * the hardware gate: it streams at 2.048 MS/s, while the former combined
      * configure helper left endpoint 0x81 stalled before the first callback. */
@@ -303,6 +310,61 @@ static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *c
         mirisdr_set_tuner_gain(radio, 102) != 0)
         return OPENRSP_STATUS_IO_ERROR;
     return OPENRSP_STATUS_OK;
+}
+
+static void recover_failed_stream(daemon_state *state)
+{
+    if (!atomic_load(&state->stream_error) || atomic_load(&state->streaming)) return;
+
+    if (state->stream_thread_started) {
+        (void)pthread_join(state->stream_thread, NULL);
+        state->stream_thread_started = false;
+    }
+    if (state->radio) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+    }
+    state->configured = false;
+    state->recovery_gain_pending = false;
+    if (state->owner < 0) return;
+    if (state->acquired_device_index >= mirisdr_get_device_count()) return;
+
+    fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN index=%u\n", state->acquired_device_index);
+    (void)fflush(stderr);
+    if (mirisdr_open(&state->radio, state->acquired_device_index) != 0) return;
+    uint32_t status = apply_config(state->radio, &state->config);
+    if (status != OPENRSP_STATUS_OK) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        return;
+    }
+    state->configured = true;
+    state->logged_usb_iq = false;
+    state->logged_socket_iq = false;
+    atomic_store(&state->first_iq_seen, false);
+    atomic_store(&state->stream_error, false);
+    atomic_store(&state->stream_result, 0);
+    atomic_store(&state->streaming, true);
+    if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
+        atomic_store(&state->streaming, false);
+        atomic_store(&state->stream_error, true);
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        return;
+    }
+    state->stream_thread_started = true;
+    state->recovery_gain_pending = true;
+}
+
+static void finish_recovery_gain(daemon_state *state)
+{
+    if (!state->recovery_gain_pending || !atomic_load(&state->first_iq_seen) ||
+        !state->radio) return;
+    int result = set_gain(state->radio, &state->config);
+    fprintf(stderr, "OPENRSPD_RECOVERY_GAIN status=%d gr=%d lna=%u\n",
+            result, state->config.gain_reduction_db, state->config.lna_state);
+    (void)fflush(stderr);
+    state->recovery_gain_pending = false;
 }
 
 static uint32_t apply_update(daemon_state *state, const openrsp_update_request *update)
@@ -405,9 +467,31 @@ static int serve_request(int descriptor, daemon_state *state)
         log_config("CONFIGURE", descriptor, 0u, response.status, config);
     } else if (request.type == OPENRSP_CMD_UPDATE &&
                request.payload_bytes == sizeof(openrsp_update_request) &&
-               state->owner == descriptor && state->radio && state->configured) {
+               state->owner == descriptor) {
         const openrsp_update_request *update = (const openrsp_update_request *)payload;
-        response.status = apply_update(state, update);
+        if (!valid_config(&update->config)) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
+        } else if (!state->radio || !state->configured ||
+                   atomic_load(&state->stream_error)) {
+            /* Preserve the application's newest state while a physically
+             * unplugged receiver is being reopened.  A transient update must
+             * not make API clients permanently discard a recoverable tuner. */
+            state->config = update->config;
+            response.status = OPENRSP_STATUS_OK;
+            response.changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED;
+        } else {
+            response.status = apply_update(state, update);
+            if (response.status == OPENRSP_STATUS_IO_ERROR) {
+                state->config = update->config;
+                atomic_store(&state->stream_error, true);
+                if (state->radio) (void)mirisdr_cancel_async(state->radio);
+                response.status = OPENRSP_STATUS_OK;
+                response.changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED;
+                fprintf(stderr, "OPENRSPD_RECOVERY_QUEUED flags=%u\n",
+                        update->changed_flags);
+                (void)fflush(stderr);
+            }
+        }
         log_config("UPDATE", descriptor, update->changed_flags, response.status,
                    &update->config);
     } else {
@@ -530,9 +614,15 @@ int main(void)
         .owner = -1,
         .write_lock = PTHREAD_MUTEX_INITIALIZER
     };
+    atomic_init(&state.streaming, false);
+    atomic_init(&state.stream_error, false);
+    atomic_init(&state.stream_result, 0);
+    atomic_init(&state.first_iq_seen, false);
     int clients[OPENRSPD_MAX_CLIENTS];
     for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
     while (running) {
+        recover_failed_stream(&state);
+        finish_recovery_gain(&state);
         struct pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];
         size_t client_index[OPENRSPD_MAX_CLIENTS + 1u];
         nfds_t count = 1u;
