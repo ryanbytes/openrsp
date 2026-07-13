@@ -357,10 +357,10 @@ request during a bounded live run. The daemon logged first USB and socket IQ,
 and repeated successful gain updates from the active AGC path. No API callback
 drop, IQ-gap, device-failure, or stream-stop error was observed. This verifies
 single-tuner RSPduo receive streaming at that one rate and mode; it does not
-verify every advertised Soapy rate, manual gain control, antennas, dual-tuner
-operation, or the currently unsupported bias-tee/notch/external-reference
-controls. SDRTrunk was restarted afterward, rediscovered the RSPduo, restored
-the Wabash channel, and loaded JMBE normally.
+verify every advertised Soapy rate, antennas, dual-tuner operation, or the
+currently unsupported bias-tee/notch/external-reference controls. SDRTrunk was
+restarted afterward, rediscovered the RSPduo, restored the Wabash channel, and
+loaded JMBE normally.
 
 Ubuntu CI now checks out that pinned upstream commit, builds it against the
 current OpenRSP artifacts, loads the module, and requires the `sdrplay`
@@ -379,6 +379,20 @@ to 1.98897 MS/s. The installed daemon logged 6 MS/s, 1.620 MHz IF, first IQ,
 and continuing AGC gain updates without a callback drop, IQ gap, device
 failure, or stream-stop error. SDRTrunk subsequently rediscovered the RSPduo
 and restored the Wabash channel and JMBE on the same installed artifacts.
+
+The installed artifacts then passed an independent Soapy control probe at
+101.1 MHz. The probe disabled AGC through `setGainMode`, applied IFGR/RFGR
+states 59/9, 40/5, and 20/0, required exact Soapy readback after every update,
+and consumed one million physical IQ samples at each state. AC RMS increased
+monotonically from 14.0094 to 24.0909 to 403.812, while the daemon recorded
+each corresponding `GAIN` update with the requested GR and LNA values. The
+probe restored AGC, consumed another 500,000 samples, and exited successfully.
+This proves both manual Soapy gain controls affected the physical receive path
+without interrupting streaming; it is not an absolute gain-calibration
+measurement. The reusable `openrsp-soapy-control-probe` is built automatically
+when SoapySDR development files are present. Debug, Release, and ASan/UBSan
+builds, all 13 automated tests, and compilation of that probe passed afterward.
+SDRTrunk then rediscovered the same RSPduo on the still-running daemon.
 
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,

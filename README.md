@@ -33,7 +33,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
-| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, open/configure, AGC activity, and 2 MS/s receive streaming are verified |
+| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, 2 MS/s receive, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
@@ -69,7 +69,22 @@ ctest --test-dir build --output-on-failure
 
 On macOS with Homebrew: `brew install cmake pkg-config libusb`.
 
-The probe is read-only. The official SDRplay service may prevent string-descriptor access; the tool reports that libusb error instead of stopping or detaching anything. Do not stop a production receiver just to run the probe.
+If SoapySDR development files are installed, the build also produces
+`openrsp-soapy-control-probe`. With the upstream SoapySDRPlay3 module on
+`SOAPY_SDR_PLUGIN_PATH`, this disruptive hardware test disables AGC, sweeps
+RSPduo IFGR and RFGR, requires IQ to continue, verifies monotonic measured
+sample levels, and restores AGC. Stop other radio applications before running
+it:
+
+```sh
+SOAPY_SDR_PLUGIN_PATH=/path/to/SoapySDRPlay3/build \
+  ./build/openrsp-soapy-control-probe --serial YOUR_SERIAL
+```
+
+The `openrsp-probe` USB descriptor probe is read-only. The official SDRplay
+service may prevent string-descriptor access; that tool reports the libusb
+error instead of stopping or detaching anything. Do not stop a production
+receiver just to run the descriptor probe.
 
 `openrsp-lifecycle` is disruptive. On the locally tested macOS/RSPduo system, claiming interface 0 caused SDRplay API clients to receive a physical-removal event and left the proprietary daemon unable to start another stream. Run it only on an offline test system after stopping all SDRplay clients and the proprietary daemon. Its two long confirmation flags are intentional.
 

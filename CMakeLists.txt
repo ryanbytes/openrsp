@@ -23,6 +23,9 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+if(CMAKE_CXX_COMPILER)
+    pkg_check_modules(SOAPYSDR QUIET IMPORTED_TARGET SoapySDR)
+endif()
 find_package(Threads REQUIRED)
 
 add_library(openrsp_identity src/identity.c)
@@ -215,6 +218,15 @@ if(UNIX)
         target_compile_options(sdrplay-header-cpp-test PRIVATE
             -Wall -Wextra -Wpedantic -Werror)
         add_test(NAME sdrplay-header-cpp COMMAND sdrplay-header-cpp-test)
+
+        if(SOAPYSDR_FOUND)
+            add_executable(openrsp-soapy-control-probe
+                tools/soapy_control_probe.cpp)
+            target_link_libraries(openrsp-soapy-control-probe PRIVATE
+                PkgConfig::SOAPYSDR)
+            target_compile_options(openrsp-soapy-control-probe PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
     endif()
 
     add_executable(sdrplay-compat-stream-test tools/sdrplay_compat_stream_test.c)
