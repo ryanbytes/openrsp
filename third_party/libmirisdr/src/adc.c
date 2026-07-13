@@ -19,11 +19,12 @@ int mirisdr_adc_init (mirisdr_dev_t *p) {
     if (!p) goto failed;
 
     /* inicializace - statická */
-    mirisdr_write_reg(p, 0x08, 0x006080); /* kernel driver */
+    if (p->usb_pid != 0x3020u) mirisdr_write_reg(p, 0x08, 0x006080); /* kernel driver */
     mirisdr_write_reg(p, 0x05, 0x00000c);
     mirisdr_write_reg(p, 0x00, 0x000200);
     mirisdr_write_reg(p, 0x02, 0x004801);
-    mirisdr_write_reg(p, 0x08, 0x00f380); /* kernel driver */
+    if (p->usb_pid == 0x3020u) mirisdr_write_reg(p, 0x09, 0x200016);
+    if (p->usb_pid != 0x3020u) mirisdr_write_reg(p, 0x08, 0x00f380); /* kernel driver */
 
     return 0;
 

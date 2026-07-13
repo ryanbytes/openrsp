@@ -16,7 +16,8 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPdx/RSP1B/RSPdxR2 identification | Awaiting hardware evidence |
 | Frequency, sample-rate, basic gain and bandwidth | Experimental Mirics implementation |
 | IQ streaming | Experimental; bulk capture verified on hardware |
-| API 3 ABI compatibility | Not implemented |
+| API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
+| API 3.15 `Init`/IQ callbacks/`Update` | Experimental; hardware callback client verified |
 
 ## Build and test
 
@@ -45,6 +46,20 @@ sudo ./build/openrsp-iq -f 100000000 -s 2048000 -T 1 -e 2 -m 252 capture.iq
 ```
 
 The output is interleaved little-endian signed 16-bit IQ. RSPduo support is presently tuner A only and the RF routing/calibration behavior still needs measurement.
+
+## macOS replacement install
+
+Build first, uninstall SDRplay's proprietary package using its supplied uninstaller, then install OpenRSP:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+sudo ./scripts/install-macos.sh
+```
+
+The installer places the versioned library under `/Library/OpenRSP/0.1` and creates `/opt/homebrew/lib/libsdrplay_api.dylib`, which SDRTrunk checks on Apple Silicon. It refuses to proceed while `com.sdrplay.service` is loaded or when the loader path is a regular file.
+
+Some RSPduo USB states do not expose the factory serial descriptor. Set `OPENRSP_SERIAL` in the application environment to preserve a previously known stable identity; otherwise OpenRSP uses the physical USB port path. Do not commit a receiver serial to a public configuration.
 
 ## Development path
 

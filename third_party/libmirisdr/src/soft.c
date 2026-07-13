@@ -62,6 +62,7 @@ hw_switch_freq_plan_t *hw_switch_freq_plan[2] = {
 
 void update_reg_8(mirisdr_dev_t *p)
 {
+    if (p->usb_pid == 0x3020u) return;
     mirisdr_write_reg(p, 0x08, p->reg8|(p->bias?(1<<(BIAS_GPIO+8)):0));
 }
 
@@ -272,31 +273,41 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
     /* side register, fine tuning */
     frac = (fvco % 96000000UL) / lo_div;
 
-    /* najdeme největší společný dělitel pro thresh a frac */
-    /* We find the greatest common divisor for thresh and frac */
-    for (a = thresh, b = frac; a != 0;)
-    {
-        c = a;
-        a = b % a;
-        b = c;
+    if (p->usb_pid == 0x3020u) {
+        uint64_t native_thresh = thresh;
+        thresh = 3000u;
+        frac = (frac * thresh) / native_thresh;
+        rfvco = (96000000UL * (n * thresh * 4096UL + frac * 4096UL)) /
+                (thresh * 4096UL * lo_div);
+        afc = ((p->freq + offset - rfvco) * thresh * 4096UL * lo_div) / 96000000UL;
+        if (afc > 0u) --afc;
+    } else {
+        /* najdeme největší společný dělitel pro thresh a frac */
+        /* We find the greatest common divisor for thresh and frac */
+        for (a = thresh, b = frac; a != 0;)
+        {
+            c = a;
+            a = b % a;
+            b = c;
+        }
+
+        /* dělíme */
+        /* divided */
+        thresh /= b;
+        frac /= b;
+
+        /* v této části musíme rozlišení snížit na maximální rozsah registru */
+        /* In this section we reduce the resolution to the maximum extent registry */
+        a = (thresh + 4094) / 4095;
+        thresh = (thresh + (a / 2)) / a;
+        frac = (frac + (a / 2)) / a;
+
+        rfvco=(96000000UL * (n * thresh * 4096UL + (frac * 4096UL))) / (thresh * 4096UL * lo_div);
+        if(p->freq + offset < rfvco)
+            frac --;
+        rfvco=(96000000UL * (n * thresh * 4096UL + (frac * 4096UL + afc))) / (thresh * 4096UL * lo_div);
+        afc = ((p->freq + offset - rfvco) * thresh * 4096UL * lo_div) /96000000UL;
     }
-
-    /* dělíme */
-    /* divided */
-    thresh /= b;
-    frac /= b;
-
-    /* v této části musíme rozlišení snížit na maximální rozsah registru */
-    /* In this section we reduce the resolution to the maximum extent registry */
-    a = (thresh + 4094) / 4095;
-    thresh = (thresh + (a / 2)) / a;
-    frac = (frac + (a / 2)) / a;
-
-    rfvco=(96000000UL * (n * thresh * 4096UL + (frac * 4096UL))) / (thresh * 4096UL * lo_div);
-    if(p->freq + offset < rfvco)
-        frac --;
-    rfvco=(96000000UL * (n * thresh * 4096UL + (frac * 4096UL + afc))) / (thresh * 4096UL * lo_div);
-    afc = ((p->freq + offset - rfvco) * thresh * 4096UL * lo_div) /96000000UL;
 
     reg3 |= (afc & 4095) << 4;
     reg5 |= (0xFFF & thresh) << 4;
@@ -327,6 +338,8 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
     //mirisdr_write_reg(p, 0x08, switch_plan.band_select_word);
     p->reg8=switch_plan.band_select_word;
     update_reg_8(p);
+
+    if (mirisdr_rspduo_route_tuner_a(p) < 0) return -1;
 
     mirisdr_write_reg(p, 0x09, 0x0e);
     mirisdr_write_reg(p, 0x09, reg3);
@@ -363,6 +376,10 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
 int mirisdr_set_center_freq(mirisdr_dev_t *p, uint32_t freq)
 {
     p->freq = freq;
+    if (p->usb_pid == 0x3020u) {
+        p->addr_valid = 0;
+        p->sync_loss_cnt = 0;
+    }
     int r = mirisdr_set_soft(p);
     r += mirisdr_set_gain(p); // restore gain
     return r;

@@ -109,11 +109,16 @@ MIRISDR_API int mirisdr_set_direct_sampling (mirisdr_dev_t *p, int on);
 /* transfer */
 MIRISDR_API int mirisdr_set_transfer (mirisdr_dev_t *p, const char *v);       /* extra */
 MIRISDR_API const char *mirisdr_get_transfer (mirisdr_dev_t *p);        /* extra */
+MIRISDR_API int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate,
+                                          uint32_t freq, uint32_t if_freq,
+                                          uint32_t bandwidth, int gain);
 
 /* gain */
 MIRISDR_API int mirisdr_set_gain (mirisdr_dev_t *p);                    /* extra */
 MIRISDR_API int mirisdr_get_tuner_gains (mirisdr_dev_t *dev, int *gains);
 MIRISDR_API int mirisdr_set_tuner_gain (mirisdr_dev_t *p, int gain);
+MIRISDR_API int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
+                                         unsigned int lna_state);
 MIRISDR_API int mirisdr_get_tuner_gain (mirisdr_dev_t *p);              /* extra */
 MIRISDR_API int mirisdr_set_tuner_gain_mode (mirisdr_dev_t *p, int mode);
 MIRISDR_API int mirisdr_get_tuner_gain_mode (mirisdr_dev_t *p);         /* extra */

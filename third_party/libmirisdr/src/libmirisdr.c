@@ -53,6 +53,8 @@
 #include "soft.c"
 #include "sync.c"
 
+static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev);
+
 int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
     int r;
 
@@ -88,17 +90,23 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
         goto failed;
     }
 
-    /* reset je potřeba, jinak občas zařízení odmítá komunikovat */
-    mirisdr_reset(dev);
+    /* Resetting an RSPduo invalidates its macOS USB identity often enough to
+     * require a physical replug.  The vendor sequence claims and initializes
+     * it in place, so preserve that behavior for PID 0x3020. */
+    if (dev->usb_pid != 0x3020u) mirisdr_reset(dev);
 
-    /* ještě je třeba vždy ukončit i streamování, které může být při otevření aktivní */
-    mirisdr_streaming_stop(dev);
-    mirisdr_adc_stop(dev);
+    /* Legacy devices need an eager stop. The reset/reopen RSPduo path starts
+     * from a fresh firmware generation and follows its own ordered sequence. */
+    if (dev->usb_pid != 0x3020u) {
+        mirisdr_streaming_stop(dev);
+        mirisdr_adc_stop(dev);
+    }
 
     /* inicializace tuneru */
     dev->freq = DEFAULT_FREQ;
     dev->rate = DEFAULT_RATE;
     dev->gain = DEFAULT_GAIN;
+    dev->bulk_buffer_size = dev->usb_pid == 0x3020u ? 65536u : DEFAULT_BULK_BUFFER;
     dev->band = MIRISDR_BAND_VHF; // matches always the default frequency of 90 MHz
 
     dev->gain_reduction_lna = 0;
@@ -119,10 +127,22 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
     dev->transfer = MIRISDR_TRANSFER_BULK;
 #endif
 
-    mirisdr_adc_init(dev);
-    mirisdr_set_hard(dev);
-    mirisdr_set_soft(dev);
-    mirisdr_set_gain(dev);
+    if (dev->usb_pid == 0x3020u) {
+        dev->transfer = MIRISDR_TRANSFER_BULK;
+        if (mirisdr_rspduo_frontend_init(dev) < 0) {
+            if (dev->firmware_attempted ||
+                mirisdr_rspduo_load_firmware_and_reopen(dev) < 0) goto failed;
+            return mirisdr_setup(out_dev, dev);
+        }
+        if (libusb_set_interface_alt_setting(dev->dh, 0, 3) < 0) goto failed;
+    }
+
+    if (dev->usb_pid != 0x3020u) {
+        mirisdr_adc_init(dev);
+        mirisdr_set_hard(dev);
+        mirisdr_set_soft(dev);
+        mirisdr_set_gain(dev);
+    }
 
     *out_dev = dev;
 
@@ -139,6 +159,157 @@ failed:
     }
 
     return -1;
+}
+
+int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
+                             uint32_t if_freq, uint32_t bandwidth, int gain)
+{
+    if (!p || p->usb_pid != 0x3020u) return -1;
+    if (if_freq != 0u && if_freq != 450000u && if_freq != 1620000u &&
+        if_freq != 2048000u) return -1;
+
+    p->rate = rate;
+    p->freq = freq;
+    p->format_auto = MIRISDR_FORMAT_AUTO_OFF;
+    p->format = rate <= 6048000u ? MIRISDR_FORMAT_252_S16 :
+                rate <= 8064000u ? MIRISDR_FORMAT_336_S16 :
+                rate <= 9216000u ? MIRISDR_FORMAT_384_S16 : MIRISDR_FORMAT_504_S16;
+    p->transfer = MIRISDR_TRANSFER_BULK;
+    p->if_freq = if_freq == 0u ? MIRISDR_IF_ZERO :
+                 if_freq == 450000u ? MIRISDR_IF_450KHZ :
+                 if_freq == 1620000u ? MIRISDR_IF_1620KHZ : MIRISDR_IF_2048KHZ;
+    p->bandwidth = bandwidth <= 200000u ? MIRISDR_BW_200KHZ :
+                   bandwidth <= 300000u ? MIRISDR_BW_300KHZ :
+                   bandwidth <= 600000u ? MIRISDR_BW_600KHZ :
+                   bandwidth <= 1536000u ? MIRISDR_BW_1536KHZ :
+                   bandwidth <= 5000000u ? MIRISDR_BW_5MHZ :
+                   bandwidth <= 6000000u ? MIRISDR_BW_6MHZ :
+                   bandwidth <= 7000000u ? MIRISDR_BW_7MHZ : MIRISDR_BW_8MHZ;
+
+    int adc_result = mirisdr_adc_init(p);
+    int hard_result = mirisdr_set_hard(p);
+    int soft_result = mirisdr_set_soft(p);
+    int gain_result = mirisdr_set_tuner_gain(p, gain);
+    int frontend_result = mirisdr_rspduo_finish_tuner_a(p);
+    int result = adc_result | hard_result | soft_result | gain_result | frontend_result;
+    if (result < 0) {
+        fprintf(stderr, "RSPduo configure failed adc=%d hard=%d soft=%d gain=%d frontend=%d\n",
+                adc_result, hard_result, soft_result, gain_result, frontend_result);
+    }
+    return result < 0 ? -1 : 0;
+}
+
+static int mirisdr_rspduo_reset_and_reopen(mirisdr_dev_t *dev)
+{
+    libusb_device *device = libusb_get_device(dev->dh);
+    uint8_t bus = libusb_get_bus_number(device);
+    uint8_t ports[8];
+    int port_count = libusb_get_port_numbers(device, ports, (int)sizeof(ports));
+    uint8_t old_address = libusb_get_device_address(device);
+    if (port_count < 0) return port_count;
+    int reset_result = libusb_reset_device(dev->dh);
+    if (reset_result < 0 && reset_result != LIBUSB_ERROR_NOT_FOUND) return reset_result;
+    libusb_close(dev->dh);
+    dev->dh = NULL;
+    libusb_exit(dev->ctx);
+    dev->ctx = NULL;
+    usleep(100000);
+    if (libusb_init(&dev->ctx) < 0) return LIBUSB_ERROR_OTHER;
+
+    for (unsigned int attempt = 0; attempt < 80u; ++attempt) {
+        libusb_device **devices = NULL;
+        ssize_t count = libusb_get_device_list(dev->ctx, &devices);
+        for (ssize_t i = 0; i < count; ++i) {
+            struct libusb_device_descriptor descriptor;
+            uint8_t candidate_ports[8];
+            int candidate_count = libusb_get_port_numbers(
+                devices[i], candidate_ports, (int)sizeof(candidate_ports));
+            if (libusb_get_device_descriptor(devices[i], &descriptor) == 0 &&
+                descriptor.idVendor == dev->usb_vid && descriptor.idProduct == dev->usb_pid &&
+                libusb_get_bus_number(devices[i]) == bus && candidate_count == port_count &&
+                memcmp(candidate_ports, ports, (size_t)port_count) == 0 &&
+                libusb_open(devices[i], &dev->dh) == 0) break;
+        }
+        libusb_free_device_list(devices, 1);
+        if (dev->dh != NULL) {
+            if (getenv("OPENRSP_TRACE_USB") != NULL) {
+                fprintf(stderr, "OPENRSP_USB reset result=%d old_address=%u new_address=%u attempt=%u\n",
+                        reset_result, old_address,
+                        libusb_get_device_address(libusb_get_device(dev->dh)), attempt);
+            }
+            usleep(1000000);
+            return 0;
+        }
+        usleep(25000);
+    }
+    return LIBUSB_ERROR_NO_DEVICE;
+}
+
+static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev)
+{
+    const char *path = getenv("OPENRSP_RSPDUO_FIRMWARE");
+    if (!path || path[0] == '\0')
+        path = "/Library/OpenRSP/0.1/firmware/rspduo-3020.bin";
+    unsigned char firmware[6115];
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "RSPduo firmware is required for cold boot: %s\n", path);
+        return -1;
+    }
+    size_t bytes = fread(firmware, 1, sizeof(firmware), file);
+    int extra = fgetc(file);
+    fclose(file);
+    if (bytes != sizeof(firmware) || extra != EOF) {
+        fprintf(stderr, "RSPduo firmware has invalid length: %s\n", path);
+        return -1;
+    }
+
+    libusb_device *device = libusb_get_device(dev->dh);
+    uint8_t bus = libusb_get_bus_number(device);
+    uint8_t ports[8];
+    int port_count = libusb_get_port_numbers(device, ports, (int)sizeof(ports));
+    if (port_count < 0) return port_count;
+    dev->firmware_attempted = 1;
+    int first = libusb_control_transfer(dev->dh, 0x40, 0x44, 0x0000, 0x0000,
+                                        firmware, 4096, CTRL_TIMEOUT);
+    int second = libusb_control_transfer(dev->dh, 0x40, 0x44, 0x1000, 0x0000,
+                                         firmware + 4096, 2019, CTRL_TIMEOUT);
+    if (first != 4096 || second != 2019) return -1;
+    if (libusb_control_transfer(dev->dh, 0x40, 0x41, 0x8008, 0x0000,
+                                NULL, 0, CTRL_TIMEOUT) < 0) return -1;
+    int reset = libusb_control_transfer(dev->dh, 0x40, 0x40, 0x0001, 0x0000,
+                                        NULL, 0, CTRL_TIMEOUT);
+    if (reset < 0 && reset != LIBUSB_ERROR_NO_DEVICE &&
+        reset != LIBUSB_ERROR_NOT_FOUND) return reset;
+
+    libusb_close(dev->dh);
+    dev->dh = NULL;
+    libusb_exit(dev->ctx);
+    dev->ctx = NULL;
+    usleep(250000);
+    if (libusb_init(&dev->ctx) < 0) return LIBUSB_ERROR_OTHER;
+    for (unsigned int attempt = 0; attempt < 80u; ++attempt) {
+        libusb_device **devices = NULL;
+        ssize_t count = libusb_get_device_list(dev->ctx, &devices);
+        for (ssize_t i = 0; i < count; ++i) {
+            struct libusb_device_descriptor descriptor;
+            uint8_t candidate_ports[8];
+            int candidate_count = libusb_get_port_numbers(
+                devices[i], candidate_ports, (int)sizeof(candidate_ports));
+            if (libusb_get_device_descriptor(devices[i], &descriptor) == 0 &&
+                descriptor.idVendor == dev->usb_vid && descriptor.idProduct == dev->usb_pid &&
+                libusb_get_bus_number(devices[i]) == bus && candidate_count == port_count &&
+                memcmp(candidate_ports, ports, (size_t)port_count) == 0 &&
+                libusb_open(devices[i], &dev->dh) == 0) break;
+        }
+        libusb_free_device_list(devices, 1);
+        if (dev->dh != NULL) {
+            usleep(250000);
+            return 0;
+        }
+        usleep(25000);
+    }
+    return LIBUSB_ERROR_NO_DEVICE;
 }
 
 int mirisdr_open (mirisdr_dev_t **p, uint32_t index) {
@@ -190,7 +361,15 @@ int mirisdr_open (mirisdr_dev_t **p, uint32_t index) {
         goto failed;
     }
 
+    dev->usb_vid = dd.idVendor;
+    dev->usb_pid = dd.idProduct;
+
     libusb_free_device_list(list, 1);
+    list = NULL;
+
+    if (dev->usb_pid == 0x3020u &&
+        getenv("OPENRSP_DISRUPTIVE_USB_RESET") != NULL &&
+        mirisdr_rspduo_reset_and_reopen(dev) < 0) goto failed;
 
     return mirisdr_setup(p, dev);
 
@@ -256,6 +435,16 @@ int mirisdr_close (mirisdr_dev_t *p) {
     /* deinicializace tuneru */
     if (p->dh)
     {
+        /* OpenRSP: leave the device in its idle interface state so another
+         * process can claim it without requiring a physical/USB reset. */
+        mirisdr_streaming_stop(p);
+        if (p->usb_pid == 0x3020u) {
+            usleep(110000);
+            (void)mirisdr_rspduo_shutdown(p);
+        } else {
+            mirisdr_adc_stop(p);
+        }
+        (void)libusb_set_interface_alt_setting(p->dh, 0, 0);
         libusb_release_interface(p->dh, 0);
 
 #ifdef DETACH_KERNEL_DRIVER
@@ -266,9 +455,7 @@ int mirisdr_close (mirisdr_dev_t *p) {
                 fprintf(stderr, "Reattaching kernel driver failed!\n");
         }
 #endif
-        if (p->async_status != MIRISDR_ASYNC_FAILED) {
-            libusb_close(p->dh);
-        }
+        libusb_close(p->dh);
     }
 
     if (p->ctx) libusb_exit(p->ctx);

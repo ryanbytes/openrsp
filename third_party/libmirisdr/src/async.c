@@ -99,6 +99,10 @@ static uint8_t *samples_realloc(mirisdr_dev_t *p, int size)
 static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
     size_t i;
     int len, bytes = 0;
+    int resubmitted = 0;
+    int transfer_length = xfer->actual_length;
+    unsigned char *transfer_buffer = xfer->buffer;
+    unsigned char *owned_buffer = NULL;
     static unsigned char *iso_packet_buf;
     mirisdr_dev_t *p = (mirisdr_dev_t*) xfer->user_data;
     uint8_t *samples = p->samples;
@@ -107,6 +111,15 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
 
     /* zpracujeme pouze kompletní přenos */
     if (xfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
+            transfer_length > 0) {
+            owned_buffer = malloc((size_t)transfer_length);
+            if (owned_buffer == NULL) goto failed;
+            memcpy(owned_buffer, xfer->buffer, (size_t)transfer_length);
+            transfer_buffer = owned_buffer;
+            if (libusb_submit_transfer(xfer) < 0) goto failed;
+            resubmitted = 1;
+        }
         /*
          * Určení správné velikosti bufferu, tato část musí být provedena
          * v jednom kroku, jinak může dojít ke změně formátu uprostřed procesu,
@@ -178,24 +191,24 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
         case LIBUSB_TRANSFER_TYPE_BULK:
             switch (p->format) {
             case MIRISDR_FORMAT_252_S16:
-                samples = samples_realloc(p, (DEFAULT_BULK_BUFFER / 1024) * 1008);
-                bytes = mirisdr_samples_convert_252_s16(p, xfer->buffer, samples, xfer->actual_length);
+                samples = samples_realloc(p, (p->bulk_buffer_size / 1024u) * 1008u);
+                bytes = mirisdr_samples_convert_252_s16(p, transfer_buffer, samples, transfer_length);
                 break;
             case MIRISDR_FORMAT_336_S16:
-                samples = samples_realloc(p, (DEFAULT_BULK_BUFFER / 1024) * 1344);
-                bytes = mirisdr_samples_convert_336_s16(p, xfer->buffer, samples, xfer->actual_length);
+                samples = samples_realloc(p, (p->bulk_buffer_size / 1024u) * 1344u);
+                bytes = mirisdr_samples_convert_336_s16(p, transfer_buffer, samples, transfer_length);
                 break;
             case MIRISDR_FORMAT_384_S16:
-                samples = samples_realloc(p, (DEFAULT_BULK_BUFFER / 1024) * 1536);
-                bytes = mirisdr_samples_convert_384_s16(p, xfer->buffer, samples, xfer->actual_length);
+                samples = samples_realloc(p, (p->bulk_buffer_size / 1024u) * 1536u);
+                bytes = mirisdr_samples_convert_384_s16(p, transfer_buffer, samples, transfer_length);
                 break;
             case MIRISDR_FORMAT_504_S16:
-                samples = samples_realloc(p, (DEFAULT_BULK_BUFFER / 1024) * 2016);
-                bytes = mirisdr_samples_convert_504_s16(p, xfer->buffer, samples, xfer->actual_length);
+                samples = samples_realloc(p, (p->bulk_buffer_size / 1024u) * 2016u);
+                bytes = mirisdr_samples_convert_504_s16(p, transfer_buffer, samples, transfer_length);
                 break;
             case MIRISDR_FORMAT_504_S8:
-                samples = samples_realloc(p, (DEFAULT_BULK_BUFFER / 1024) * 1008);
-                bytes = mirisdr_samples_convert_504_s8(p, xfer->buffer, samples, xfer->actual_length);
+                samples = samples_realloc(p, (p->bulk_buffer_size / 1024u) * 1008u);
+                bytes = mirisdr_samples_convert_504_s8(p, transfer_buffer, samples, transfer_length);
                 break;
             }
             break;
@@ -206,18 +219,20 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
 
         if (bytes > 0) mirisdr_feed_async(p, samples, bytes);
 
-        if (xfer->type == LIBUSB_TRANSFER_TYPE_BULK)
+        if (!resubmitted && xfer->type == LIBUSB_TRANSFER_TYPE_BULK)
         {
-            if(p->sync_loss_cnt > (int)p->xfer_buf_num)
+            if(p->usb_pid != 0x3020u && p->sync_loss_cnt > (int)p->xfer_buf_num)
             {
                 p->sync_loss_cnt = -p->xfer_buf_num +1;
-                xfer->length = DEFAULT_BULK_BUFFER - 512;
+                xfer->length = (int)p->bulk_buffer_size - 512;
                 fprintf(stderr,"libmirisdr: Sync lost. Trying to synchronize.\n");
-            }else
-                xfer->length = DEFAULT_BULK_BUFFER;
+            } else {
+                xfer->length = (int)p->bulk_buffer_size;
+                if (p->usb_pid == 0x3020u) p->sync_loss_cnt = 0;
+            }
         }
         /* pokračujeme dalším přenosem */
-        if (libusb_submit_transfer(xfer) < 0) {
+        if (!resubmitted && libusb_submit_transfer(xfer) < 0) {
             fprintf( stderr, "error re-submitting URB on device %u\n", p->index);
             goto failed;
         }
@@ -226,9 +241,11 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
         goto failed;
     }
 
+    free(owned_buffer);
     return;
 
 failed:
+    free(owned_buffer);
     mirisdr_cancel_async(p);
     /* stav failed má absolutní přednost */
     p->async_status = MIRISDR_ASYNC_FAILED;
@@ -317,7 +334,7 @@ static int mirisdr_async_alloc (mirisdr_dev_t *p) {
         for (i = 0; i < p->xfer_buf_num; i++) {
             switch (p->transfer) {
             case MIRISDR_TRANSFER_BULK:
-                p->xfer_buf[i] = malloc(DEFAULT_BULK_BUFFER);
+                p->xfer_buf[i] = malloc(p->bulk_buffer_size);
                 break;
             case MIRISDR_TRANSFER_ISOC:
                 p->xfer_buf[i] = malloc(DEFAULT_ISO_BUFFER * DEFAULT_ISO_BUFFERS * DEFAULT_ISO_PACKETS);
@@ -364,10 +381,33 @@ static int mirisdr_async_free (mirisdr_dev_t *p) {
     return 0;
 }
 
+/* Cancel every transfer that libusb still owns before freeing its storage.
+ * A transfer that already completed with an error returns NOT_FOUND from
+ * libusb_cancel_transfer and is safe to leave alone. */
+static int mirisdr_async_cancel_pending(mirisdr_dev_t *p)
+{
+    struct timeval timeout = {1, 0};
+    for (unsigned int pass = 0; pass < 8u; ++pass) {
+        int cancellation_requested = 0;
+        for (size_t i = 0; i < p->xfer_buf_num; ++i) {
+            if (!p->xfer || !p->xfer[i] ||
+                p->xfer[i]->status == LIBUSB_TRANSFER_CANCELLED) continue;
+            int result = libusb_cancel_transfer(p->xfer[i]);
+            if (result == 0) cancellation_requested = 1;
+            else if (result != LIBUSB_ERROR_NOT_FOUND) return result;
+        }
+        if (!cancellation_requested) return 0;
+        int result = libusb_handle_events_timeout(p->ctx, &timeout);
+        if (result < 0 && result != LIBUSB_ERROR_INTERRUPTED) return result;
+    }
+    return LIBUSB_ERROR_TIMEOUT;
+}
+
 /* spuštění async části */
 int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx, uint32_t num, uint32_t len) {
     size_t i;
-    int r, semafor;
+    int r;
+    int transfer_failed = 0;
     struct timeval tv = {1, 0};
 
     if (!p) goto failed;
@@ -393,13 +433,15 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
     }
 #endif
     p->sync_loss_cnt = 0;
+    p->addr_valid = 0;
     /* použití správného rozhraní které zasílá data - není kritické */
     switch (p->transfer) {
     case MIRISDR_TRANSFER_BULK:
 #if MIRISDR_DEBUG >= 1
         fprintf( stderr, ", transfer: bulk\n");
 #endif
-        if ((r = libusb_set_interface_alt_setting(p->dh, 0, 3)) < 0) {
+        if (p->usb_pid != 0x3020u &&
+            (r = libusb_set_interface_alt_setting(p->dh, 0, 3)) < 0) {
             fprintf( stderr, "failed to use alternate setting for Bulk mode on miri usb device %u with code %d\n", p->index, r);
         }
         break;
@@ -418,6 +460,14 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
 
     mirisdr_async_alloc(p);
 
+    /* The RSPduo firmware needs its bulk engine explicitly stopped and given
+     * time to drain after tuner configuration. The observed 3.15 service waits
+     * roughly 110 ms before submitting its eight 64 KiB transfers. */
+    if (p->usb_pid == 0x3020u) {
+        if (mirisdr_streaming_stop(p) < 0) goto failed_free;
+        usleep(110000);
+    }
+
     /* spustíme přenosy */
     for (i = 0; i < p->xfer_buf_num; i++) {
         switch (p->transfer) {
@@ -426,10 +476,10 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
                                       p->dh,
                                       0x81,
                                       p->xfer_buf[i],
-                                      DEFAULT_BULK_BUFFER,
+                                      (int)p->bulk_buffer_size,
                                       _libusb_callback,
                                       (void*) p,
-                                      DEFAULT_BULK_TIMEOUT);
+                                      p->usb_pid == 0x3020u ? 4000u : DEFAULT_BULK_TIMEOUT);
             break;
         case MIRISDR_TRANSFER_ISOC:
             libusb_fill_iso_transfer(p->xfer[i],
@@ -452,6 +502,7 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
 
 		if (r < 0) {
 			fprintf(stderr, "Failed to submit transfer %lu reason: %d\n", i, r);
+			(void)mirisdr_async_cancel_pending(p);
 			goto failed_free;
 		}
     }
@@ -470,33 +521,14 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
         }
 
         /* dochází k ukončení */
+        if (p->async_status == MIRISDR_ASYNC_FAILED) {
+            transfer_failed = 1;
+            p->async_status = MIRISDR_ASYNC_CANCELING;
+        }
         if (p->async_status == MIRISDR_ASYNC_CANCELING) {
-            if (!p->xfer) {
-                p->async_status = MIRISDR_ASYNC_INACTIVE;
-                break;
-            }
-
-            /* ukončíme všechny přenosy */
-            semafor = 1;
-            for (i = 0; i < p->xfer_buf_num; i++) {
-                if (!p->xfer[i]) continue;
-
-                /* pro isoc režim je completed i v případě chyb */
-                if (p->xfer[i]->status != LIBUSB_TRANSFER_CANCELLED) {
-                    libusb_cancel_transfer(p->xfer[i]);
-                    semafor = 0;
-                }
-            }
-
-            /* nedošlo k žádnému vynuceném ukončení přenosu, skončíme */
-            if (semafor) {
-                p->async_status = MIRISDR_ASYNC_INACTIVE;
-                /* počkáme na dokončení všech procesů */
-                libusb_handle_events_timeout(p->ctx, &tv);
-                break;
-            }
-        } else if (p->async_status == MIRISDR_ASYNC_FAILED) {
-            goto failed_free;
+            if (p->xfer && mirisdr_async_cancel_pending(p) < 0) transfer_failed = 1;
+            p->async_status = MIRISDR_ASYNC_INACTIVE;
+            break;
         }
     }
 
@@ -509,10 +541,12 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
 #else
     usleep(20000);
 #endif
-    mirisdr_streaming_stop(p);
+    /* RSPduo is stopped by the API owner before transfer cancellation.  A
+     * second synchronous control transfer here races Darwin libusb teardown. */
+    if (p->usb_pid != 0x3020u) mirisdr_streaming_stop(p);
     /* je vhodné ukončit i adc, jenže pak by při dalším otevření bylo nutné provést inicializaci */
 
-    return 0;
+    return transfer_failed ? -1 : 0;
 
 failed_free:
     mirisdr_async_free(p);
@@ -553,34 +587,10 @@ failed:
 
 /* zastavení streamování */
 int mirisdr_stop_async (mirisdr_dev_t *p) {
-    size_t i;
-    int r, semafor;
-    struct timeval tv = {1, 0};
-
     /* nedovolíme jiný stav než spuštěný */
     if (p->async_status != MIRISDR_ASYNC_RUNNING) goto failed;
 
-    while (p->async_status == MIRISDR_ASYNC_RUNNING) {
-        semafor = 1;
-        for (i = 0; i < p->xfer_buf_num; i++) {
-            if (!p->xfer[i]) continue;
-
-            /* pro isoc režim je completed i v případě chyb */
-            if (p->xfer[i]->status != LIBUSB_TRANSFER_CANCELLED) {
-                libusb_cancel_transfer(p->xfer[i]);
-                semafor = 0;
-            }
-        }
-
-        if (semafor) break;
-
-        /* počkáme na další událost */
-        if ((r = libusb_handle_events_timeout(p->ctx, &tv)) < 0) {
-            fprintf( stderr, "libusb_handle_events returned: %d\n", r);
-            if (r == LIBUSB_ERROR_INTERRUPTED) continue; /* stray */
-            goto failed;
-        }
-    }
+    if (mirisdr_async_cancel_pending(p) < 0) goto failed;
 
     if (p->async_status != MIRISDR_ASYNC_RUNNING) goto failed;
 

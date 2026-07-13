@@ -1,0 +1,87 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#define _POSIX_C_SOURCE 200809L
+#include "openrsp/client.h"
+
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+struct openrsp_client {
+    int descriptor;
+};
+
+static int transfer_exact(int descriptor, void *buffer, size_t bytes, int writing)
+{
+    unsigned char *cursor = buffer;
+    while (bytes != 0u) {
+        ssize_t count = writing ? write(descriptor, cursor, bytes) : read(descriptor, cursor, bytes);
+        if (count == 0) return -1;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        cursor += (size_t)count;
+        bytes -= (size_t)count;
+    }
+    return 0;
+}
+
+int openrsp_client_connect(const char *socket_path, openrsp_client **out_client)
+{
+    if (!out_client) return -1;
+    const char *path = socket_path && socket_path[0] ? socket_path : OPENRSP_SOCKET_PATH;
+    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return -1;
+    openrsp_client *client = calloc(1, sizeof(*client));
+    if (!client) return -1;
+    client->descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client->descriptor < 0) {
+        free(client);
+        return -1;
+    }
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    (void)strcpy(address.sun_path, path);
+    if (connect(client->descriptor, (const struct sockaddr *)&address, sizeof(address)) != 0) {
+        (void)close(client->descriptor);
+        free(client);
+        return -1;
+    }
+    *out_client = client;
+    return 0;
+}
+
+void openrsp_client_close(openrsp_client *client)
+{
+    if (!client) return;
+    (void)close(client->descriptor);
+    free(client);
+}
+
+int openrsp_client_send(openrsp_client *client, uint16_t command, uint32_t sequence,
+                        const void *payload, uint32_t payload_bytes)
+{
+    if (!client || (payload_bytes != 0u && !payload)) return -1;
+    openrsp_message_header header = {
+        .magic = OPENRSP_PROTOCOL_MAGIC, .version = OPENRSP_PROTOCOL_VERSION,
+        .type = command, .sequence = sequence, .payload_bytes = payload_bytes
+    };
+    if (transfer_exact(client->descriptor, &header, sizeof(header), 1) != 0) return -1;
+    return payload_bytes == 0u ? 0 :
+           transfer_exact(client->descriptor, (void *)payload, payload_bytes, 1);
+}
+
+int openrsp_client_receive(openrsp_client *client, openrsp_message_header *header,
+                           void *payload, size_t capacity)
+{
+    if (!client || !header) return -1;
+    if (transfer_exact(client->descriptor, header, sizeof(*header), 0) != 0) return -1;
+    if (header->magic != OPENRSP_PROTOCOL_MAGIC ||
+        header->version != OPENRSP_PROTOCOL_VERSION || header->payload_bytes > capacity)
+        return -1;
+    if (header->payload_bytes != 0u &&
+        transfer_exact(client->descriptor, payload, header->payload_bytes, 0) != 0) return -1;
+    return 0;
+}

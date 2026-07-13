@@ -11,11 +11,12 @@ static int mirisdr_samples_convert_504_s8 (mirisdr_dev_t *p, unsigned char* src,
     uint32_t addr = src[3] << 24 | src[2] << 16 | src[1] << 8 | src[0] << 0;
 
     /* ztracená data */
-    if (p->addr != addr) {
+    if (p->usb_pid != 0x3020u && p->addr_valid && p->addr != addr) {
         fprintf(stderr, "%u samples lost, %d, %08x:%08x\n", addr - p->addr, cnt, p->addr, addr);
         p->addr = addr;
         p->sync_loss_cnt++;
     }
+    p->addr_valid = 1;
 
     for (i = 16; i < cnt; i+= 1024, ret+= 1008) {
         memcpy(dst + ret, src + i, 1008);

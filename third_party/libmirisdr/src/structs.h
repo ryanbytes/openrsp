@@ -29,6 +29,9 @@ struct mirisdr_dev {
 
     /* parametry */
     uint32_t            index;
+    uint16_t            usb_vid;
+    uint16_t            usb_pid;
+    size_t              bulk_buffer_size;
     uint32_t            freq;
     uint32_t            rate;
     int                 gain;
@@ -96,11 +99,12 @@ struct mirisdr_dev {
     size_t              xfer_out_pos;
     unsigned char       *xfer_out;
     uint32_t            addr;
+    int                 addr_valid;
     int                 driver_active;
     int                 bias;
     int                 reg8;
     uint8_t             *samples;
     int                 samples_size;
     int                 sync_loss_cnt;
+    int                 firmware_attempted;
 };
-

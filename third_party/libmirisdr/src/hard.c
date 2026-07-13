@@ -185,9 +185,15 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 
 int mirisdr_set_sample_rate(mirisdr_dev_t *p, uint32_t rate)
 {
-	p->rate = rate;
+    p->rate = rate;
+    if (p->usb_pid == 0x3020u) {
+        p->format_auto = MIRISDR_FORMAT_AUTO_OFF;
+        p->format = rate <= 6048000u ? MIRISDR_FORMAT_252_S16 :
+                    rate <= 8064000u ? MIRISDR_FORMAT_336_S16 :
+                    rate <= 9216000u ? MIRISDR_FORMAT_384_S16 : MIRISDR_FORMAT_504_S16;
+    }
 
-	return mirisdr_set_hard(p);
+    return mirisdr_set_hard(p);
 }
 
 uint32_t mirisdr_get_sample_rate(mirisdr_dev_t *p)
@@ -247,4 +253,3 @@ const char *mirisdr_get_sample_format(mirisdr_dev_t *p)
 
 	return "";
 }
-

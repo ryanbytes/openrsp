@@ -1,6 +1,7 @@
 #include "openrsp/openrsp.h"
 
 #include <libusb.h>
+#include <stdio.h>
 #include <string.h>
 
 static void read_configuration(libusb_device *device, openrsp_device_info *info)
@@ -87,6 +88,18 @@ int openrsp_discover(openrsp_device_info *devices, size_t capacity)
             info->usb_class = descriptor.bDeviceClass;
             info->configuration_count = descriptor.bNumConfigurations;
             info->model = openrsp_model_lookup(descriptor.idVendor, descriptor.idProduct);
+            int path_length = snprintf(info->physical_path, sizeof(info->physical_path), "%u",
+                                       info->bus);
+            uint8_t ports[16];
+            int port_count = libusb_get_port_numbers(list[index], ports, sizeof(ports));
+            for (int port = 0; port < port_count && path_length > 0 &&
+                               (size_t)path_length < sizeof(info->physical_path); ++port) {
+                int appended = snprintf(info->physical_path + path_length,
+                                        sizeof(info->physical_path) - (size_t)path_length,
+                                        ".%u", ports[port]);
+                if (appended < 0) break;
+                path_length += appended;
+            }
             read_configuration(list[index], info);
 
             libusb_device_handle *handle = NULL;

@@ -44,20 +44,28 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     int result = openrsp_device_reset((uint16_t)parsed, 0);
-    if (result == LIBUSB_ERROR_NO_DEVICE) {
+    if (result == 0 || result == LIBUSB_ERROR_NO_DEVICE || result == LIBUSB_ERROR_NOT_FOUND) {
         const struct timespec delay = {.tv_sec = 0, .tv_nsec = 250000000L};
-        for (int attempt = 0; attempt < 20; ++attempt) {
+        int stable = 0;
+        for (int attempt = 0; attempt < 24; ++attempt) {
             if (product_is_present((uint16_t)parsed)) {
-                puts("RESET_OK device_reenumerated=1 libusb_reset_result=NO_DEVICE");
-                return EXIT_SUCCESS;
+                if (++stable >= 3) {
+                    printf("RESET_OK device_stable=1 libusb_reset_result=%s\n",
+                           result == 0 ? "SUCCESS" :
+                           result == LIBUSB_ERROR_NO_DEVICE ? "NO_DEVICE" : "NOT_FOUND");
+                    return EXIT_SUCCESS;
+                }
+            } else {
+                stable = 0;
             }
             nanosleep(&delay, NULL);
         }
+        fputs("RESET_FAIL device did not become stably discoverable\n", stderr);
+        return EXIT_FAILURE;
     }
     if (result < 0) {
         fprintf(stderr, "RESET_FAIL code=%d name=%s\n", result, libusb_error_name(result));
         return EXIT_FAILURE;
     }
-    puts("RESET_OK");
-    return EXIT_SUCCESS;
+    return EXIT_FAILURE;
 }

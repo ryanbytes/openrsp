@@ -120,7 +120,8 @@ int openrsp_device_reset(uint16_t product_id, unsigned int match_index)
         }
         result = libusb_open(list[index], &handle);
         if (result == 0) {
-            result = libusb_reset_device(handle);
+            result = libusb_claim_interface(handle, 0);
+            if (result == 0) result = libusb_reset_device(handle);
         }
         break;
     }

@@ -21,7 +21,7 @@ static int mirisdr_samples_convert_384_s16 (mirisdr_dev_t *p, unsigned char* buf
         addr = src[3] << 24 | src[2] << 16 | src[1] << 8 | src[0] << 0;
 
         /* potenciálně ztracená data */
-        if ((i == 0) && (addr != p->addr)) {
+        if ((i == 0) && p->usb_pid != 0x3020u && p->addr_valid && (addr != p->addr)) {
             fprintf(stderr, "%u samples lost, %d, %08x:%08x\n", addr - p->addr, cnt, p->addr, addr);
             p->sync_loss_cnt++;
         }
@@ -72,6 +72,7 @@ static int mirisdr_samples_convert_384_s16 (mirisdr_dev_t *p, unsigned char* buf
     }
 
     p->addr = addr + 384;
+    p->addr_valid = 1;
 
     /* total used bytes */
     return ret * 2;

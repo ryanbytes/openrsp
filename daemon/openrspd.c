@@ -1,0 +1,515 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#define _POSIX_C_SOURCE 200809L
+#include "openrsp/protocol.h"
+#include "mirisdr.h"
+
+#include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <poll.h>
+#include <fcntl.h>
+
+#define OPENRSPD_MAX_PAYLOAD 4096u
+#define OPENRSPD_MAX_CLIENTS 32
+
+typedef struct {
+    mirisdr_dev_t *radio;
+    int owner;
+    bool streaming;
+    bool stream_thread_started;
+    bool stream_error;
+    int stream_result;
+    pthread_t stream_thread;
+    pthread_mutex_t write_lock;
+    uint32_t stream_sequence;
+    bool configured;
+    openrsp_radio_config config;
+} daemon_state;
+
+static volatile sig_atomic_t running = 1;
+
+static void stop_server(int signal_number)
+{
+    (void)signal_number;
+    running = 0;
+}
+
+static int read_exact(int descriptor, void *buffer, size_t bytes)
+{
+    unsigned char *cursor = buffer;
+    while (bytes != 0u) {
+        ssize_t count = read(descriptor, cursor, bytes);
+        if (count == 0) return 0;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        cursor += (size_t)count;
+        bytes -= (size_t)count;
+    }
+    return 1;
+}
+
+static int write_exact(int descriptor, const void *buffer, size_t bytes)
+{
+    const unsigned char *cursor = buffer;
+    while (bytes != 0u) {
+        ssize_t count = write(descriptor, cursor, bytes);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        cursor += (size_t)count;
+        bytes -= (size_t)count;
+    }
+    return 0;
+}
+
+static int set_nonblocking(int descriptor)
+{
+    int flags = fcntl(descriptor, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(descriptor, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int write_frame(daemon_state *state, int descriptor, uint16_t type,
+                       uint32_t sequence, const void *payload, uint32_t payload_bytes)
+{
+    openrsp_message_header header = {
+        .magic = OPENRSP_PROTOCOL_MAGIC,
+        .version = OPENRSP_PROTOCOL_VERSION,
+        .type = type,
+        .sequence = sequence,
+        .payload_bytes = payload_bytes
+    };
+    (void)pthread_mutex_lock(&state->write_lock);
+    int result = write_exact(descriptor, &header, sizeof(header));
+    if (result == 0 && payload_bytes != 0u)
+        result = write_exact(descriptor, payload, payload_bytes);
+    (void)pthread_mutex_unlock(&state->write_lock);
+    return result;
+}
+
+static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque)
+{
+    daemon_state *state = opaque;
+    uint32_t sequence = ++state->stream_sequence;
+    if (write_frame(state, state->owner, OPENRSP_EVENT_IQ, sequence,
+                    buffer, length) != 0 && state->radio)
+        (void)mirisdr_cancel_async(state->radio);
+}
+
+static void *stream_main(void *opaque)
+{
+    daemon_state *state = opaque;
+    /* Match the direct RSPduo capture geometry that has streamed reliably:
+     * 32 queued 256 KiB bulk transfers.  Shorter queues repeatedly stalled
+     * endpoint 0x81 on macOS after only a few submissions. */
+    int result = mirisdr_read_async(state->radio, stream_callback, state, 32u, 262144u);
+    state->streaming = false;
+    state->stream_result = result;
+    state->stream_error = result != 0;
+    if (result != 0) {
+        fprintf(stderr, "RSP stream stopped with error %d\n", result);
+        (void)fflush(stderr);
+    }
+    return NULL;
+}
+
+static int clamp_int(int value, int minimum, int maximum)
+{
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+static int set_gain(mirisdr_dev_t *radio, const openrsp_radio_config *config)
+{
+    /*
+     * Keep RSPduo gain updates on the proven Mirics register path until the
+     * RSPduo-specific LNA GPIO sequence is validated across all states.  The
+     * previous sequence could configure successfully yet stall the USB stream
+     * immediately afterwards on the tested radio.  The generic gain setter
+     * has streamed IQ on this hardware, and the API LNA state still maps to
+     * its documented total gain reduction here.
+     */
+    static const int below_60mhz[] = {0, 6, 12, 18, 37, 42, 61};
+    static const int below_420mhz[] = {0, 6, 12, 18, 20, 26, 32, 38, 57, 62};
+    static const int below_2ghz[] = {0, 6, 12, 20, 26, 32, 38, 43, 62};
+    const int *table = below_2ghz;
+    size_t count = sizeof(below_2ghz) / sizeof(below_2ghz[0]);
+    if (config->center_frequency_hz < 60000000u) {
+        table = below_60mhz;
+        count = sizeof(below_60mhz) / sizeof(below_60mhz[0]);
+    } else if (config->center_frequency_hz < 420000000u) {
+        table = below_420mhz;
+        count = sizeof(below_420mhz) / sizeof(below_420mhz[0]);
+    }
+    if (config->lna_state >= count || config->gain_reduction_db < 20 ||
+        config->gain_reduction_db > 59) return -1;
+    int total_reduction = config->gain_reduction_db + table[config->lna_state];
+    return mirisdr_set_tuner_gain(radio, clamp_int(102 - total_reduction, 0, 102));
+}
+
+static void describe_flags(uint32_t flags, char *buffer, size_t bytes)
+{
+    if (bytes == 0u) return;
+    buffer[0] = '\0';
+    struct flag_name {
+        uint32_t flag;
+        const char *name;
+    };
+    static const struct flag_name names[] = {
+        {OPENRSP_CHANGE_SAMPLE_RATE, "FS"},
+        {OPENRSP_CHANGE_RF, "RF"},
+        {OPENRSP_CHANGE_BANDWIDTH, "BW"},
+        {OPENRSP_CHANGE_IF, "IF"},
+        {OPENRSP_CHANGE_GAIN, "GAIN"},
+        {OPENRSP_CHANGE_AGC, "AGC"}
+    };
+    size_t used = 0u;
+    for (size_t index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        if ((flags & names[index].flag) == 0u) continue;
+        int written = snprintf(buffer + used, bytes - used, "%s%s",
+                               used == 0u ? "" : "|", names[index].name);
+        if (written < 0) break;
+        if ((size_t)written >= bytes - used) {
+            buffer[bytes - 1u] = '\0';
+            return;
+        }
+        used += (size_t)written;
+    }
+    if (used == 0u) (void)snprintf(buffer, bytes, "none");
+}
+
+static void log_config(const char *operation, int descriptor, uint32_t flags,
+                       uint32_t status, const openrsp_radio_config *config)
+{
+    char flag_text[64];
+    describe_flags(flags, flag_text, sizeof(flag_text));
+    fprintf(stderr,
+            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d\n",
+            operation, descriptor, status, flag_text, config->sample_rate_hz,
+            config->center_frequency_hz, config->bandwidth_hz,
+            config->if_frequency_hz, config->gain_reduction_db,
+            config->lna_state, config->agc_mode, config->agc_setpoint_dbfs);
+    (void)fflush(stderr);
+}
+
+static int stop_stream(daemon_state *state)
+{
+    if (!state->stream_thread_started) return 0;
+    if (state->radio) {
+        (void)mirisdr_streaming_stop(state->radio);
+        (void)mirisdr_cancel_async(state->radio);
+    }
+    int result = pthread_join(state->stream_thread, NULL);
+    state->stream_thread_started = false;
+    state->streaming = false;
+    return result;
+}
+
+static void release_client(daemon_state *state, int descriptor)
+{
+    if (state->owner != descriptor) return;
+    if (state->radio) (void)stop_stream(state);
+    if (state->stream_error && state->radio) {
+        fprintf(stderr, "OPENRSPD_CLOSE_FAILED_STREAM result=%d\n", state->stream_result);
+        (void)fflush(stderr);
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        state->configured = false;
+    }
+    state->owner = -1;
+    state->streaming = false;
+    state->stream_error = false;
+    state->stream_result = 0;
+}
+
+static void shutdown_radio(daemon_state *state)
+{
+    if (!state->radio) return;
+    (void)stop_stream(state);
+    (void)mirisdr_close(state->radio);
+    state->radio = NULL;
+    state->owner = -1;
+    state->configured = false;
+    state->stream_error = false;
+    state->stream_result = 0;
+}
+
+static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
+{
+    if (config->sample_rate_hz == 0u || config->center_frequency_hz == 0u)
+        return OPENRSP_STATUS_BAD_REQUEST;
+    if (config->agc_mode < 0 || config->agc_mode > 4 ||
+        config->agc_setpoint_dbfs < -60 || config->agc_setpoint_dbfs > -20)
+        return OPENRSP_STATUS_BAD_REQUEST;
+    if (mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY) != 0 ||
+        mirisdr_configure_rspduo(radio, config->sample_rate_hz,
+                                 config->center_frequency_hz,
+                                 (uint32_t)config->if_frequency_hz,
+                                 config->bandwidth_hz,
+                                 102 - config->gain_reduction_db) != 0)
+        return OPENRSP_STATUS_IO_ERROR;
+    if (set_gain(radio, config) != 0)
+        return OPENRSP_STATUS_IO_ERROR;
+    return OPENRSP_STATUS_OK;
+}
+
+static uint32_t apply_update(daemon_state *state, const openrsp_update_request *update)
+{
+    const openrsp_radio_config *next = &update->config;
+    const openrsp_radio_config *old = &state->config;
+    uint32_t flags = update->changed_flags;
+    int result = 0;
+    if ((flags & OPENRSP_CHANGE_AGC) != 0u &&
+        (next->agc_mode < 0 || next->agc_mode > 4 ||
+         next->agc_setpoint_dbfs < -60 || next->agc_setpoint_dbfs > -20))
+        return OPENRSP_STATUS_BAD_REQUEST;
+    if ((flags & OPENRSP_CHANGE_SAMPLE_RATE) != 0u &&
+        next->sample_rate_hz != old->sample_rate_hz)
+        result |= mirisdr_set_sample_rate(state->radio, next->sample_rate_hz);
+    if ((flags & OPENRSP_CHANGE_RF) != 0u &&
+        next->center_frequency_hz != old->center_frequency_hz)
+        result |= mirisdr_set_center_freq(state->radio, next->center_frequency_hz);
+    if ((flags & OPENRSP_CHANGE_BANDWIDTH) != 0u &&
+        next->bandwidth_hz != old->bandwidth_hz)
+        result |= mirisdr_set_bandwidth(state->radio, next->bandwidth_hz);
+    if ((flags & OPENRSP_CHANGE_IF) != 0u &&
+        next->if_frequency_hz != old->if_frequency_hz)
+        result |= mirisdr_set_if_freq(state->radio, (uint32_t)next->if_frequency_hz);
+    if ((flags & (OPENRSP_CHANGE_GAIN | OPENRSP_CHANGE_RF)) != 0u)
+        result |= set_gain(state->radio, next);
+    if (result < 0) return OPENRSP_STATUS_IO_ERROR;
+    state->config = *next;
+    return OPENRSP_STATUS_OK;
+}
+
+static int serve_request(int descriptor, daemon_state *state)
+{
+    openrsp_message_header request;
+    int read_result = read_exact(descriptor, &request, sizeof(request));
+    if (read_result != 1) return read_result;
+    unsigned char payload[OPENRSPD_MAX_PAYLOAD];
+    if (request.payload_bytes > sizeof(payload)) return -1;
+    if (request.payload_bytes != 0u &&
+        read_exact(descriptor, payload, request.payload_bytes) != 1) return -1;
+
+    openrsp_response response = {0};
+    response.sequence = request.sequence;
+    if (request.magic != OPENRSP_PROTOCOL_MAGIC || request.version != OPENRSP_PROTOCOL_VERSION) {
+        response.status = OPENRSP_STATUS_BAD_REQUEST;
+    } else if (request.type == OPENRSP_CMD_PING && request.payload_bytes == 0u) {
+        response.status = OPENRSP_STATUS_OK;
+    } else if (request.type == OPENRSP_CMD_LIST && request.payload_bytes == 0u) {
+        response.status = OPENRSP_STATUS_OK;
+        response.changed_flags = mirisdr_get_device_count();
+    } else if (request.type == OPENRSP_CMD_ACQUIRE &&
+               request.payload_bytes == sizeof(openrsp_acquire_request)) {
+        const openrsp_acquire_request *acquire = (const openrsp_acquire_request *)payload;
+        if (state->owner >= 0 && state->owner != descriptor) {
+            response.status = OPENRSP_STATUS_BUSY;
+        } else if (state->owner == descriptor) {
+            response.status = OPENRSP_STATUS_OK;
+        } else if (state->radio != NULL) {
+            state->owner = descriptor;
+            response.status = OPENRSP_STATUS_OK;
+        } else if (mirisdr_open(&state->radio, acquire->device_index) != 0) {
+            response.status = OPENRSP_STATUS_IO_ERROR;
+        } else {
+            state->owner = descriptor;
+            response.status = OPENRSP_STATUS_OK;
+        }
+    } else if (request.type == OPENRSP_CMD_START && request.payload_bytes == 0u &&
+               state->owner == descriptor && state->radio && !state->stream_thread_started) {
+        state->streaming = true;
+        state->stream_error = false;
+        state->stream_result = 0;
+        state->stream_sequence = 0u;
+        response.status = OPENRSP_STATUS_OK;
+    } else if (request.type == OPENRSP_CMD_STOP && request.payload_bytes == 0u &&
+               state->owner == descriptor && state->radio) {
+        response.status = stop_stream(state) == 0 ? OPENRSP_STATUS_OK : OPENRSP_STATUS_IO_ERROR;
+    } else if (request.type == OPENRSP_CMD_RELEASE && request.payload_bytes == 0u &&
+               state->owner == descriptor) {
+        release_client(state, descriptor);
+        response.status = OPENRSP_STATUS_OK;
+    } else if (request.type == OPENRSP_CMD_CONFIGURE &&
+               request.payload_bytes == sizeof(openrsp_radio_config) &&
+               state->owner == descriptor && state->radio) {
+        const openrsp_radio_config *config = (const openrsp_radio_config *)payload;
+        response.status = apply_config(state->radio, config);
+        if (response.status == OPENRSP_STATUS_OK) {
+            state->config = *config;
+            state->configured = true;
+        }
+        log_config("CONFIGURE", descriptor, 0u, response.status, config);
+    } else if (request.type == OPENRSP_CMD_UPDATE &&
+               request.payload_bytes == sizeof(openrsp_update_request) &&
+               state->owner == descriptor && state->radio && state->configured) {
+        const openrsp_update_request *update = (const openrsp_update_request *)payload;
+        response.status = apply_update(state, update);
+        log_config("UPDATE", descriptor, update->changed_flags, response.status,
+                   &update->config);
+    } else {
+        response.status = state->owner >= 0 && state->owner != descriptor ?
+                          OPENRSP_STATUS_BUSY : OPENRSP_STATUS_UNSUPPORTED;
+    }
+    if (write_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
+                    &response, sizeof(response)) != 0) return -1;
+    if (request.type == OPENRSP_CMD_LIST && response.status == OPENRSP_STATUS_OK) {
+        for (uint32_t index = 0; index < response.changed_flags; ++index) {
+            openrsp_device_record record = {
+                .device_index = index, .vendor_id = 0x1df7u, .product_id = 0x3020u
+            };
+            char manufacturer[256] = {0};
+            char product[256] = {0};
+            char serial[256] = {0};
+            (void)mirisdr_get_device_usb_strings(index, manufacturer, product, serial);
+            (void)snprintf(record.serial, sizeof(record.serial), "%s", serial);
+            (void)snprintf(record.model, sizeof(record.model), "%s",
+                           mirisdr_get_device_name(index));
+            if (write_frame(state, descriptor, OPENRSP_EVENT_DEVICE, request.sequence,
+                            &record, sizeof(record)) != 0) return -1;
+        }
+    }
+    if (request.type == OPENRSP_CMD_START && response.status == OPENRSP_STATUS_OK) {
+        if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
+            state->streaming = false;
+            return -1;
+        }
+        state->stream_thread_started = true;
+    }
+    return 1;
+}
+
+static void remove_client(daemon_state *state, int clients[OPENRSPD_MAX_CLIENTS],
+                          size_t index)
+{
+    int descriptor = clients[index];
+    if (descriptor < 0) return;
+    release_client(state, descriptor);
+    (void)close(descriptor);
+    clients[index] = -1;
+}
+
+static void close_clients(daemon_state *state, int clients[OPENRSPD_MAX_CLIENTS])
+{
+    for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index)
+        remove_client(state, clients, index);
+}
+
+static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
+{
+    for (;;) {
+        int client = accept(server, NULL, NULL);
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
+            return;
+        }
+        bool stored = false;
+        for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
+            if (clients[index] >= 0) continue;
+            clients[index] = client;
+            stored = true;
+            break;
+        }
+        if (!stored) {
+            fprintf(stderr, "OPENRSPD_REJECT fd=%d reason=too_many_clients\n", client);
+            (void)close(client);
+        }
+    }
+}
+
+int main(void)
+{
+    const char *path = getenv("OPENRSPD_SOCKET");
+    if (!path || path[0] == '\0') path = OPENRSP_SOCKET_PATH;
+    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        fprintf(stderr, "Socket path is too long: %s\n", path);
+        return EXIT_FAILURE;
+    }
+
+    int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server < 0) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    (void)strcpy(address.sun_path, path);
+    (void)unlink(path);
+    if (set_nonblocking(server) != 0 ||
+        bind(server, (const struct sockaddr *)&address, sizeof(address)) != 0 ||
+        chmod(path, 0666) != 0 || listen(server, 8) != 0) {
+        perror("openrspd socket setup");
+        (void)close(server);
+        (void)unlink(path);
+        return EXIT_FAILURE;
+    }
+    struct sigaction stop_action = {0};
+    stop_action.sa_handler = stop_server;
+    (void)sigemptyset(&stop_action.sa_mask);
+    (void)sigaction(SIGINT, &stop_action, NULL);
+    (void)sigaction(SIGTERM, &stop_action, NULL);
+    (void)signal(SIGPIPE, SIG_IGN);
+    printf("OPENRSPD_READY socket=%s protocol=%u\n", path, OPENRSP_PROTOCOL_VERSION);
+    (void)fflush(stdout);
+
+    daemon_state state = {.owner = -1, .write_lock = PTHREAD_MUTEX_INITIALIZER};
+    int clients[OPENRSPD_MAX_CLIENTS];
+    for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
+    while (running) {
+        struct pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];
+        size_t client_index[OPENRSPD_MAX_CLIENTS + 1u];
+        nfds_t count = 1u;
+        fds[0].fd = server;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        client_index[0] = OPENRSPD_MAX_CLIENTS;
+        for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
+            if (clients[index] < 0) continue;
+            fds[count].fd = clients[index];
+            fds[count].events = POLLIN | POLLHUP | POLLERR;
+            fds[count].revents = 0;
+            client_index[count] = index;
+            ++count;
+        }
+        int ready = poll(fds, count, 1000);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            perror("poll");
+            break;
+        }
+        if (ready == 0) continue;
+        if ((fds[0].revents & POLLIN) != 0) accept_clients(server, clients);
+        for (nfds_t index = 1u; index < count; ++index) {
+            if (fds[index].revents == 0) continue;
+            size_t slot = client_index[index];
+            if ((fds[index].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+                remove_client(&state, clients, slot);
+                continue;
+            }
+            if ((fds[index].revents & POLLIN) == 0) continue;
+            int result = serve_request(clients[slot], &state);
+            if (result != 1) remove_client(&state, clients, slot);
+        }
+    }
+    close_clients(&state, clients);
+    shutdown_radio(&state);
+    (void)close(server);
+    (void)unlink(path);
+    (void)pthread_mutex_destroy(&state.write_lock);
+    return running ? EXIT_FAILURE : EXIT_SUCCESS;
+}

@@ -19,7 +19,11 @@ int mirisdr_streaming_start (mirisdr_dev_t *p) {
     if (!p) goto failed;
     if (!p->dh) goto failed;
 
-    libusb_control_transfer(p->dh, 0x42, 0x43, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
+    uint8_t request_type = p->usb_pid == 0x3020u ? 0x40u : 0x42u;
+    if (getenv("OPENRSP_TRACE_USB") != NULL)
+        fprintf(stderr, "OPENRSP_USB control type=%02x request=43 value=0000 index=0000\n",
+                request_type);
+    libusb_control_transfer(p->dh, request_type, 0x43, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
 
     return 0;
 
@@ -31,11 +35,14 @@ int mirisdr_streaming_stop (mirisdr_dev_t *p) {
     if (!p) goto failed;
     if (!p->dh) goto failed;
 
-    libusb_control_transfer(p->dh, 0x42, 0x45, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
+    uint8_t request_type = p->usb_pid == 0x3020u ? 0x40u : 0x42u;
+    if (getenv("OPENRSP_TRACE_USB") != NULL)
+        fprintf(stderr, "OPENRSP_USB control type=%02x request=45 value=0000 index=0000\n",
+                request_type);
+    libusb_control_transfer(p->dh, request_type, 0x45, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
 
     return 0;
 
 failed:
     return -1;
 }
-

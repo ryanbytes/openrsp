@@ -66,13 +66,16 @@ int mirisdr_set_gain(mirisdr_dev_t *p)
     }
 
     reg1 |= MIRISDR_DC_OFFSET_CALIBRATION_PERIODIC2 << 14;
+    if (p->usb_pid == 0x3020u) reg1 |= 1u << 14;
     reg1 |= MIRISDR_DC_OFFSET_CALIBRATION_SPEEDUP_OFF << 17;
     mirisdr_write_reg(p, 0x09, reg1);
 
     /* DC Offset Calibration setup */
-    reg6 |= 0x1F << 4;
-    reg6 |= 0x800 << 10;
-    mirisdr_write_reg(p, 0x09, reg6);
+    if (p->usb_pid != 0x3020u) {
+        reg6 |= 0x1F << 4;
+        reg6 |= 0x800 << 10;
+        mirisdr_write_reg(p, 0x09, reg6);
+    }
 //// set to 0xf300 to select AM input added Dec 5 2014 SM5BSZ
 //    if (p->freq < 50000000)
 //      {
@@ -277,4 +280,3 @@ int mirisdr_get_baseband_gain(mirisdr_dev_t *p)
 {
     return 59 - p->gain_reduction_baseband;
 }
-

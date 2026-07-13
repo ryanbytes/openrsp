@@ -44,6 +44,7 @@ typedef struct {
     char manufacturer[OPENRSP_TEXT_MAX];
     char product[OPENRSP_TEXT_MAX];
     char serial[OPENRSP_TEXT_MAX];
+    char physical_path[OPENRSP_TEXT_MAX];
     const openrsp_model *model;
     int descriptor_error;
     int configuration_error;
@@ -64,7 +65,7 @@ int openrsp_discover(openrsp_device_info *devices, size_t capacity);
 int openrsp_session_open(uint16_t product_id, unsigned int match_index, openrsp_session **session);
 void openrsp_session_close(openrsp_session *session);
 
-/* Performs a disruptive USB port-level reset without claiming an interface. */
+/* Claims interface 0 and performs a disruptive USB port-level reset. */
 int openrsp_device_reset(uint16_t product_id, unsigned int match_index);
 
 #ifdef __cplusplus
