@@ -440,6 +440,24 @@ more than five percent error from the configured wall-clock sample total as a
 failure. An eight-second, ten-update hardware run passed those stricter gates
 with one reset and 1.9953 percent sample-count error.
 
+The standalone lifecycle probe completed 50 consecutive full API Open, device
+discovery, selection, Init, streaming, live sample-rate/RF/gain update, Uninit,
+release, and Close cycles without reconnecting the RSPduo. Every cycle reported
+one initial reset, zero sample-number discontinuities, exactly one acknowledgement
+for each updated field, and zero device failures. Per-cycle delivery ranged from
+3,358,720 to 3,457,024 samples. Daemon RSS was 12,128 KB before and after the
+run, and both the daemon and SDRTrunk retained their process IDs. A subsequent
+ten-cycle run additionally required separate delivery on both sides of every
+update; pre-update counts ranged from 1,490,944 to 1,540,096 samples and post-
+update counts from 1,835,008 to 1,916,928 samples. The mock API regression now
+also repeats complete Open/Close lifecycles so hosted CI covers the teardown
+contract without hardware.
+
+The final verifier also starts a separate counter only when the `fsChanged`
+acknowledgement reaches the application callback. Three additional cycles each
+delivered 1,867,776 samples at or after that acknowledgement, ruling out a pass
+based only on IQ already queued before the update completed.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames

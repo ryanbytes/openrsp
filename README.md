@@ -94,6 +94,16 @@ callback throughput from 2 through the API maximum of 10.66 MS/s and restores
 ./build/sdrplay-rate-probe --rates
 ```
 
+To exercise complete API teardown and reacquisition repeatedly in one process:
+
+```sh
+./build/sdrplay-lifecycle-probe --cycles 10
+```
+
+Each cycle must stream before and after a live rate/RF/gain update, preserve
+sample numbering, report only the initial reset indication, and release every
+API/device/stream resource without reconnecting the receiver.
+
 The `openrsp-probe` USB descriptor probe is read-only. The official SDRplay
 service may prevent string-descriptor access; that tool reports the libusb
 error instead of stopping or detaching anything. Do not stop a production

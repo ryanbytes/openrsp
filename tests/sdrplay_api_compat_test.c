@@ -630,6 +630,28 @@ int main(void)
         assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
         assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     }
+    for (unsigned int cycle = 0u; cycle < 3u; ++cycle) {
+        (void)pthread_mutex_lock(&metrics.lock);
+        unsigned int callback_baseline = metrics.callbacks;
+        (void)pthread_mutex_unlock(&metrics.lock);
+        assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
+               sdrplay_api_Success);
+        assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
+        assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
+        assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
+        assert(sdrplay_api_Close() == sdrplay_api_Success);
+        assert(sdrplay_api_Open() == sdrplay_api_Success);
+        count = 0u;
+        assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) ==
+               sdrplay_api_Success);
+        assert(count == 4u);
+        assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
+        params = NULL;
+        assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==
+               sdrplay_api_Success);
+        assert(params != NULL);
+        params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    }
     /* Applications such as SoapySDRPlay3 set 6 MS/s and 1.620 MHz IF before
      * Init and expect the API callback stream at 2 MS/s. */
     params->devParams->fsFreq.fsHz = 6000000.0;
