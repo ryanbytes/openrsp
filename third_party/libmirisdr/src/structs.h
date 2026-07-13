@@ -16,6 +16,7 @@
  */
 
 #include <stdatomic.h>
+#include "rspduo_analytic.h"
 
 enum {
     MIRISDR_ASYNC_INACTIVE = 0,
@@ -112,4 +113,5 @@ struct mirisdr_dev {
     int                 sync_loss_cnt;
     int                 firmware_attempted;
     unsigned int        bulk_recovery_attempts;
+    mirisdr_rspduo_analytic_state analytic_state;
 };

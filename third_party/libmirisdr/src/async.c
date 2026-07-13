@@ -219,6 +219,14 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             goto failed;
         }
 
+        if (bytes > 0 && p->usb_pid == 0x3020u) {
+            /* RSPduo single-tuner USB words are two real ADC lanes, not an
+             * interleaved complex pair. Tuner A is routed to lane 1. Produce
+             * analytic IQ before exposing the ordinary libmirisdr callback. */
+            mirisdr_rspduo_analytic_process(&p->analytic_state,
+                                            (int16_t *)samples,
+                                            (size_t)bytes / (2u * sizeof(int16_t)), 1u);
+        }
         if (bytes > 0) mirisdr_feed_async(p, samples, bytes);
 
         if (!resubmitted && xfer->type == LIBUSB_TRANSFER_TYPE_BULK)
@@ -455,6 +463,8 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
 #endif
     p->sync_loss_cnt = 0;
     p->addr_valid = 0;
+    if (p->usb_pid == 0x3020u)
+        mirisdr_rspduo_analytic_reset(&p->analytic_state);
     /* použití správného rozhraní které zasílá data - není kritické */
     switch (p->transfer) {
     case MIRISDR_TRANSFER_BULK:

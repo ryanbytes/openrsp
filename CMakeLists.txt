@@ -121,7 +121,9 @@ if(UNIX)
 endif()
 
 # GPL-2.0-or-later direct hardware backend derived from libmirisdr-5.
-add_library(openrsp_miri STATIC third_party/libmirisdr/src/libmirisdr.c)
+add_library(openrsp_miri STATIC
+    third_party/libmirisdr/src/libmirisdr.c
+    third_party/libmirisdr/src/rspduo_analytic.c)
 target_include_directories(openrsp_miri PUBLIC third_party/libmirisdr/include)
 target_include_directories(openrsp_miri PRIVATE third_party/libmirisdr/src)
 target_compile_definitions(openrsp_miri PUBLIC mirisdr_STATIC)
@@ -149,6 +151,13 @@ target_link_libraries(rspduo-async-state-test PRIVATE openrsp_miri Threads::Thre
 target_compile_options(rspduo-async-state-test PRIVATE
     -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
 add_test(NAME rspduo-async-state COMMAND rspduo-async-state-test)
+
+add_executable(rspduo-analytic-test tests/rspduo_analytic_test.c)
+target_include_directories(rspduo-analytic-test PRIVATE third_party/libmirisdr/src)
+target_link_libraries(rspduo-analytic-test PRIVATE openrsp_miri m)
+target_compile_options(rspduo-analytic-test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+add_test(NAME rspduo-analytic COMMAND rspduo-analytic-test)
 
 add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
 target_link_libraries(openrsp-iq PRIVATE openrsp_miri)
@@ -246,6 +255,14 @@ if(UNIX)
     target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 else()
     message(STATUS "OpenRSP direct driver builds on this platform; the local API-compatibility daemon is currently Unix-only")
+endif()
+
+# A deadlock in a cancellation or recovery path must fail CI instead of
+# occupying a runner indefinitely. The longest hosted regression is under ten
+# seconds, leaving a generous bound for slower sanitizer and shared runners.
+get_property(openrsp_registered_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
+if(openrsp_registered_tests)
+    set_tests_properties(${openrsp_registered_tests} PROPERTIES TIMEOUT 30)
 endif()
 
 if(UNIX)

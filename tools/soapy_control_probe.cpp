@@ -207,6 +207,7 @@ int main(int argc, char **argv)
     args["driver"] = "sdrplay";
     bool rate_matrix = false;
     double single_rate = 0.0;
+    double frequency = kFrequency;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--rates") rate_matrix = true;
@@ -222,10 +223,24 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
         }
+        else if (argument == "--frequency" && index + 1 < argc) {
+            try {
+                frequency = std::stod(argv[++index]);
+            } catch (const std::exception &) {
+                std::cerr << "--frequency requires a numeric hertz value\n";
+                return EXIT_FAILURE;
+            }
+            if (!std::isfinite(frequency) || frequency < 1000.0 ||
+                frequency > 2000000000.0) {
+                std::cerr << "--frequency must be between 1 kHz and 2 GHz\n";
+                return EXIT_FAILURE;
+            }
+        }
         else if (argument == "--serial" && index + 1 < argc) args["serial"] = argv[++index];
         else {
             std::cerr << "usage: " << argv[0]
-                      << " [--serial SERIAL] [--rates | --rate SPS]\n";
+                      << " [--serial SERIAL] [--frequency HZ]"
+                         " [--rates | --rate SPS]\n";
             return EXIT_FAILURE;
         }
     }
@@ -256,7 +271,7 @@ int main(int argc, char **argv)
             device->setGain(SOAPY_SDR_RX, 0, "RFGR", 5.0);
         }
         device->setSampleRate(SOAPY_SDR_RX, 0, kSampleRate);
-        device->setFrequency(SOAPY_SDR_RX, 0, kFrequency);
+        device->setFrequency(SOAPY_SDR_RX, 0, frequency);
         device->setBandwidth(SOAPY_SDR_RX, 0, kBandwidth);
         stream = device->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16);
         if (stream == nullptr) throw std::runtime_error("setupStream returned null");

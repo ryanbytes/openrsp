@@ -223,7 +223,7 @@ A physical replug on 2026-07-13 exposed two distinct failures. The receiver
 first enumerated as `1df7:3020` with no serial descriptor, so factory-serial
 resolution correctly failed closed but could not reopen the radio. After the
 firmware bootstrap path ran, the same physical receiver re-enumerated with
-factory serial `1806000E32`, and the existing daemon resolved and reopened it.
+factory serial (redacted), and the existing daemon resolved and reopened it.
 
 That reopen produced USB IQ, but SDRTrunk had stopped draining the stream
 socket after quarantining the removed tuner. A process stack sample showed the
@@ -419,6 +419,73 @@ The API's upper boundary of 10.66 MS/s was then measured separately at
 10.6466 MS/s, a 0.1253 percent error, with the same successful restoration and
 SDRTrunk restart. This covers the accepted API sample-rate endpoints as well as
 the rate set advertised by the current Soapy adapter.
+
+## Analytic IQ and spectrum orientation (2026-07-13)
+
+A known 853.8625 MHz signal was captured with the receiver centered at
+853.7125 MHz. The original unpacker placed the signal at both +149.84 and
+-149.84 kHz with -0.044 dB image rejection. Inspection and measurement showed
+that the RSPduo single-tuner USB words are two real ADC lanes rather than one
+complex pair; tuner A was routed to the second lane. Calling those lanes I and
+Q was wrong even though a real-signal decoder could still process the result.
+
+The core direct backend now converts tuner A's real lane to analytic IQ with a
+stateful 63-tap Hilbert FIR. Its antisymmetric tap pairs use 16 multiplies per
+sample and a duplicated ring buffer, preserving filter quality without modulo
+operations in the hot loop. A synthetic split-buffer regression requires more
+than 30 dB rejection of the negative-frequency image and proves filter state
+continues across USB callback boundaries.
+
+The final physical capture placed the signal peak at +149,906.25 Hz and its
+occupied-spectrum centroid at +149,834.57 Hz, 165.43 Hz below the expected
+offset. Integrated power in the positive 25 kHz window exceeded its negative
+image by 61.51 dB. This proves spectrum orientation and useful image rejection
+for that 2.048 MS/s tuple. The frequency comparison uses the locally identified
+signal, not a traceable laboratory frequency standard, so it is field evidence
+rather than an absolute oscillator calibration.
+
+The [NWS county-coverage table](https://www.weather.gov/nwr/county_coverage?State=IN)
+currently lists Marion WXM-98 on 162.450 MHz as normal and covering all of
+Wabash County. It was also tested at a +50 kHz offset with 200 kHz RF bandwidth
+and the highest verified VHF gain state. The corrected analytic path rejected
+the negative image by 32.62 dB, but the expected channel was only 0.30 dB above
+adjacent spectrum. Reception of WXM-98 on the connected antenna is therefore
+inconclusive and is not used as the orientation proof. The upstream Soapy
+adapter did pass its physical IFGR/RFGR and AGC-restoration test with the
+receiver centered at 162.300 MHz.
+
+After analytic conversion was enabled, the native API again passed 2, 2.048,
+3, 4, 5, 6, 7, 8, 9, 10, and 10.66 MS/s with SDRTrunk stopped to remove host
+load; wall-clock error ranged from 0.0173 to 0.7926 percent. The upstream Soapy
+adapter independently passed all 19 advertised rates from 62.5 kS/s through
+10 MS/s, with error from 0.0030 to 0.3433 percent, and restored AGC. Running the
+6 MS/s gate while the normal high-CPU SDRTrunk workload remained active limited
+both the pre-fix and analytic daemons to about 4.03 MS/s, proving that result was
+host-load interference rather than an analytic-filter regression.
+
+A five-minute post-conversion native API soak ran with the normal SDRTrunk
+workload active and alternated 2.048/3.072 MS/s, RF frequency, and gain 20 times
+over the second half. It delivered 766,050,304 samples with 0.2539 percent
+wall-clock error, acknowledged all 20 changes in each category, reported the
+single expected stream reset, and uninitialized cleanly. The selected gain
+clipped the known strong signal, so this is transport and control-stability
+evidence rather than a linearity measurement.
+
+All three non-zero IF paths were then exercised on hardware with the host radio
+application stopped: 450 kHz at 6 MS/s delivered 24,936,448 samples in four
+seconds; 1.620 MHz at 6 MS/s delivered 8,317,611 samples after the required
+divide-by-three conversion; and 2.048 MHz at 8 MS/s delivered 8,335,360 samples
+after divide-by-four conversion. Each run acknowledged RF, sample-rate, and
+gain changes, reported one initial reset, and uninitialized cleanly. The native
+verifier now compares the 1.620 and 2.048 MHz paths with their actual 2 MS/s
+API callback rate rather than the pre-decimation ADC rate.
+
+Ten complete post-conversion Open/select/Init/update/Uninit/release/Close cycles
+also passed without reconnecting the receiver. Each streamed before and after
+the update acknowledgement with zero discontinuities and device-failure
+events. Three additional stream-owner processes were killed with `SIGKILL`;
+after each forced exit, a new full lifecycle acquired and streamed from the
+same receiver without a replug.
 
 A 20-second native API stress run then applied 100 consecutive combined sample-
 rate, RF, and gain updates on one active stream while the normal SDRTrunk/RTL

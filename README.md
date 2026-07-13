@@ -17,7 +17,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPduo tuner-A direct initialization | Verified on one unit |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
-| IQ streaming | Direct and standalone API paths verified on hardware |
+| IQ streaming | Direct/API paths verified; RSPduo tuner-A real ADC lane converted to analytic IQ, with 61.5 dB image rejection measured on a known offset carrier |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
@@ -84,7 +84,8 @@ SOAPY_SDR_PLUGIN_PATH=/path/to/SoapySDRPlay3/build \
 
 Use `--rates` to measure every rate advertised by the module, or `--rate SPS`
 to test one rate. These modes compare delivered IQ against wall-clock time and
-restore the normal 2 MS/s configuration and AGC after a successful run.
+restore the normal 2 MS/s configuration and AGC after a successful run. Use
+`--frequency HZ` to run the same control test at a specific RF center.
 
 The standalone compatibility path has an independent verifier that does not
 load SoapySDR. With other radio applications stopped, it measures native API
@@ -94,6 +95,20 @@ callback throughput from 2 through the API maximum of 10.66 MS/s and restores
 ```sh
 ./build/sdrplay-rate-probe --rates
 ```
+
+The native stream verifier can optionally retain up to one second of
+interleaved little-endian signed 16-bit IQ for independent spectrum analysis.
+The final positional arguments select the output file, RF bandwidth in kHz,
+gain reduction, and LNA state:
+
+```sh
+./build/sdrplay-compat-stream-test \
+  853712500 853712500 4 2048000 0 4 0 capture.iq 1536 20 0
+```
+
+When more than one update is requested, the verifier distributes updates
+across the second half of the run. It requires one acknowledgement per RF,
+sample-rate, and gain change and always attempts API/device cleanup on failure.
 
 To exercise complete API teardown and reacquisition repeatedly in one process:
 
