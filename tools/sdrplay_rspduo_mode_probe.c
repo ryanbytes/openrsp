@@ -96,7 +96,8 @@ static int finish(sdrplay_api_DeviceT *device, int initialized, sdrplay_api_ErrT
            EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static int run_dual(sdrplay_api_DeviceT *device, unsigned int update_mask)
+static int run_dual(sdrplay_api_DeviceT *device, unsigned int update_mask,
+                    int test_controls)
 {
     double adc_rate = getenv("OPENRSP_PROBE_DUAL_ADC_RATE") != NULL &&
                       strcmp(getenv("OPENRSP_PROBE_DUAL_ADC_RATE"), "8") == 0 ?
@@ -145,6 +146,8 @@ static int run_dual(sdrplay_api_DeviceT *device, unsigned int update_mask)
         (double)before_power_b / (2.0 * before_samples_b) : 0.0;
     sdrplay_api_ErrT update_a = sdrplay_api_Success;
     sdrplay_api_ErrT update_b = sdrplay_api_Success;
+    sdrplay_api_ErrT controls_a = sdrplay_api_Success;
+    sdrplay_api_ErrT controls_b = sdrplay_api_Success;
     if ((update_mask & 1u) != 0u) {
         params->rxChannelA->tunerParams.rfFreq.rfHz = 853812500.0;
         params->rxChannelA->tunerParams.gain.LNAstate = 2u;
@@ -159,6 +162,24 @@ static int run_dual(sdrplay_api_DeviceT *device, unsigned int update_mask)
             device->dev, sdrplay_api_Tuner_B,
             sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Tuner_Gr, 0u);
     }
+    if (test_controls) {
+        params->rxChannelA->rspDuoTunerParams.rfNotchEnable = 1u;
+        params->rxChannelA->rspDuoTunerParams.rfDabNotchEnable = 1u;
+        params->devParams->rspDuoParams.extRefOutputEn = 1;
+        controls_a = sdrplay_api_Update(
+            device->dev, sdrplay_api_Tuner_A,
+            sdrplay_api_Update_RspDuo_RfNotchControl |
+            sdrplay_api_Update_RspDuo_RfDabNotchControl |
+            sdrplay_api_Update_RspDuo_ExtRefControl, 0u);
+        params->rxChannelB->rspDuoTunerParams.biasTEnable = 1u;
+        params->rxChannelB->rspDuoTunerParams.rfNotchEnable = 1u;
+        params->rxChannelB->rspDuoTunerParams.rfDabNotchEnable = 1u;
+        controls_b = sdrplay_api_Update(
+            device->dev, sdrplay_api_Tuner_B,
+            sdrplay_api_Update_RspDuo_BiasTControl |
+            sdrplay_api_Update_RspDuo_RfNotchControl |
+            sdrplay_api_Update_RspDuo_RfDabNotchControl, 0u);
+    }
     delay_ms(2000);
     unsigned long long samples_a = atomic_load(&metrics.samples[0]);
     unsigned long long samples_b = atomic_load(&metrics.samples[1]);
@@ -171,18 +192,20 @@ static int run_dual(sdrplay_api_DeviceT *device, unsigned int update_mask)
     double after_mean_b = after_samples_b != 0u ?
         (double)after_power_b / (2.0 * after_samples_b) : 0.0;
     fprintf(stderr,
-            "MODE_DUAL_RESULT update_a=%d update_b=%d a_samples=%llu a_callbacks=%u "
+            "MODE_DUAL_RESULT update_a=%d update_b=%d controls_a=%d controls_b=%d a_samples=%llu a_callbacks=%u "
             "a_resets=%u a_rf=%u a_gr=%u a_before_mean_square=%.1f "
             "a_after_mean_square=%.1f b_samples=%llu b_callbacks=%u b_resets=%u "
             "b_rf=%u b_gr=%u b_before_mean_square=%.1f "
             "b_after_mean_square=%.1f\n",
-            update_a, update_b, samples_a, atomic_load(&metrics.callbacks[0]),
+            update_a, update_b, controls_a, controls_b, samples_a,
+            atomic_load(&metrics.callbacks[0]),
             atomic_load(&metrics.resets[0]), atomic_load(&metrics.rf_changed[0]),
             atomic_load(&metrics.gr_changed[0]), before_mean_a, after_mean_a, samples_b,
             atomic_load(&metrics.callbacks[1]), atomic_load(&metrics.resets[1]),
             atomic_load(&metrics.rf_changed[1]), atomic_load(&metrics.gr_changed[1]),
             before_mean_b, after_mean_b);
     if (update_a != sdrplay_api_Success || update_b != sdrplay_api_Success ||
+        controls_a != sdrplay_api_Success || controls_b != sdrplay_api_Success ||
         samples_a == 0u || samples_b == 0u) status = sdrplay_api_Fail;
     return finish(device, 1, status);
 }
@@ -251,9 +274,10 @@ static int run_swap(sdrplay_api_DeviceT *device)
 int main(int argc, char **argv)
 {
     if (argc != 2 || (strcmp(argv[1], "dual") != 0 &&
+        strcmp(argv[1], "dual-controls") != 0 &&
         strcmp(argv[1], "dual-init") != 0 && strcmp(argv[1], "dual-a") != 0 &&
         strcmp(argv[1], "dual-b") != 0 && strcmp(argv[1], "swap") != 0)) {
-        fprintf(stderr, "usage: %s dual|dual-init|dual-a|dual-b|swap\n", argv[0]);
+        fprintf(stderr, "usage: %s dual|dual-controls|dual-init|dual-a|dual-b|swap\n", argv[0]);
         return EXIT_FAILURE;
     }
     sdrplay_api_ErrT status = sdrplay_api_Open();
@@ -272,5 +296,6 @@ int main(int argc, char **argv)
     unsigned int update_mask = strcmp(argv[1], "dual-init") == 0 ? 0u :
                                strcmp(argv[1], "dual-a") == 0 ? 1u :
                                strcmp(argv[1], "dual-b") == 0 ? 2u : 3u;
-    return run_dual(&devices[0], update_mask);
+    return run_dual(&devices[0], update_mask,
+                    strcmp(argv[1], "dual-controls") == 0);
 }

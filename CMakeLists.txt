@@ -219,6 +219,12 @@ if(UNIX)
     target_compile_options(sdrplay-rspduo-mode-probe PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
 
+    add_executable(sdrplay-rspduo-control-probe tools/sdrplay_rspduo_control_probe.c)
+    target_include_directories(sdrplay-rspduo-control-probe PRIVATE compat)
+    target_link_libraries(sdrplay-rspduo-control-probe PRIVATE sdrplay_api_compat m)
+    target_compile_options(sdrplay-rspduo-control-probe PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+
     add_executable(sdrplay-header-compat-test tests/sdrplay_header_compat_test.c)
     target_include_directories(sdrplay-header-compat-test PRIVATE compat)
     target_link_libraries(sdrplay-header-compat-test PRIVATE sdrplay_api_compat)

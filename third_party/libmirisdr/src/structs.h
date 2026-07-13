@@ -120,6 +120,10 @@ struct mirisdr_dev {
     unsigned int        bulk_recovery_attempts;
     unsigned int        rspduo_tuner;
     uint16_t            rspduo_gpio13;
+    unsigned int        rspduo_bias_tee[2];
+    unsigned int        rspduo_rf_notch[2];
+    unsigned int        rspduo_dab_notch[2];
+    unsigned int        rspduo_external_reference;
     mirisdr_rspduo_analytic_state analytic_state;
     mirisdr_rspduo_analytic_state analytic_state_b;
     int                 rspduo_dual;

@@ -24,6 +24,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 RSPduo modes | Live A/B single-tuner swap and simultaneous Stream A/Stream B dual mode hardware-verified |
+| RSPduo hardware controls | Bias-T on tuner B, RF/DAB notch on A/B, and external-reference output on A/B match observed API/USB control behavior; electrical voltage/filter/reference output not instrument-measured |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
@@ -55,8 +56,10 @@ PPM correction retunes the synthesizer by the inverse crystal-error factor and
 reports the completion through `fsChanged`, matching the documented API
 callback contract.
 
-RSPduo bias-T/antenna/notch/external-reference switching, RSPdx extensions, and
-controls belonging to other RSP models are not implemented. Dual-tuner mode
+RSPduo AM-port/AM-notch switching, RSPdx extensions, and controls belonging to
+other RSP models are not implemented. Bias-T (tuner B only), RF notch, DAB
+notch, and external-reference output are implemented from independently
+observed API 3.15.1 behavior. Dual-tuner mode
 requires a shared 6 or 8 MHz ADC clock, low IF at 1.620 or 2.048 MHz, and no
 more than 1.536 MHz requested RF bandwidth; OpenRSP then delivers approximately
 2 MS/s per tuner through the separate Stream A and Stream B callbacks. Invalid
@@ -281,4 +284,4 @@ OpenRSP is licensed under GPL-2.0-or-later because its direct hardware backend d
 
 ## Dedication
 
-For Carolyn, with love.
+Thanks Carolyn

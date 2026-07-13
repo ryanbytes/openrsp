@@ -50,6 +50,65 @@ static int mirisdr_rspduo_gpio(mirisdr_dev_t *p, uint8_t request, uint16_t value
                                    CTRL_TIMEOUT);
 }
 
+static uint16_t rspduo_active_low(uint16_t value, uint16_t mask,
+                                  unsigned int enabled)
+{
+    return enabled != 0u ? (uint16_t)(value & (uint16_t)~mask) :
+                           (uint16_t)(value | mask);
+}
+
+int mirisdr_set_rspduo_controls(mirisdr_dev_t *p, unsigned int tuner,
+                                unsigned int bias_tee, unsigned int rf_notch,
+                                unsigned int dab_notch,
+                                unsigned int external_reference,
+                                unsigned int changed_flags)
+{
+    if (!p || p->usb_pid != 0x3020u || (tuner != 1u && tuner != 2u) ||
+        bias_tee > 1u || rf_notch > 1u || dab_notch > 1u ||
+        external_reference > 1u ||
+        (tuner == 1u && bias_tee != 0u)) return -1;
+
+    unsigned int index = tuner - 1u;
+    p->rspduo_bias_tee[index] = bias_tee;
+    p->rspduo_rf_notch[index] = rf_notch;
+    p->rspduo_dab_notch[index] = dab_notch;
+    p->rspduo_external_reference = external_reference;
+
+    /* Clean-room API 3.15.1 traces show active-low GPIO controls.  Coalesce
+     * controls sharing a GPIO bank so a combined API update cannot restore a
+     * bit changed earlier in the same request. */
+    if ((changed_flags & MIRISDR_RSPDUO_CHANGE_EXT_REF) != 0u) {
+        uint16_t value = tuner == 1u ? 0x12a4u : 0x123fu;
+        value = rspduo_active_low(value, 0x0020u, external_reference);
+        if (mirisdr_rspduo_gpio(p, 0x4a, value) < 0) return -1;
+    }
+    if ((changed_flags & (MIRISDR_RSPDUO_CHANGE_BIAS_TEE |
+                          MIRISDR_RSPDUO_CHANGE_RF_NOTCH |
+                          (tuner == 1u ? MIRISDR_RSPDUO_CHANGE_DAB_NOTCH : 0u))) != 0u) {
+        uint16_t value = tuner == 1u ? 0x12dfu : 0x12ffu;
+        value = rspduo_active_low(value, tuner == 1u ? 0x0010u : 0x0080u,
+                                  rf_notch);
+        if (tuner == 1u)
+            value = rspduo_active_low(value, 0x0040u, dab_notch);
+        else
+            value = rspduo_active_low(value, 0x0002u, bias_tee);
+        if (mirisdr_rspduo_gpio(p, 0x4b, value) < 0) return -1;
+    }
+    if (tuner == 2u &&
+        (changed_flags & MIRISDR_RSPDUO_CHANGE_DAB_NOTCH) != 0u) {
+        unsigned int lna = p->rspduo_lna_state[1];
+        static const uint16_t gpio_13[] = {
+            0x13fe, 0x13fe, 0x13de, 0x13be, 0x13ff,
+            0x13ff, 0x13df, 0x13bf, 0x137f, 0x137f
+        };
+        if (lna >= sizeof(gpio_13) / sizeof(gpio_13[0])) return -1;
+        uint16_t value = rspduo_active_low(gpio_13[lna], 0x0002u, dab_notch);
+        if (mirisdr_rspduo_gpio(p, 0x4b, value) < 0) return -1;
+        p->rspduo_gpio13 = value;
+    }
+    return 0;
+}
+
 int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
                             unsigned int lna_state)
 {
@@ -87,16 +146,30 @@ int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
         uint16_t bank_transition = lna_state < 4u ?
                                    (uint16_t)(previous & ~1u) :
                                    (uint16_t)(previous | 1u);
+        uint16_t final_gpio = rspduo_active_low(tuner_b_gpio_4b[lna_state],
+                                                0x0002u,
+                                                p->rspduo_dab_notch[1]);
         if (mirisdr_rspduo_gpio(p, 0x4b, bank_transition) < 0 ||
             mirisdr_rspduo_gpio(p, 0x4a, tuner_b_gpio_4a[lna_state]) < 0 ||
-            mirisdr_rspduo_gpio(p, 0x4b, tuner_b_gpio_4b[lna_state]) < 0)
+            mirisdr_rspduo_gpio(p, 0x4b, final_gpio) < 0)
             return -1;
-        p->rspduo_gpio13 = tuner_b_gpio_4b[lna_state];
-    } else if (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
-               mirisdr_rspduo_gpio(p, 0x4a, gpio_12[lna_state]) < 0 ||
+        p->rspduo_gpio13 = final_gpio;
+    } else {
+        uint16_t gpio_12_4b = rspduo_active_low(0x12dfu, 0x0010u,
+                                                p->rspduo_rf_notch[0]);
+        gpio_12_4b = rspduo_active_low(gpio_12_4b, 0x0040u,
+                                      p->rspduo_dab_notch[0]);
+        uint16_t gpio_12_4a = rspduo_active_low(gpio_12[lna_state], 0x0020u,
+                                                p->rspduo_external_reference);
+        if (mirisdr_rspduo_gpio(p, 0x4b, gpio_12_4b) < 0 ||
+               mirisdr_rspduo_gpio(p, 0x4a, gpio_12_4a) < 0 ||
                mirisdr_rspduo_gpio(p, 0x4b, gpio_13[lna_state]) < 0) {
-        return -1;
+            return -1;
+        }
     }
+    unsigned int state_index = p->rspduo_tuner == 2u ? 1u : 0u;
+    p->rspduo_gain_reduction[state_index] = gain_reduction;
+    p->rspduo_lna_state[state_index] = lna_state;
     return 0;
 }
 

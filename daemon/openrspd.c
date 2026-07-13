@@ -264,7 +264,11 @@ static void describe_flags(uint32_t flags, char *buffer, size_t bytes)
         {OPENRSP_CHANGE_BANDWIDTH, "BW"},
         {OPENRSP_CHANGE_IF, "IF"},
         {OPENRSP_CHANGE_GAIN, "GAIN"},
-        {OPENRSP_CHANGE_AGC, "AGC"}
+        {OPENRSP_CHANGE_AGC, "AGC"},
+        {OPENRSP_CHANGE_BIAS_TEE, "BIAS"},
+        {OPENRSP_CHANGE_RF_NOTCH, "RF_NOTCH"},
+        {OPENRSP_CHANGE_DAB_NOTCH, "DAB_NOTCH"},
+        {OPENRSP_CHANGE_EXT_REF, "EXT_REF"}
     };
     size_t used = 0u;
     for (size_t index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
@@ -287,11 +291,13 @@ static void log_config(const char *operation, int descriptor, uint32_t flags,
     char flag_text[64];
     describe_flags(flags, flag_text, sizeof(flag_text));
     fprintf(stderr,
-            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d\n",
+            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d bias=%u rf_notch=%u dab_notch=%u ext_ref=%u\n",
             operation, descriptor, status, flag_text, config->sample_rate_hz,
             config->center_frequency_hz, config->bandwidth_hz,
             config->if_frequency_hz, config->gain_reduction_db,
-            config->lna_state, config->agc_mode, config->agc_setpoint_dbfs);
+            config->lna_state, config->agc_mode, config->agc_setpoint_dbfs,
+            config->bias_tee_enabled, config->rf_notch_enabled,
+            config->dab_notch_enabled, config->external_reference_enabled);
     (void)fflush(stderr);
 }
 
@@ -358,7 +364,37 @@ static bool valid_config(const openrsp_radio_config *config)
            config->gain_reduction_db >= 20 && config->gain_reduction_db <= 59 &&
            config->lna_state <= 9u && config->agc_mode >= 0 && config->agc_mode <= 4 &&
            config->agc_setpoint_dbfs >= -60 && config->agc_setpoint_dbfs <= -20 &&
+           config->bias_tee_enabled <= 1u && config->rf_notch_enabled <= 1u &&
+           config->dab_notch_enabled <= 1u &&
+           config->external_reference_enabled <= 1u &&
+           !(config->tuner == OPENRSP_TUNER_A && config->bias_tee_enabled != 0u) &&
            (config->tuner == OPENRSP_TUNER_A || config->tuner == OPENRSP_TUNER_B);
+}
+
+static unsigned int rspduo_control_flags(uint32_t flags)
+{
+    unsigned int result = 0u;
+    if ((flags & OPENRSP_CHANGE_BIAS_TEE) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_BIAS_TEE;
+    if ((flags & OPENRSP_CHANGE_RF_NOTCH) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_RF_NOTCH;
+    if ((flags & OPENRSP_CHANGE_DAB_NOTCH) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_DAB_NOTCH;
+    if ((flags & OPENRSP_CHANGE_EXT_REF) != 0u)
+        result |= MIRISDR_RSPDUO_CHANGE_EXT_REF;
+    return result;
+}
+
+static int set_rspduo_controls(mirisdr_dev_t *radio,
+                               const openrsp_radio_config *config,
+                               uint32_t flags)
+{
+    unsigned int control_flags = rspduo_control_flags(flags);
+    if (control_flags == 0u) return 0;
+    return mirisdr_set_rspduo_controls(
+        radio, config->tuner, config->bias_tee_enabled,
+        config->rf_notch_enabled, config->dab_notch_enabled,
+        config->external_reference_enabled, control_flags);
 }
 
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
@@ -490,6 +526,12 @@ static uint32_t configure_dual_radio(daemon_state *state,
         config->channel_a.bandwidth_hz,
         config->channel_a.gain_reduction_db, config->channel_a.lna_state,
         config->channel_b.gain_reduction_db, config->channel_b.lna_state);
+    if (result == 0)
+        result |= set_rspduo_controls(state->radio, &config->channel_a,
+                                      OPENRSP_CHANGE_RSPDUO_CONTROLS);
+    if (result == 0)
+        result |= set_rspduo_controls(state->radio, &config->channel_b,
+                                      OPENRSP_CHANGE_RSPDUO_CONTROLS);
     if (result < 0) {
         (void)mirisdr_close(state->radio);
         state->radio = NULL;
@@ -611,6 +653,8 @@ static void finish_recovery_config(daemon_state *state)
         result |= mirisdr_set_if_freq(state->radio,
                                       (uint32_t)target->if_frequency_hz);
     result |= set_gain(state->radio, target);
+    result |= set_rspduo_controls(state->radio, target,
+                                  OPENRSP_CHANGE_RSPDUO_CONTROLS);
     fprintf(stderr,
             "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u\n",
             result, bootstrap->center_frequency_hz, target->sample_rate_hz,
@@ -640,14 +684,19 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
             next->if_frequency_hz != old_channel->if_frequency_hz ||
             next->bandwidth_hz != old_channel->bandwidth_hz)
             return OPENRSP_STATUS_BAD_REQUEST;
-        int dual_result = mirisdr_update_rspduo_dual(
-            state->radio, next->tuner, next->center_frequency_hz,
-            next->gain_reduction_db, next->lna_state);
+        if (!valid_config(next)) return OPENRSP_STATUS_BAD_REQUEST;
+        int dual_result = 0;
+        if ((flags & (OPENRSP_CHANGE_RF | OPENRSP_CHANGE_GAIN)) != 0u)
+            dual_result |= mirisdr_update_rspduo_dual(
+                state->radio, next->tuner, next->center_frequency_hz,
+                next->gain_reduction_db, next->lna_state);
+        dual_result |= set_rspduo_controls(state->radio, next, flags);
         if (dual_result < 0) return OPENRSP_STATUS_IO_ERROR;
         *old_channel = *next;
         return OPENRSP_STATUS_OK;
     }
     if (next->tuner != old->tuner) return OPENRSP_STATUS_BAD_REQUEST;
+    if (!valid_config(next)) return OPENRSP_STATUS_BAD_REQUEST;
     if ((flags & OPENRSP_CHANGE_AGC) != 0u &&
         (next->agc_mode < 0 || next->agc_mode > 4 ||
          next->agc_setpoint_dbfs < -60 || next->agc_setpoint_dbfs > -20))
@@ -666,6 +715,7 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
         result |= mirisdr_set_if_freq(state->radio, (uint32_t)next->if_frequency_hz);
     if ((flags & (OPENRSP_CHANGE_GAIN | OPENRSP_CHANGE_RF)) != 0u)
         result |= set_gain(state->radio, next);
+    result |= set_rspduo_controls(state->radio, next, flags);
     if (result < 0) return OPENRSP_STATUS_IO_ERROR;
     state->config = *next;
     return OPENRSP_STATUS_OK;
@@ -945,6 +995,7 @@ static int serve_request(int descriptor, daemon_state *state)
         atomic_store(&state->first_iq_seen, false);
         atomic_store(&state->streaming, true);
         atomic_store(&state->stream_error, false);
+        state->recovery_config_pending = true;
         if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0)
             return -1;
         state->stream_thread_started = true;

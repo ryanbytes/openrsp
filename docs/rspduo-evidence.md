@@ -791,3 +791,53 @@ compatibility library after the mode changes. It linked successfully, and
 factory. That is a source/ABI integration result; dual-channel Soapy behavior
 was not claimed because the upstream adapter's application-level mode choices
 were not exercised in this hardware window.
+
+## RSPduo bias, notch, and reference controls (2026-07-13)
+
+A clean-room public-API probe exercised bias-T, RF notch, DAB notch, and
+external-reference output in initialized single-tuner sessions against API
+3.15.1. Tuner-A bias-T enable and disable both returned `InvalidParam`; tuner-B
+bias-T and the other controls on A and B returned success while IQ continued.
+The successful bounded sessions delivered approximately 3.0 million samples,
+reported one initial reset, and uninitialized, released, and closed cleanly.
+
+The official process boundary was observed at `libusb_control_transfer` with
+the proprietary daemon isolated from OpenRSP. Only request metadata and state
+deltas were recorded; no raw USB capture, private header, firmware, receiver
+identity, or proprietary code was retained. At the tested 853.8625 MHz,
+GR 45/LNA 2 configuration, the independently observed active-low deltas were:
+
+- tuner A RF notch: request `0x4b`, `0x12df` to `0x12cf`;
+- tuner B RF notch: request `0x4b`, `0x12ff` to `0x127f`;
+- tuner A DAB notch: request `0x4b`, `0x12df` to `0x129f`;
+- tuner B DAB notch: request `0x4b`, `0x13de` to `0x13dc`;
+- tuner B bias-T: request `0x4b`, `0x12ff` to `0x12fd`;
+- external reference: request `0x4a`, A `0x12a4` to `0x1284`, B `0x123f` to `0x121f`.
+
+Protocol version 5 adds the four persistent control fields to each channel
+configuration and distinct update flags. The compatibility layer maps the
+public update reasons and reproduces the tuner-A bias error. The daemon applies
+and retains the state across recovery; the direct backend merges active-low
+control bits with gain/LNA GPIO state and performs no steady-state allocation.
+Deterministic compatibility fixtures verify A/B routing, flag mapping, combined
+updates, and the invalid tuner-A bias request.
+
+On the physical RSPduo, every supported single-tuner enable/disable update
+returned success, continued streaming roughly 3.1 million samples per session,
+and emitted the expected GPIO delta. An 8 MHz dual low-IF Debug run delivered
+8,042,496 A samples and 8,037,120 B samples while independent RF/gain and A/B
+control updates all succeeded. The Release run delivered 8,042,496 samples on
+each tuner with the same successful updates and clean cleanup. Killing the
+daemon during an active tuner-B bias session produced `DeviceFailure`; a fresh
+protocol-v5 daemon and client session immediately streamed and toggled bias-T
+without a USB reset or physical replug.
+
+The ASan/UBSan build passed all 14 hardware-free tests and a live single-tuner
+RF-notch session without a sanitizer report. Its dual control run delivered
+both streams and applied the A controls, but the instrumented client did not
+complete the full control/cleanup sequence before its update timeout; this is
+not counted as a passing dual ASan hardware run. No voltmeter, signal source,
+spectrum analyzer, or frequency counter was attached, so the evidence proves
+API return parity, GPIO command parity, stream continuity, cleanup, and
+recovery—not bias voltage, notch attenuation, or reference-output amplitude and
+frequency.

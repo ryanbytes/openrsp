@@ -145,6 +145,17 @@ MIRISDR_API int mirisdr_get_tuner_gains (mirisdr_dev_t *dev, int *gains);
 MIRISDR_API int mirisdr_set_tuner_gain (mirisdr_dev_t *p, int gain);
 MIRISDR_API int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
                                          unsigned int lna_state);
+#define MIRISDR_RSPDUO_CHANGE_BIAS_TEE (1u << 0)
+#define MIRISDR_RSPDUO_CHANGE_RF_NOTCH (1u << 1)
+#define MIRISDR_RSPDUO_CHANGE_DAB_NOTCH (1u << 2)
+#define MIRISDR_RSPDUO_CHANGE_EXT_REF (1u << 3)
+MIRISDR_API int mirisdr_set_rspduo_controls(mirisdr_dev_t *p,
+                                             unsigned int tuner,
+                                             unsigned int bias_tee,
+                                             unsigned int rf_notch,
+                                             unsigned int dab_notch,
+                                             unsigned int external_reference,
+                                             unsigned int changed_flags);
 MIRISDR_API int mirisdr_get_tuner_gain (mirisdr_dev_t *p);              /* extra */
 MIRISDR_API int mirisdr_set_tuner_gain_mode (mirisdr_dev_t *p, int mode);
 MIRISDR_API int mirisdr_get_tuner_gain_mode (mirisdr_dev_t *p);         /* extra */

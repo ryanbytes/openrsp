@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 4u
+#define OPENRSP_PROTOCOL_VERSION 5u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -70,6 +70,10 @@ typedef struct {
     int32_t agc_mode;
     int32_t agc_setpoint_dbfs;
     uint32_t tuner;
+    uint32_t bias_tee_enabled;
+    uint32_t rf_notch_enabled;
+    uint32_t dab_notch_enabled;
+    uint32_t external_reference_enabled;
 } openrsp_radio_config;
 
 #define OPENRSP_TUNER_A 1u
@@ -89,6 +93,13 @@ typedef struct {
 #define OPENRSP_CHANGE_IF          (1u << 3)
 #define OPENRSP_CHANGE_GAIN        (1u << 4)
 #define OPENRSP_CHANGE_AGC         (1u << 5)
+#define OPENRSP_CHANGE_BIAS_TEE    (1u << 6)
+#define OPENRSP_CHANGE_RF_NOTCH    (1u << 7)
+#define OPENRSP_CHANGE_DAB_NOTCH   (1u << 8)
+#define OPENRSP_CHANGE_EXT_REF     (1u << 9)
+#define OPENRSP_CHANGE_RSPDUO_CONTROLS \
+    (OPENRSP_CHANGE_BIAS_TEE | OPENRSP_CHANGE_RF_NOTCH | \
+     OPENRSP_CHANGE_DAB_NOTCH | OPENRSP_CHANGE_EXT_REF)
 
 typedef struct {
     uint32_t changed_flags;

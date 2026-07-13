@@ -496,12 +496,26 @@ static void fill_radio_config_tuner(const compat_device_context *device,
     config->agc_mode = channel->ctrlParams.agc.enable;
     config->agc_setpoint_dbfs = channel->ctrlParams.agc.setPoint_dBfs;
     config->tuner = tuner == sdrplay_api_Tuner_B ? OPENRSP_TUNER_B : OPENRSP_TUNER_A;
+    config->bias_tee_enabled = channel->rspDuoTunerParams.biasTEnable;
+    config->rf_notch_enabled = channel->rspDuoTunerParams.rfNotchEnable;
+    config->dab_notch_enabled = channel->rspDuoTunerParams.rfDabNotchEnable;
+    config->external_reference_enabled = device->dev_params.rspDuoParams.extRefOutputEn;
 }
 
 static void fill_radio_config(const compat_device_context *device,
                               openrsp_radio_config *config)
 {
     fill_radio_config_tuner(device, device->tuner, config);
+}
+
+static uint32_t enabled_rspduo_control_flags(const openrsp_radio_config *config)
+{
+    uint32_t flags = 0u;
+    if (config->bias_tee_enabled != 0u) flags |= OPENRSP_CHANGE_BIAS_TEE;
+    if (config->rf_notch_enabled != 0u) flags |= OPENRSP_CHANGE_RF_NOTCH;
+    if (config->dab_notch_enabled != 0u) flags |= OPENRSP_CHANGE_DAB_NOTCH;
+    if (config->external_reference_enabled != 0u) flags |= OPENRSP_CHANGE_EXT_REF;
+    return flags;
 }
 
 static uint32_t protocol_change_flags(sdrplay_api_ReasonForUpdateT reason)
@@ -514,6 +528,14 @@ static uint32_t protocol_change_flags(sdrplay_api_ReasonForUpdateT reason)
     if ((reason & sdrplay_api_Update_Tuner_IfType) != 0u) flags |= OPENRSP_CHANGE_IF;
     if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u) flags |= OPENRSP_CHANGE_GAIN;
     if ((reason & sdrplay_api_Update_Ctrl_Agc) != 0u) flags |= OPENRSP_CHANGE_AGC;
+    if ((reason & sdrplay_api_Update_RspDuo_BiasTControl) != 0u)
+        flags |= OPENRSP_CHANGE_BIAS_TEE;
+    if ((reason & sdrplay_api_Update_RspDuo_RfNotchControl) != 0u)
+        flags |= OPENRSP_CHANGE_RF_NOTCH;
+    if ((reason & sdrplay_api_Update_RspDuo_RfDabNotchControl) != 0u)
+        flags |= OPENRSP_CHANGE_DAB_NOTCH;
+    if ((reason & sdrplay_api_Update_RspDuo_ExtRefControl) != 0u)
+        flags |= OPENRSP_CHANGE_EXT_REF;
     return flags;
 }
 
@@ -533,12 +555,8 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
         sdrplay_api_Update_Rsp2_RfNotchControl |
         sdrplay_api_Update_Rsp2_ExtRefControl;
     const uint32_t unsupported_duo_hardware =
-        sdrplay_api_Update_RspDuo_ExtRefControl |
-        sdrplay_api_Update_RspDuo_BiasTControl |
         sdrplay_api_Update_RspDuo_AmPortSelect |
-        sdrplay_api_Update_RspDuo_Tuner1AmNotchControl |
-        sdrplay_api_Update_RspDuo_RfNotchControl |
-        sdrplay_api_Update_RspDuo_RfDabNotchControl;
+        sdrplay_api_Update_RspDuo_Tuner1AmNotchControl;
 
     if ((extension & ~0x7fu) != 0u) return sdrplay_api_InvalidParam;
     if (extension != sdrplay_api_Update_Ext1_None)
@@ -546,6 +564,15 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
     if ((reason & other_models) != 0u) return sdrplay_api_HwVerError;
     if ((reason & unsupported_duo_hardware) != 0u)
         return sdrplay_api_InvalidMode;
+    if ((reason & sdrplay_api_Update_RspDuo_BiasTControl) != 0u &&
+        tuner != sdrplay_api_Tuner_B)
+        return sdrplay_api_InvalidParam;
+    if (channel->rspDuoTunerParams.biasTEnable > 1u ||
+        channel->rspDuoTunerParams.rfNotchEnable > 1u ||
+        channel->rspDuoTunerParams.rfDabNotchEnable > 1u ||
+        (device->dev_params.rspDuoParams.extRefOutputEn != 0 &&
+         device->dev_params.rspDuoParams.extRefOutputEn != 1))
+        return sdrplay_api_InvalidParam;
     if (device->mode == sdrplay_api_RspDuoMode_Dual_Tuner &&
         (reason & (sdrplay_api_Update_Dev_Fs |
                    sdrplay_api_Update_Tuner_BwType |
@@ -1485,16 +1512,19 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     int gain_result = 0;
     if (rspduo.mode == sdrplay_api_RspDuoMode_Dual_Tuner) {
         fill_radio_config_tuner(&rspduo, sdrplay_api_Tuner_A, &config);
-        gain_result = openrsp_daemon_backend_update(rspduo.backend, &config,
-                                                    OPENRSP_CHANGE_GAIN);
+        gain_result = openrsp_daemon_backend_update(
+            rspduo.backend, &config,
+            OPENRSP_CHANGE_GAIN | enabled_rspduo_control_flags(&config));
         if (gain_result >= 0) {
             fill_radio_config_tuner(&rspduo, sdrplay_api_Tuner_B, &config);
-            gain_result = openrsp_daemon_backend_update(rspduo.backend, &config,
-                                                        OPENRSP_CHANGE_GAIN);
+            gain_result = openrsp_daemon_backend_update(
+                rspduo.backend, &config,
+                OPENRSP_CHANGE_GAIN | enabled_rspduo_control_flags(&config));
         }
     } else {
-        gain_result = openrsp_daemon_backend_update(rspduo.backend, &config,
-                                                    OPENRSP_CHANGE_GAIN);
+        gain_result = openrsp_daemon_backend_update(
+            rspduo.backend, &config,
+            OPENRSP_CHANGE_GAIN | enabled_rspduo_control_flags(&config));
     }
     if (gain_result < 0) {
         (void)openrsp_daemon_backend_stop(rspduo.backend);
@@ -1674,6 +1704,10 @@ sdrplay_api_ErrT sdrplay_api_SwapRspDuoActiveTuner(
         sdrplay_api_Tuner_B : sdrplay_api_Tuner_A;
     sdrplay_api_RxChannelParamsT saved = *channel_for_tuner(&rspduo, next);
     *channel_for_tuner(&rspduo, next) = *channel_for_tuner(&rspduo, rspduo.tuner);
+    /* Tuner A has no bias-tee control; API 3.15.1 returns InvalidParam for
+     * that update, so never carry tuner B's enabled bit onto tuner A. */
+    if (next == sdrplay_api_Tuner_A)
+        channel_for_tuner(&rspduo, next)->rspDuoTunerParams.biasTEnable = 0u;
     openrsp_swap_request swap = {
         .tuner = next == sdrplay_api_Tuner_B ? OPENRSP_TUNER_B : OPENRSP_TUNER_A
     };

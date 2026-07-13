@@ -150,8 +150,27 @@ static int serve_client(int descriptor)
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
             const openrsp_update_request *update = (const openrsp_update_request *)payload;
             ++streaming_updates;
+            const int invalid_controls =
+                ((update->changed_flags & OPENRSP_CHANGE_BIAS_TEE) != 0u &&
+                 (update->config.tuner != OPENRSP_TUNER_B ||
+                  update->config.bias_tee_enabled != 1u)) ||
+                ((update->changed_flags & OPENRSP_CHANGE_RF_NOTCH) != 0u &&
+                 update->config.rf_notch_enabled != 1u) ||
+                ((update->changed_flags & OPENRSP_CHANGE_DAB_NOTCH) != 0u &&
+                 update->config.dab_notch_enabled != 1u) ||
+                ((update->changed_flags & OPENRSP_CHANGE_EXT_REF) != 0u &&
+                 update->config.external_reference_enabled != 1u);
             const int reject_update =
-                update->config.center_frequency_hz == 123456789u;
+                update->config.center_frequency_hz == 123456789u || invalid_controls;
+            if (invalid_controls) {
+                fprintf(stderr,
+                        "mock rejected controls flags=%x tuner=%u bias=%u rf=%u dab=%u ext=%u\n",
+                        update->changed_flags, update->config.tuner,
+                        update->config.bias_tee_enabled,
+                        update->config.rf_notch_enabled,
+                        update->config.dab_notch_enabled,
+                        update->config.external_reference_enabled);
+            }
             const openrsp_response response = {
                 .status = reject_update ? OPENRSP_STATUS_IO_ERROR : OPENRSP_STATUS_OK,
                 .sequence = request.sequence,
@@ -649,6 +668,7 @@ static void run_dual_fixture(void)
         channels[tuner]->ctrlParams.decimation.decimationFactor =
             tuner == 0u ? 2u : 4u;
     }
+    channels[0]->rspDuoTunerParams.biasTEnable = 0u;
     dual_callback_metrics metrics = {
         .a = {.lock = PTHREAD_MUTEX_INITIALIZER,
               .ready = PTHREAD_COND_INITIALIZER, .validate_samples = 0},
@@ -677,21 +697,21 @@ static void run_dual_fixture(void)
                               sdrplay_api_Update_Tuner_Gr, 0u) ==
            sdrplay_api_Success);
     assert(wait_for_callbacks_above(&metrics.a, callbacks_a) == 0);
+    assert(wait_for_update_flags(&metrics.a, 1, 1) == 0);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
                               sdrplay_api_Update_Tuner_Frf |
                               sdrplay_api_Update_Tuner_Gr, 0u) ==
            sdrplay_api_Success);
     assert(wait_for_callbacks_above(&metrics.b, callbacks_b) == 0);
-    assert(metrics.a.rf_changed != 0 && metrics.a.gain_changed != 0);
-    assert(metrics.b.rf_changed != 0 && metrics.b.gain_changed != 0);
+    assert(wait_for_update_flags(&metrics.b, 1, 1) == 0);
     assert(metrics.a.reset_callbacks == 1u && metrics.b.reset_callbacks == 1u);
-    callbacks_b = metrics.b.callbacks;
+    unsigned int samples_b_before_decimation = metrics.b.samples;
     channels[1]->ctrlParams.decimation.decimationFactor = 8u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
                               sdrplay_api_Update_Ctrl_Decimation, 0u) ==
            sdrplay_api_Success);
-    assert(wait_for_callbacks_above(&metrics.b, callbacks_b) == 0);
-    assert(metrics.b.last_samples > 0u);
+    assert(wait_for_samples_at_least(&metrics.b,
+                                     samples_b_before_decimation + 1u) == 0);
     assert(metrics.a.last_samples == decimated_a_samples);
     channels[1]->tunerParams.rfFreq.rfHz = 102000000.0;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
@@ -702,6 +722,22 @@ static void run_dual_fixture(void)
     assert(metrics.b.last_overload_event == sdrplay_api_Overload_Detected);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
                               sdrplay_api_Update_Ctrl_OverloadMsgAck, 0u) ==
+           sdrplay_api_Success);
+    channels[0]->rspDuoTunerParams.rfNotchEnable = 1u;
+    channels[0]->rspDuoTunerParams.rfDabNotchEnable = 1u;
+    params->devParams->rspDuoParams.extRefOutputEn = 1;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_RfNotchControl |
+                              sdrplay_api_Update_RspDuo_RfDabNotchControl |
+                              sdrplay_api_Update_RspDuo_ExtRefControl, 0u) ==
+           sdrplay_api_Success);
+    channels[1]->rspDuoTunerParams.biasTEnable = 1u;
+    channels[1]->rspDuoTunerParams.rfNotchEnable = 1u;
+    channels[1]->rspDuoTunerParams.rfDabNotchEnable = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
+                              sdrplay_api_Update_RspDuo_BiasTControl |
+                              sdrplay_api_Update_RspDuo_RfNotchControl |
+                              sdrplay_api_Update_RspDuo_RfDabNotchControl, 0u) ==
            sdrplay_api_Success);
     assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
@@ -991,7 +1027,19 @@ int main(void)
            sdrplay_api_HwVerError);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_RspDuo_BiasTControl, 0u) ==
-           sdrplay_api_InvalidMode);
+           sdrplay_api_InvalidParam);
+    params->rxChannelA->rspDuoTunerParams.rfNotchEnable = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_RfNotchControl, 0u) ==
+           sdrplay_api_Success);
+    params->rxChannelA->rspDuoTunerParams.rfDabNotchEnable = 1u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_RfDabNotchControl, 0u) ==
+           sdrplay_api_Success);
+    params->devParams->rspDuoParams.extRefOutputEn = 1;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_ExtRefControl, 0u) ==
+           sdrplay_api_Success);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A, 0u,
                               0x80u) == sdrplay_api_InvalidParam);
 
@@ -1196,6 +1244,16 @@ int main(void)
     params->rxChannelB->tunerParams.gain.LNAstate = 4u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
                               sdrplay_api_Update_Tuner_Gr, 0u) ==
+           sdrplay_api_Success);
+    params->rxChannelB->rspDuoTunerParams.biasTEnable = 1u;
+    params->rxChannelB->rspDuoTunerParams.rfNotchEnable = 1u;
+    params->rxChannelB->rspDuoTunerParams.rfDabNotchEnable = 1u;
+    params->devParams->rspDuoParams.extRefOutputEn = 1;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
+                              sdrplay_api_Update_RspDuo_BiasTControl |
+                              sdrplay_api_Update_RspDuo_RfNotchControl |
+                              sdrplay_api_Update_RspDuo_RfDabNotchControl |
+                              sdrplay_api_Update_RspDuo_ExtRefControl, 0u) ==
            sdrplay_api_Success);
     active_tuner = sdrplay_api_Tuner_B;
     assert(sdrplay_api_SwapRspDuoActiveTuner(devices[0].dev, &active_tuner,
