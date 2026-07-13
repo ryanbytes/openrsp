@@ -154,7 +154,7 @@ int main(void)
     uint32_t reg3 = 0u;
     uint32_t reg4 = 0u;
     assert(mirisdr_rspduo_pll_words(2048000u, &reg3, &reg4) == 0);
-    assert(reg3 == 0x01181fu);
+    assert(reg3 == 0x01081fu);
     assert(reg4 == 0x0624ddu);
     assert(mirisdr_rspduo_252_format_word(2048000u) == 0x000005u);
     assert(mirisdr_rspduo_252_format_word(3072000u) == 0x000094u);
@@ -173,6 +173,9 @@ int main(void)
     assert(mirisdr_rspduo_format_samples(7000000u) == 336u);
     assert(mirisdr_rspduo_format_samples(9000000u) == 384u);
     assert(mirisdr_rspduo_format_samples(10000000u) == 504u);
+    assert(mirisdr_rspduo_pll_words(10000000u, &reg3, &reg4) == 0);
+    assert(reg3 == 0x01ca07u);
+    assert(reg4 == 0u);
     assert(mirisdr_rspduo_pll_words(0u, &reg3, &reg4) < 0);
     assert(mirisdr_rspduo_pll_words(2048000u, NULL, &reg4) < 0);
     assert_gain_plans();

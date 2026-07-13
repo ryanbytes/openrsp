@@ -420,48 +420,35 @@ The API's upper boundary of 10.66 MS/s was then measured separately at
 SDRTrunk restart. This covers the accepted API sample-rate endpoints as well as
 the rate set advertised by the current Soapy adapter.
 
-## Analytic IQ and spectrum orientation (2026-07-13)
+## Single-tuner complex width correction (2026-07-13)
 
-A known 853.8625 MHz signal was captured with the receiver centered at
-853.7125 MHz. The original unpacker placed the signal at both +149.84 and
--149.84 kHz with -0.044 dB image rejection. Inspection and measurement showed
-that the RSPduo single-tuner USB words are two real ADC lanes rather than one
-complex pair; tuner A was routed to the second lane. Calling those lanes I and
-Q was wrong even though a real-signal decoder could still process the result.
+The earlier analytic-IQ conclusion was wrong. A 10 MS/s SDRTrunk display made
+the failure visible: OpenRSP populated only the positive-frequency half of the
+complex spectrum. Callback throughput still measured 10 MS/s, so the previous
+rate tests did not establish 10 MHz spectral coverage. The earlier 61.51 dB
+image-rejection measurement was evidence of that one-sided Hilbert
+output, not evidence that the complete complex stream was correct.
 
-The core direct backend now converts tuner A's real lane to analytic IQ with a
-stateful 63-tap Hilbert FIR. Its antisymmetric tap pairs use 16 multiplies per
-sample and a duplicated ring buffer, preserving filter quality without modulo
-operations in the hot loop. A synthetic split-buffer regression requires more
-than 30 dB rejection of the negative-frequency image and proves filter state
-continues across USB callback boundaries.
+Clean-room control tracing at 10 MS/s and 8 MHz bandwidth found that API 3.15.1
+programs ADC register 3 as `0x01ca07` and packet-format register 7 as
+`0x000c94`. OpenRSP used `0x01da07`: the inherited MSi2500 filter-mode nibble
+was one bit higher at every sample-rate range. The same discrepancy was
+observed at 2.048 MS/s (`0x01081f` official versus `0x01181f` old OpenRSP).
+OpenRSP now uses the observed `0`, `4`, `8`, and `c` filter-mode nibbles and
+passes the hardware's complex I/Q pair directly. The single-lane Hilbert path
+and its synthetic image-rejection test were removed.
 
-The final physical capture placed the signal peak at +149,906.25 Hz and its
-occupied-spectrum centroid at +149,834.57 Hz, 165.43 Hz below the expected
-offset. Integrated power in the positive 25 kHz window exceeded its negative
-image by 61.51 dB. This proves spectrum orientation and useful image rejection
-for that 2.048 MS/s tuple. The frequency comparison uses the locally identified
-signal, not a traceable laboratory frequency standard, so it is field evidence
-rather than an absolute oscillator calibration.
-
-The [NWS county-coverage table](https://www.weather.gov/nwr/county_coverage?State=IN)
-currently lists Marion WXM-98 on 162.450 MHz as normal and covering all of
-Wabash County. It was also tested at a +50 kHz offset with 200 kHz RF bandwidth
-and the highest verified VHF gain state. The corrected analytic path rejected
-the negative image by 32.62 dB, but the expected channel was only 0.30 dB above
-adjacent spectrum. Reception of WXM-98 on the connected antenna is therefore
-inconclusive and is not used as the orientation proof. The upstream Soapy
-adapter did pass its physical IFGR/RFGR and AGC-restoration test with the
-receiver centered at 162.300 MHz.
-
-After analytic conversion was enabled, the native API again passed 2, 2.048,
-3, 4, 5, 6, 7, 8, 9, 10, and 10.66 MS/s with SDRTrunk stopped to remove host
-load; wall-clock error ranged from 0.0173 to 0.7926 percent. The upstream Soapy
-adapter independently passed all 19 advertised rates from 62.5 kS/s through
-10 MS/s, with error from 0.0030 to 0.3433 percent, and restored AGC. Running the
-6 MS/s gate while the normal high-CPU SDRTrunk workload remained active limited
-both the pre-fix and analytic daemons to about 4.03 MS/s, proving that result was
-host-load interference rather than an analytic-filter regression.
+The public-API rate probe now also reports I/Q RMS, I/Q correlation, and
+aggregate power at seven symmetric FFT bins in each spectral half; it retains
+no samples. At 10 MS/s the official API measured 40.763 I RMS, 37.512 Q RMS,
+and a negative-to-positive aggregate ratio of +0.440 dB. The corrected OpenRSP
+path measured both halves within 0.351 dB while the installed Release daemon
+delivered 10,015,003 samples/s (0.1500 percent wall-clock error). These field
+measurements establish that the missing spectral half is restored. Rates at or
+above 8 MS/s now fail the probe if the two aggregates differ by more than 20 dB
+or if the bounded spectrum sample is incomplete. This does not establish
+laboratory-grade passband flatness at the outer edges of the nominal 8 MHz RF
+filter.
 
 A five-minute post-conversion native API soak ran with the normal SDRTrunk
 workload active and alternated 2.048/3.072 MS/s, RF frequency, and gain 20 times
@@ -717,11 +704,12 @@ the core applies B-specific initialization, routing, gain-state, and shutdown
 GPIO sequences. Hot updates cannot silently change tuners; changing the tuner
 requires a new device session.
 
-An initial implementation incorrectly inferred that B occupied USB lane 0.
-Direct raw-lane measurements disproved that: after the startup transient, lane
-0 was nearly empty while lane 1 measured about 234 RMS counts, matching the
-official B reference of about 245. Both A and B single-tuner routes therefore
-use lane 1 before OpenRSP's analytic-IQ conversion.
+An initial implementation incorrectly inferred that B occupied a separate USB
+lane, and a later implementation incorrectly treated the single-tuner words as
+real lanes requiring analytic conversion. Those measurements were made while
+the ADC was in the wrong filter mode and do not identify the final complex I/Q
+mapping. Tuner A and B single mode now use the same verified complex packet
+format; their differences remain confined to frontend routing and gain state.
 
 With SDRTrunk stopped to remove known host-load interference, tuner B at
 853.8625 MHz and 10 MS/s delivered 80,625,664 samples over 8.062949 seconds,

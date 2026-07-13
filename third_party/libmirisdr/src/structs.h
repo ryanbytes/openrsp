@@ -16,7 +16,6 @@
  */
 
 #include <stdatomic.h>
-#include "rspduo_analytic.h"
 
 enum {
     MIRISDR_ASYNC_INACTIVE = 0,
@@ -126,8 +125,6 @@ struct mirisdr_dev {
     unsigned int        rspduo_external_reference;
     unsigned int        rspduo_am_port;
     unsigned int        rspduo_am_notch;
-    mirisdr_rspduo_analytic_state analytic_state;
-    mirisdr_rspduo_analytic_state analytic_state_b;
     int                 rspduo_dual;
     uint32_t            rspduo_freq[2];
     int                 rspduo_gain_reduction[2];

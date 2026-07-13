@@ -75,8 +75,11 @@ int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3_out, uint32_t *reg4_o
 	reg3 |= (uint32_t)(i / 2u - 1u) << 2;
 	reg3 |= (uint32_t)((fract >> 20) & 1u) << 7;
 	reg3 |= (uint32_t)n << 8;
-	reg3 |= (rate <= 6048000u ? 0x01u : rate <= 8064000u ? 0x05u :
-	         rate <= 9216000u ? 0x09u : 0x0du) << 12;
+	/* RSPduo uses the complex-output filter modes observed from API 3.15.
+	 * The legacy MSi2500 values are one bit higher and select the real-output
+	 * path, which leaves half of a complex application's spectrum empty. */
+	reg3 |= (rate <= 6048000u ? 0x00u : rate <= 8064000u ? 0x04u :
+	         rate <= 9216000u ? 0x08u : 0x0cu) << 12;
 	reg3 |= 1u << 16;
 	*reg3_out = reg3;
 	*reg4_out = (uint32_t)fract & 0xfffffu;

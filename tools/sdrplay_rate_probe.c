@@ -12,19 +12,72 @@
 #include <time.h>
 
 #define RATE_ERROR_LIMIT 0.05
+#define SPECTRUM_BLOCK_SAMPLES 1024u
+#define SPECTRUM_MAX_BLOCKS 8u
 
 typedef struct {
     atomic_ullong samples;
+    atomic_ullong i_power;
+    atomic_ullong q_power;
+    atomic_llong iq_cross;
+    atomic_uint spectrum_blocks;
+    double negative_spectrum_power;
+    double positive_spectrum_power;
 } rate_metrics;
+
+static void accumulate_spectrum(rate_metrics *metrics, const short *xi, const short *xq,
+                                unsigned int num_samples)
+{
+    static const int bins[] = {64, 128, 192, 256, 320, 384, 448};
+    if (num_samples < SPECTRUM_BLOCK_SAMPLES ||
+        atomic_load(&metrics->spectrum_blocks) >= SPECTRUM_MAX_BLOCKS) return;
+    double negative = 0.0;
+    double positive = 0.0;
+    const double tau = 2.0 * acos(-1.0);
+    for (size_t bin_index = 0u; bin_index < sizeof(bins) / sizeof(bins[0]); ++bin_index) {
+        for (int direction = -1; direction <= 1; direction += 2) {
+            double real = 0.0;
+            double imaginary = 0.0;
+            const double step = tau * direction * bins[bin_index] /
+                (double)SPECTRUM_BLOCK_SAMPLES;
+            for (unsigned int sample = 0u; sample < SPECTRUM_BLOCK_SAMPLES; ++sample) {
+                const double window = 0.5 - 0.5 * cos(tau * sample /
+                                                       (SPECTRUM_BLOCK_SAMPLES - 1u));
+                const double cosine = cos(step * sample);
+                const double sine = sin(step * sample);
+                real += window * (xi[sample] * cosine + xq[sample] * sine);
+                imaginary += window * (xq[sample] * cosine - xi[sample] * sine);
+            }
+            const double power = real * real + imaginary * imaginary;
+            if (direction < 0) negative += power;
+            else positive += power;
+        }
+    }
+    metrics->negative_spectrum_power += negative;
+    metrics->positive_spectrum_power += positive;
+    atomic_fetch_add(&metrics->spectrum_blocks, 1u);
+}
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int num_samples, unsigned int reset, void *opaque)
 {
-    (void)xi;
-    (void)xq;
     (void)params;
     (void)reset;
     rate_metrics *metrics = opaque;
+    accumulate_spectrum(metrics, xi, xq, num_samples);
+    unsigned long long i_power = 0u;
+    unsigned long long q_power = 0u;
+    long long iq_cross = 0;
+    for (unsigned int sample = 0u; sample < num_samples; ++sample) {
+        const long long i = xi[sample];
+        const long long q = xq[sample];
+        i_power += (unsigned long long)(i * i);
+        q_power += (unsigned long long)(q * q);
+        iq_cross += i * q;
+    }
+    atomic_fetch_add(&metrics->i_power, i_power);
+    atomic_fetch_add(&metrics->q_power, q_power);
+    atomic_fetch_add(&metrics->iq_cross, iq_cross);
     atomic_fetch_add(&metrics->samples, num_samples);
 }
 
@@ -65,6 +118,12 @@ static int measure_rate(sdrplay_api_DeviceT *device,
         return -1;
     }
     atomic_store(&metrics->samples, 0u);
+    atomic_store(&metrics->i_power, 0u);
+    atomic_store(&metrics->q_power, 0u);
+    atomic_store(&metrics->iq_cross, 0);
+    atomic_store(&metrics->spectrum_blocks, 0u);
+    metrics->negative_spectrum_power = 0.0;
+    metrics->positive_spectrum_power = 0.0;
     const double started = monotonic_seconds();
     if (started < 0.0 || sleep_milliseconds(1500) < 0) {
         perror("rate measurement clock");
@@ -78,10 +137,29 @@ static int measure_rate(sdrplay_api_DeviceT *device,
     }
     const double measured = (double)samples / elapsed;
     const double error = fabs(measured - requested) / requested;
-    printf("rate requested=%.0f measured=%.3f error=%.4f%% samples=%llu\n",
-           requested, measured, error * 100.0, samples);
+    const double i_rms = sqrt((double)atomic_load(&metrics->i_power) / (double)samples);
+    const double q_rms = sqrt((double)atomic_load(&metrics->q_power) / (double)samples);
+    const double iq = (double)atomic_load(&metrics->iq_cross) / (double)samples;
+    const double correlation = i_rms > 0.0 && q_rms > 0.0 ? iq / (i_rms * q_rms) : 0.0;
+    const unsigned int spectrum_blocks = atomic_load_explicit(
+        &metrics->spectrum_blocks, memory_order_acquire);
+    const double spectrum_ratio_db = spectrum_blocks == SPECTRUM_MAX_BLOCKS &&
+        metrics->negative_spectrum_power > 0.0 && metrics->positive_spectrum_power > 0.0 ?
+        10.0 * log10(metrics->negative_spectrum_power /
+                     metrics->positive_spectrum_power) : 0.0;
+    printf("rate requested=%.0f measured=%.3f error=%.4f%% samples=%llu "
+           "i_rms=%.3f q_rms=%.3f iq_correlation=%.9f "
+           "negative_to_positive_db=%.3f spectrum_blocks=%u\n",
+           requested, measured, error * 100.0, samples, i_rms, q_rms, correlation,
+           spectrum_ratio_db, spectrum_blocks);
     if (error > RATE_ERROR_LIMIT) {
         fprintf(stderr, "rate %.0f differs from wall clock by more than 5%%\n",
+                requested);
+        return -1;
+    }
+    if (requested >= 8000000.0 &&
+        (spectrum_blocks != SPECTRUM_MAX_BLOCKS || fabs(spectrum_ratio_db) > 20.0)) {
+        fprintf(stderr, "rate %.0f does not populate both complex spectral halves\n",
                 requested);
         return -1;
     }
@@ -150,10 +228,11 @@ int main(int argc, char **argv)
         failed = 1;
         goto cleanup;
     }
-    params->devParams->fsFreq.fsHz = 2000000.0;
+    params->devParams->fsFreq.fsHz = single_rate != 0.0 ? single_rate : 2000000.0;
     params->devParams->mode = sdrplay_api_BULK;
     params->rxChannelA->tunerParams.rfFreq.rfHz = 101100000.0;
-    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_1_536;
+    params->rxChannelA->tunerParams.bwType = single_rate >= 8000000.0 ?
+        sdrplay_api_BW_8_000 : sdrplay_api_BW_1_536;
     params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
     params->rxChannelA->tunerParams.gain.gRdB = 40;
     params->rxChannelA->tunerParams.gain.LNAstate = 5;
