@@ -2,7 +2,7 @@
 
 **This project is vibecoded experimental software. Do not mistake rapid development or passing tests for broad hardware validation.**
 
-OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes tuner A, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
+OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes either RSPduo tuner in single-tuner mode, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
 
 That limitation is deliberate. SDRplay's public API is documented, but its USB protocol and hardware-control implementation are proprietary. SoapySDRPlay3 and gr-sdrplay3 are open application adapters that still require SDRplay's closed API. Claiming this repository is a working replacement before independently documenting USB initialization, tuner register programming, sample framing, and calibration would be bullshit.
 
@@ -15,9 +15,10 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Machine-readable probe output | Implemented |
 | Original RSP1-class/RSP1A/RSP2 model-ID hints | Discovery only |
 | RSPduo tuner-A direct initialization | Verified on one unit |
+| RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual-tuner mode is not implemented |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
-| Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
-| IQ streaming | Direct/API paths verified; RSPduo tuner-A real ADC lane converted to analytic IQ, with 61.5 dB image rejection measured on a known offset carrier |
+| Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuners A and B independently |
+| IQ streaming | Direct/API paths verified; RSPduo single-tuner real ADC lane converted to analytic IQ, with 61.5 dB image rejection measured on tuner A using a known offset carrier |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
@@ -42,7 +43,8 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 ### API update coverage
 
 The compatibility library implements live sample-rate, RF, bandwidth, IF,
-gain/LNA, AGC, PPM, and software-decimation updates for RSPduo tuner A. The
+gain/LNA, AGC, PPM, and software-decimation updates for either RSPduo tuner in
+single-tuner mode. The
 stateful windowed-sinc FIR decimator accepts x2, x4, x8, x16, and x32 and keeps
 its filter state across IQ frames. It also accepts the API's required AUTO-LO,
 DC/IQ configuration, reset-flag, and overload-message acknowledgement calls.
@@ -51,8 +53,10 @@ reports the completion through `fsChanged`, matching the documented API
 callback contract.
 
 RSPduo bias-T/antenna/notch/external-reference switching, RSPdx extensions, and
-controls belonging to other RSP models are not implemented. Those calls return
-a specific API error. They do not return false success. The complete 3.15
+controls belonging to other RSP models are not implemented. RSPduo dual-tuner
+mode is also not implemented; the hardware's documented dual-mode ceiling is
+2 MHz per tuner. Those calls return a specific API error. They do not return
+false success. The complete 3.15
 update-reason values are exposed in the compatibility header so applications
 can compile against the implemented ABI.
 
@@ -103,8 +107,13 @@ gain reduction, and LNA state:
 
 ```sh
 ./build/sdrplay-compat-stream-test \
-  853712500 853712500 4 2048000 0 4 0 capture.iq 1536 20 0
+  853712500 853712500 4 2048000 0 4 0 capture.iq 1536 20 0 A
 ```
+
+Use final argument `B` to select tuner B in RSPduo single-tuner mode. The
+verifier measures callback throughput from the first callback through the last
+measurement boundary, so synchronous update time is included rather than
+misreported as sample-rate error.
 
 When more than one update is requested, the verifier distributes updates
 across the second half of the run. It requires one acknowledgement per RF,

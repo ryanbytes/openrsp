@@ -66,6 +66,14 @@ int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
         0x13fe, 0x13fe, 0x13fa, 0x13b6, 0x13fe,
         0x13fe, 0x13fa, 0x13f6, 0x13ee, 0x13ee
     };
+    static const uint16_t tuner_b_gpio_4a[] = {
+        0x13c8, 0x13c8, 0x13c8, 0x13c8, 0x13cc,
+        0x13cc, 0x13cc, 0x13cc, 0x13cc, 0x13cc
+    };
+    static const uint16_t tuner_b_gpio_4b[] = {
+        0x13fe, 0x13fe, 0x13de, 0x13be, 0x13ff,
+        0x13ff, 0x13df, 0x13bf, 0x137f, 0x137f
+    };
 
     if (!p || p->usb_pid != 0x3020u || p->freq < 420000000u ||
         p->freq >= 1000000000u || gain_reduction < 20 ||
@@ -73,10 +81,22 @@ int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
 
     uint32_t reg9 = (uint32_t)reg9_base[lna_state] |
                     ((uint32_t)gain_reduction << 4) | 1u;
-    if (mirisdr_write_reg(p, 0x09, reg9) < 0 ||
-        mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
-        mirisdr_rspduo_gpio(p, 0x4a, gpio_12[lna_state]) < 0 ||
-        mirisdr_rspduo_gpio(p, 0x4b, gpio_13[lna_state]) < 0) return -1;
+    if (mirisdr_write_reg(p, 0x09, reg9) < 0) return -1;
+    if (p->rspduo_tuner == 2u) {
+        uint16_t previous = p->rspduo_gpio13 != 0u ? p->rspduo_gpio13 : 0x13fe;
+        uint16_t bank_transition = lna_state < 4u ?
+                                   (uint16_t)(previous & ~1u) :
+                                   (uint16_t)(previous | 1u);
+        if (mirisdr_rspduo_gpio(p, 0x4b, bank_transition) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4a, tuner_b_gpio_4a[lna_state]) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, tuner_b_gpio_4b[lna_state]) < 0)
+            return -1;
+        p->rspduo_gpio13 = tuner_b_gpio_4b[lna_state];
+    } else if (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
+               mirisdr_rspduo_gpio(p, 0x4a, gpio_12[lna_state]) < 0 ||
+               mirisdr_rspduo_gpio(p, 0x4b, gpio_13[lna_state]) < 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -94,12 +114,14 @@ static int mirisdr_rspduo_frontend_init(mirisdr_dev_t *p)
     if (libusb_control_transfer(p->dh, 0x40, 0x41, 0x8008, 0x00ea, NULL, 0,
                                 CTRL_TIMEOUT) < 0) return -1;
     for (size_t i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
-        if (mirisdr_rspduo_gpio(p, sequence[i].request, sequence[i].value) < 0) return -1;
+        uint16_t value = sequence[i].value;
+        if (p->rspduo_tuner == 2u && i == 2u) value = 0x13ff;
+        if (mirisdr_rspduo_gpio(p, sequence[i].request, value) < 0) return -1;
     }
     return 0;
 }
 
-static int mirisdr_rspduo_route_tuner_a(mirisdr_dev_t *p)
+static int mirisdr_rspduo_route_tuner(mirisdr_dev_t *p)
 {
     static const struct {
         uint8_t request;
@@ -108,16 +130,37 @@ static int mirisdr_rspduo_route_tuner_a(mirisdr_dev_t *p)
         {0x4a, 0x1224}, {0x4a, 0x1389}, {0x4b, 0x12ff}, {0x4b, 0x13ff},
     };
 
+    static const struct {
+        uint8_t request;
+        uint16_t value;
+    } tuner_b_sequence[] = {
+        {0x4a, 0x123f}, {0x4a, 0x13c8}, {0x4b, 0x12ff}, {0x4b, 0x13ff},
+    };
+
     if (!p || p->usb_pid != 0x3020u) return 0;
+    if (p->rspduo_tuner == 2u) {
+        for (size_t i = 0; i < sizeof(tuner_b_sequence) / sizeof(tuner_b_sequence[0]); ++i)
+            if (mirisdr_rspduo_gpio(p, tuner_b_sequence[i].request,
+                                    tuner_b_sequence[i].value) < 0) return -1;
+        return 0;
+    }
     for (size_t i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
         if (mirisdr_rspduo_gpio(p, sequence[i].request, sequence[i].value) < 0) return -1;
     }
     return 0;
 }
 
-static int mirisdr_rspduo_finish_tuner_a(mirisdr_dev_t *p)
+static int mirisdr_rspduo_finish_tuner(mirisdr_dev_t *p)
 {
     if (!p || p->usb_pid != 0x3020u) return 0;
+    if (p->rspduo_tuner == 2u) {
+        if (mirisdr_set_gain(p) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x13fe) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4a, 0x13c8) < 0 ||
+            mirisdr_rspduo_gpio(p, 0x4b, 0x13be) < 0) return -1;
+        p->rspduo_gpio13 = 0x13be;
+        return 0;
+    }
     if (mirisdr_rspduo_gpio(p, 0x4a, 0x1349) < 0 || mirisdr_set_gain(p) < 0 ||
         mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
         mirisdr_rspduo_gpio(p, 0x4a, 0x1224) < 0 ||
@@ -133,9 +176,13 @@ static int mirisdr_rspduo_shutdown(mirisdr_dev_t *p)
 {
     if (!p || p->usb_pid != 0x3020u) return -1;
     uint32_t shutdown_status = 0u;
-    if (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
-        mirisdr_rspduo_gpio(p, 0x4a, 0x1389) < 0 ||
-        mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
+    int frontend_stop = p->rspduo_tuner == 2u ?
+        (mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
+         mirisdr_rspduo_gpio(p, 0x4b, 0x13bf) < 0) :
+        (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
+         mirisdr_rspduo_gpio(p, 0x4a, 0x1389) < 0 ||
+         mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0);
+    if (frontend_stop ||
         mirisdr_write_reg(p, 0x09, 0x073000) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x014001) < 0 ||
         mirisdr_write_reg(p, 0x09, 0x201982) < 0 ||

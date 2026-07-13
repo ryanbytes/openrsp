@@ -182,6 +182,14 @@ static int serve_client(int descriptor)
             if (iq_result != 0 ||
                 send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                            &response, sizeof(response)) != 0) return -1;
+        } else if (request.type == OPENRSP_CMD_CONFIGURE) {
+            const openrsp_radio_config *config =
+                (const openrsp_radio_config *)payload;
+            uint32_t status = request.payload_bytes == sizeof(*config) &&
+                              (config->tuner == OPENRSP_TUNER_A ||
+                               config->tuner == OPENRSP_TUNER_B) ?
+                              OPENRSP_STATUS_OK : OPENRSP_STATUS_BAD_REQUEST;
+            if (send_response(descriptor, request.sequence, status) != 0) return -1;
         } else {
             uint32_t status = request.type == OPENRSP_CMD_UPDATE && !streaming ?
                               OPENRSP_STATUS_BAD_REQUEST : OPENRSP_STATUS_OK;
@@ -985,6 +993,43 @@ int main(void)
     assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
            sdrplay_api_Success);
     assert(wait_for_callbacks_above(&metrics, daemon_restart_callback_baseline) == 0);
+    assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
+    assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
+
+    /* In single-tuner mode the RSPduo exposes tuner B through Stream A and
+     * permits the same wide sample-rate range as tuner A. */
+    count = 0u;
+    assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) ==
+           sdrplay_api_Success);
+    assert(count == 4u);
+    devices[0].tuner = sdrplay_api_Tuner_B;
+    devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_InvalidMode);
+    devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
+    params = NULL;
+    assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==
+           sdrplay_api_Success);
+    params->devParams->fsFreq.fsHz = 10000000.0;
+    params->rxChannelB->tunerParams.rfFreq.rfHz = 853862500.0;
+    params->rxChannelB->tunerParams.bwType = sdrplay_api_BW_8_000;
+    params->rxChannelB->tunerParams.ifType = sdrplay_api_IF_Zero;
+    params->rxChannelB->tunerParams.gain.gRdB = 55;
+    params->rxChannelB->tunerParams.gain.LNAstate = 3u;
+    params->rxChannelB->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int tuner_b_callback_baseline = metrics.callbacks;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
+           sdrplay_api_Success);
+    assert(wait_for_callbacks_above(&metrics, tuner_b_callback_baseline) == 0);
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Gr, 0u) ==
+           sdrplay_api_InvalidParam);
+    params->rxChannelB->tunerParams.gain.LNAstate = 4u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_B,
+                              sdrplay_api_Update_Tuner_Gr, 0u) ==
+           sdrplay_api_Success);
     assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
     assert(sdrplay_api_ReleaseDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_Close() == sdrplay_api_Success);

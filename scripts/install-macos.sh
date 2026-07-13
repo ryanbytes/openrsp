@@ -44,6 +44,7 @@ while launchctl print system/com.openrsp.openrspd >/dev/null 2>&1; do
     [ "$attempt" -lt 40 ] || { echo "Timed out unloading existing openrspd" >&2; exit 1; }
     sleep 0.25
 done
+rm -f /var/run/openrspd.sock
 install -o root -g wheel -m 0644 "$source_plist" /Library/LaunchDaemons/com.openrsp.openrspd.plist
 if [ -x "$source_reset" ]; then
     install -m 0755 "$source_reset" "$prefix/bin/openrsp-reset"
@@ -53,6 +54,13 @@ attempt=0
 until launchctl bootstrap system /Library/LaunchDaemons/com.openrsp.openrspd.plist 2>/dev/null; do
     attempt=$((attempt + 1))
     [ "$attempt" -lt 40 ] || { echo "Timed out loading openrspd" >&2; exit 1; }
+    sleep 0.25
+done
+attempt=0
+until [ -S /var/run/openrspd.sock ] &&
+      launchctl print system/com.openrsp.openrspd 2>/dev/null | grep -q 'state = running'; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 40 ] || { echo "Timed out waiting for openrspd readiness" >&2; exit 1; }
     sleep 0.25
 done
 echo "Installed OpenRSP compatibility library: $prefix/lib/libsdrplay_api.so.3.15"

@@ -334,7 +334,8 @@ static bool valid_config(const openrsp_radio_config *config)
     return config && config->sample_rate_hz != 0u && config->center_frequency_hz != 0u &&
            config->gain_reduction_db >= 20 && config->gain_reduction_db <= 59 &&
            config->lna_state <= 9u && config->agc_mode >= 0 && config->agc_mode <= 4 &&
-           config->agc_setpoint_dbfs >= -60 && config->agc_setpoint_dbfs <= -20;
+           config->agc_setpoint_dbfs >= -60 && config->agc_setpoint_dbfs <= -20 &&
+           (config->tuner == OPENRSP_TUNER_A || config->tuner == OPENRSP_TUNER_B);
 }
 
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
@@ -385,7 +386,8 @@ static uint32_t configure_radio(daemon_state *state,
             if (resolve_acquired_device(state, &resolved_index) != 0) {
                 return OPENRSP_STATUS_BAD_REQUEST;
             }
-            int open_result = mirisdr_open(&state->radio, resolved_index);
+            int open_result = mirisdr_open_tuner(&state->radio, resolved_index,
+                                                 config->tuner);
             if (open_result != 0) {
                 fprintf(stderr,
                         "OPENRSPD_CONFIGURE_STAGE stage=open result=%d attempt=%u/%u\n",
@@ -531,6 +533,7 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
     const openrsp_radio_config *old = &state->config;
     uint32_t flags = update->changed_flags;
     int result = 0;
+    if (next->tuner != old->tuner) return OPENRSP_STATUS_BAD_REQUEST;
     if ((flags & OPENRSP_CHANGE_AGC) != 0u &&
         (next->agc_mode < 0 || next->agc_mode > 4 ||
          next->agc_setpoint_dbfs < -60 || next->agc_setpoint_dbfs > -20))

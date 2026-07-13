@@ -55,6 +55,7 @@ typedef struct {
     openrsp_acquire_request identity;
     uint16_t product_id;
     unsigned char hw_version;
+    sdrplay_api_TunerSelectT tuner;
     sdrplay_api_DevParamsT dev_params;
     sdrplay_api_RxChannelParamsT channel_a;
     sdrplay_api_RxChannelParamsT channel_b;
@@ -122,6 +123,19 @@ static sdrplay_api_ErrorInfoT last_error;
 static unsigned long long last_error_time;
 static _Thread_local sdrplay_api_ErrorInfoT last_error_view;
 static pthread_mutex_t last_error_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static sdrplay_api_RxChannelParamsT *active_channel(compat_device_context *device)
+{
+    return device->tuner == sdrplay_api_Tuner_B ? &device->channel_b :
+                                                  &device->channel_a;
+}
+
+static const sdrplay_api_RxChannelParamsT *active_channel_const(
+    const compat_device_context *device)
+{
+    return device->tuner == sdrplay_api_Tuner_B ? &device->channel_b :
+                                                  &device->channel_a;
+}
 
 static int allocate_stream_buffers(compat_device_context *device)
 {
@@ -431,17 +445,19 @@ static int valid_if(sdrplay_api_If_kHzT if_type)
 
 static void fill_radio_config(const compat_device_context *device, openrsp_radio_config *config)
 {
+    const sdrplay_api_RxChannelParamsT *channel = active_channel_const(device);
     double correction = 1.0 + device->dev_params.ppm / 1000000.0;
     memset(config, 0, sizeof(*config));
     config->sample_rate_hz = (uint32_t)device->dev_params.fsFreq.fsHz;
-    config->center_frequency_hz = (uint32_t)(device->channel_a.tunerParams.rfFreq.rfHz /
-                                             correction);
-    config->bandwidth_hz = (uint32_t)device->channel_a.tunerParams.bwType * 1000u;
-    config->if_frequency_hz = (int32_t)device->channel_a.tunerParams.ifType * 1000;
-    config->gain_reduction_db = device->channel_a.tunerParams.gain.gRdB;
-    config->lna_state = device->channel_a.tunerParams.gain.LNAstate;
-    config->agc_mode = device->channel_a.ctrlParams.agc.enable;
-    config->agc_setpoint_dbfs = device->channel_a.ctrlParams.agc.setPoint_dBfs;
+    config->center_frequency_hz = (uint32_t)(channel->tunerParams.rfFreq.rfHz / correction);
+    config->bandwidth_hz = (uint32_t)channel->tunerParams.bwType * 1000u;
+    config->if_frequency_hz = (int32_t)channel->tunerParams.ifType * 1000;
+    config->gain_reduction_db = channel->tunerParams.gain.gRdB;
+    config->lna_state = channel->tunerParams.gain.LNAstate;
+    config->agc_mode = channel->ctrlParams.agc.enable;
+    config->agc_setpoint_dbfs = channel->ctrlParams.agc.setPoint_dBfs;
+    config->tuner = device->tuner == sdrplay_api_Tuner_B ? OPENRSP_TUNER_B :
+                                                           OPENRSP_TUNER_A;
 }
 
 static uint32_t protocol_change_flags(sdrplay_api_ReasonForUpdateT reason)
@@ -461,6 +477,7 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
                                         sdrplay_api_ReasonForUpdateT reason,
                                         sdrplay_api_ReasonForUpdateExtension1T extension)
 {
+    const sdrplay_api_RxChannelParamsT *channel = active_channel_const(device);
     const uint32_t other_models =
         sdrplay_api_Update_Rsp1a_BiasTControl |
         sdrplay_api_Update_Rsp1a_RfNotchControl |
@@ -497,61 +514,62 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
          device->dev_params.ppm > 300.0))
         return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Tuner_Frf) != 0u &&
-        (!isfinite(device->channel_a.tunerParams.rfFreq.rfHz) ||
-         device->channel_a.tunerParams.rfFreq.rfHz < 1000.0 ||
-         device->channel_a.tunerParams.rfFreq.rfHz > 2000000000.0))
+        (!isfinite(channel->tunerParams.rfFreq.rfHz) ||
+         channel->tunerParams.rfFreq.rfHz < 1000.0 ||
+         channel->tunerParams.rfFreq.rfHz > 2000000000.0))
         return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Tuner_BwType) != 0u &&
-        !valid_bandwidth(device->channel_a.tunerParams.bwType))
+        !valid_bandwidth(channel->tunerParams.bwType))
         return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Tuner_IfType) != 0u &&
-        !valid_if(device->channel_a.tunerParams.ifType))
+        !valid_if(channel->tunerParams.ifType))
         return sdrplay_api_OutOfRange;
     if ((reason & (sdrplay_api_Update_Tuner_BwType |
                    sdrplay_api_Update_Tuner_IfType)) != 0u &&
-        device->channel_a.tunerParams.ifType != sdrplay_api_IF_Zero &&
-        device->channel_a.tunerParams.bwType > sdrplay_api_BW_1_536)
+        channel->tunerParams.ifType != sdrplay_api_IF_Zero &&
+        channel->tunerParams.bwType > sdrplay_api_BW_1_536)
         return sdrplay_api_InvalidMode;
     if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u) {
-        const sdrplay_api_GainT *gain = &device->channel_a.tunerParams.gain;
+        const sdrplay_api_GainT *gain = &channel->tunerParams.gain;
         int lna_reduction = 0;
         if (gain->gRdB < 20 || gain->gRdB > 59 ||
-            rspduo_lna_gain_reduction(device->channel_a.tunerParams.rfFreq.rfHz,
+            rspduo_lna_gain_reduction(channel->tunerParams.rfFreq.rfHz,
                                       gain->LNAstate, &lna_reduction) < 0)
             return sdrplay_api_OutOfRange;
     }
     if ((reason & sdrplay_api_Update_Tuner_LoMode) != 0u &&
-        device->channel_a.tunerParams.loMode != sdrplay_api_LO_Auto)
+        channel->tunerParams.loMode != sdrplay_api_LO_Auto)
         return sdrplay_api_InvalidMode;
     if ((reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
-        const sdrplay_api_DecimationT *decimation = &device->channel_a.ctrlParams.decimation;
+        const sdrplay_api_DecimationT *decimation = &channel->ctrlParams.decimation;
         if (decimation->enable > 1u || decimation->wideBandSignal > 1u)
             return sdrplay_api_InvalidParam;
         unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
         if (!valid_decimation_factor(factor)) return sdrplay_api_OutOfRange;
     }
     if ((reason & sdrplay_api_Update_Ctrl_DCoffsetIQimbalance) != 0u &&
-        (device->channel_a.ctrlParams.dcOffset.DCenable > 1u ||
-         device->channel_a.ctrlParams.dcOffset.IQenable > 1u))
+        (channel->ctrlParams.dcOffset.DCenable > 1u ||
+         channel->ctrlParams.dcOffset.IQenable > 1u))
         return sdrplay_api_InvalidParam;
     if ((reason & sdrplay_api_Update_Ctrl_Agc) != 0u &&
-        (device->channel_a.ctrlParams.agc.enable < sdrplay_api_AGC_DISABLE ||
-         device->channel_a.ctrlParams.agc.enable > sdrplay_api_AGC_CTRL_EN ||
-         device->channel_a.ctrlParams.agc.setPoint_dBfs < -60 ||
-         device->channel_a.ctrlParams.agc.setPoint_dBfs > -20))
+        (channel->ctrlParams.agc.enable < sdrplay_api_AGC_DISABLE ||
+         channel->ctrlParams.agc.enable > sdrplay_api_AGC_CTRL_EN ||
+         channel->ctrlParams.agc.setPoint_dBfs < -60 ||
+         channel->ctrlParams.agc.setPoint_dBfs > -20))
         return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Ctrl_AdsbMode) != 0u &&
-        device->channel_a.ctrlParams.adsbMode != sdrplay_api_ADSB_DECIMATION)
+        channel->ctrlParams.adsbMode != sdrplay_api_ADSB_DECIMATION)
         return sdrplay_api_InvalidMode;
     return sdrplay_api_Success;
 }
 
 static int apply_rspduo_gain_locked(compat_device_context *device)
 {
-    sdrplay_api_GainT *gain = &device->channel_a.tunerParams.gain;
+    sdrplay_api_RxChannelParamsT *channel = active_channel(device);
+    sdrplay_api_GainT *gain = &channel->tunerParams.gain;
     int lna_reduction;
     if (gain->gRdB < 20 || gain->gRdB > 59 ||
-        rspduo_lna_gain_reduction(device->channel_a.tunerParams.rfFreq.rfHz,
+        rspduo_lna_gain_reduction(channel->tunerParams.rfFreq.rfHz,
                                   gain->LNAstate, &lna_reduction) < 0) return -1;
 
     int total_reduction = gain->gRdB + lna_reduction;
@@ -602,32 +620,33 @@ static void *agc_thread_main(void *opaque)
         if (step == 0) continue;
 
         pthread_mutex_lock(&hardware_lock);
+        sdrplay_api_RxChannelParamsT *channel = active_channel(device);
         sdrplay_api_EventParamsT event_params;
         int notify_gain = 0;
-        int old_reduction = device->channel_a.tunerParams.gain.gRdB;
+        int old_reduction = channel->tunerParams.gain.gRdB;
         int new_reduction = clamp_int(old_reduction + step, 20, 59);
         if (new_reduction != old_reduction) {
-            device->channel_a.tunerParams.gain.gRdB = new_reduction;
+            channel->tunerParams.gain.gRdB = new_reduction;
             if (apply_rspduo_gain_locked(device) >= 0) {
                 atomic_fetch_add(&device->pending_gr_changed, 1u);
                 int lna_reduction = 0;
                 (void)rspduo_lna_gain_reduction(
-                    device->channel_a.tunerParams.rfFreq.rfHz,
-                    device->channel_a.tunerParams.gain.LNAstate, &lna_reduction);
+                    channel->tunerParams.rfFreq.rfHz,
+                    channel->tunerParams.gain.LNAstate, &lna_reduction);
                 memset(&event_params, 0, sizeof(event_params));
                 event_params.gainParams.gRdB = (unsigned int)new_reduction;
                 event_params.gainParams.lnaGRdB = (unsigned int)lna_reduction;
                 event_params.gainParams.currGain =
-                    device->channel_a.tunerParams.gain.gainVals.curr;
+                    channel->tunerParams.gain.gainVals.curr;
                 notify_gain = 1;
             } else {
-                device->channel_a.tunerParams.gain.gRdB = old_reduction;
+                channel->tunerParams.gain.gRdB = old_reduction;
             }
         }
         pthread_mutex_unlock(&hardware_lock);
         if (notify_gain)
             (void)queue_api_event(device, sdrplay_api_GainChange,
-                                  sdrplay_api_Tuner_A, &event_params);
+                                  device->tuner, &event_params);
     }
     return NULL;
 }
@@ -639,7 +658,7 @@ static void emit_overload_event(compat_device_context *device, int overloaded)
     params.powerOverloadParams.powerOverloadChangeType =
         overloaded ? sdrplay_api_Overload_Detected : sdrplay_api_Overload_Corrected;
     if (queue_api_event(device, sdrplay_api_PowerOverloadChange,
-                        sdrplay_api_Tuner_A, &params) == 0) {
+                        device->tuner, &params) == 0) {
         atomic_store(&device->overload_reported_state, overloaded);
         atomic_store(&device->overload_event_pending, 1);
     } else {
@@ -860,7 +879,7 @@ static void daemon_failure_callback(void *opaque)
     sdrplay_api_EventParamsT params;
     memset(&params, 0, sizeof(params));
     (void)queue_api_event(device, sdrplay_api_DeviceFailure,
-                          sdrplay_api_Tuner_A, &params);
+                          device->tuner, &params);
 }
 
 static void emit_update_ack(compat_device_context *device, int fs_changed,
@@ -900,6 +919,7 @@ static void reset_parameters(void)
     rspduo.params.devParams = &rspduo.dev_params;
     rspduo.params.rxChannelA = &rspduo.channel_a;
     rspduo.params.rxChannelB = &rspduo.channel_b;
+    rspduo.tuner = sdrplay_api_Tuner_A;
     rspduo.dev_params.fsFreq.fsHz = 2000000.0;
     rspduo.dev_params.mode = sdrplay_api_ISOCH;
     rspduo.channel_a.tunerParams.bwType = sdrplay_api_BW_0_200;
@@ -1128,7 +1148,9 @@ sdrplay_api_ErrT sdrplay_api_DebugEnable(HANDLE dev, sdrplay_api_DbgLvl_t level)
 sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
 {
     if (!api_open) return sdrplay_api_NotInitialised;
-    if (device == NULL || device->tuner != sdrplay_api_Tuner_A || !device->valid)
+    if (device == NULL ||
+        (device->tuner != sdrplay_api_Tuner_A && device->tuner != sdrplay_api_Tuner_B) ||
+        !device->valid)
         return sdrplay_api_InvalidParam;
     if (rspduo.selected) return sdrplay_api_AlreadyInitialised;
     compat_discovery_handle *handle = NULL;
@@ -1140,10 +1162,16 @@ sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
     }
     if (handle == NULL || !handle->valid || device->hwVer != handle->hw_version)
         return sdrplay_api_InvalidParam;
+    if (handle->identity.product_id == 0x3020u &&
+        device->rspDuoMode != sdrplay_api_RspDuoMode_Single_Tuner)
+        return sdrplay_api_InvalidMode;
+    if (device->tuner == sdrplay_api_Tuner_B &&
+        handle->identity.product_id != 0x3020u) return sdrplay_api_InvalidParam;
     rspduo.selected = 1;
     rspduo.identity = handle->identity;
     rspduo.product_id = handle->identity.product_id;
     rspduo.hw_version = handle->hw_version;
+    rspduo.tuner = device->tuner;
     device->dev = &rspduo;
     return sdrplay_api_Success;
 }
@@ -1175,12 +1203,13 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     if (callbacks == NULL || callbacks->StreamACbFn == NULL) return sdrplay_api_InvalidParam;
     if (rspduo.initialized) return sdrplay_api_AlreadyInitialised;
     if (allocate_stream_buffers(&rspduo) != 0) return sdrplay_api_HwError;
-    const sdrplay_api_DecimationT *decimation = &rspduo.channel_a.ctrlParams.decimation;
+    sdrplay_api_RxChannelParamsT *channel = active_channel(&rspduo);
+    const sdrplay_api_DecimationT *decimation = &channel->ctrlParams.decimation;
     unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
     (void)pthread_mutex_lock(&decimation_lock);
     int dsp_result = openrsp_low_if_configure(
         &rspduo.low_if_dsp, rspduo.dev_params.fsFreq.fsHz,
-        (int)rspduo.channel_a.tunerParams.ifType * 1000);
+        (int)channel->tunerParams.ifType * 1000);
     (void)pthread_mutex_unlock(&decimation_lock);
     if (dsp_result != 0 || configure_decimator(&rspduo, factor) != 0) {
         free_stream_buffers(&rspduo);
@@ -1216,9 +1245,9 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     atomic_store(&rspduo.stream_state, 0);
     atomic_store(&rspduo.agc_stop, 0);
     atomic_store(&rspduo.agc_peak, 0u);
-    atomic_store(&rspduo.agc_mode, rspduo.channel_a.ctrlParams.agc.enable);
+    atomic_store(&rspduo.agc_mode, channel->ctrlParams.agc.enable);
     atomic_store(&rspduo.agc_setpoint,
-                 rspduo.channel_a.ctrlParams.agc.setPoint_dBfs);
+                 channel->ctrlParams.agc.setPoint_dBfs);
     atomic_store(&rspduo.callback_samples,
                  rspduo.dev_params.fsFreq.fsHz > 9216000.0 ? 2016u : 1344u);
     rspduo.first_callback = 1;
@@ -1311,7 +1340,7 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                                      sdrplay_api_ReasonForUpdateT reason,
                                      sdrplay_api_ReasonForUpdateExtension1T extension)
 {
-    if (dev != &rspduo || tuner != sdrplay_api_Tuner_A) return sdrplay_api_InvalidParam;
+    if (dev != &rspduo || tuner != rspduo.tuner) return sdrplay_api_InvalidParam;
     if (!rspduo.initialized || rspduo.backend == NULL) return sdrplay_api_NotInitialised;
     sdrplay_api_ErrT validation = validate_update(&rspduo, reason, extension);
     if (validation != sdrplay_api_Success) return validation;
@@ -1326,6 +1355,7 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
     int previous_agc_mode = atomic_load(&rspduo.agc_mode);
     int previous_agc_setpoint = atomic_load(&rspduo.agc_setpoint);
     pthread_mutex_lock(&hardware_lock);
+    sdrplay_api_RxChannelParamsT *channel = active_channel(&rspduo);
     if (fs_changed) {
         atomic_store(&rspduo.callback_samples,
                      rspduo.dev_params.fsFreq.fsHz > 9216000.0 ? 2016u : 1344u);
@@ -1335,16 +1365,16 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
     if ((reason & sdrplay_api_Update_Tuner_IfType) != 0u) {
     }
     if ((reason & sdrplay_api_Update_Ctrl_Agc) != 0u) {
-        sdrplay_api_AgcControlT mode = rspduo.channel_a.ctrlParams.agc.enable;
+        sdrplay_api_AgcControlT mode = channel->ctrlParams.agc.enable;
         if (mode < sdrplay_api_AGC_DISABLE || mode > sdrplay_api_AGC_CTRL_EN ||
-            rspduo.channel_a.ctrlParams.agc.setPoint_dBfs < -60 ||
-            rspduo.channel_a.ctrlParams.agc.setPoint_dBfs > -20) {
+            channel->ctrlParams.agc.setPoint_dBfs < -60 ||
+            channel->ctrlParams.agc.setPoint_dBfs > -20) {
             result = -1;
         } else {
             atomic_store(&rspduo.agc_peak, 0u);
             atomic_store(&rspduo.agc_mode, mode);
             atomic_store(&rspduo.agc_setpoint,
-                         rspduo.channel_a.ctrlParams.agc.setPoint_dBfs);
+                         channel->ctrlParams.agc.setPoint_dBfs);
         }
     }
     if ((reason & sdrplay_api_Update_Ctrl_OverloadMsgAck) != 0u) {
@@ -1356,7 +1386,7 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
     /* Install the software-only state before a daemon response can be followed
      * by IQ. The update round trip provides an ordering boundary for callers. */
     if (result >= 0 && (reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
-        const sdrplay_api_DecimationT *decimation = &rspduo.channel_a.ctrlParams.decimation;
+        const sdrplay_api_DecimationT *decimation = &channel->ctrlParams.decimation;
         unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
         if (configure_decimator(&rspduo, factor) != 0) result = -1;
     }
@@ -1366,7 +1396,7 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
         (void)pthread_mutex_lock(&decimation_lock);
         result = openrsp_low_if_configure(
             &rspduo.low_if_dsp, rspduo.dev_params.fsFreq.fsHz,
-            (int)rspduo.channel_a.tunerParams.ifType * 1000);
+            (int)channel->tunerParams.ifType * 1000);
         (void)pthread_mutex_unlock(&decimation_lock);
     }
     if (result >= 0) {
@@ -1378,9 +1408,9 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
     if (result >= 0) {
         if (gr_changed) {
             int lna_reduction = 0;
-            sdrplay_api_GainT *gain = &rspduo.channel_a.tunerParams.gain;
+            sdrplay_api_GainT *gain = &channel->tunerParams.gain;
             if (rspduo_lna_gain_reduction(
-                    rspduo.channel_a.tunerParams.rfFreq.rfHz,
+                    channel->tunerParams.rfFreq.rfHz,
                     gain->LNAstate, &lna_reduction) == 0) {
                 gain->gainVals.curr = (float)clamp_int(
                     105 - gain->gRdB - lna_reduction, -20, 105);

@@ -203,7 +203,7 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     int soft_result = mirisdr_set_soft(p);
     (void)lna_state;
     int gain_result = mirisdr_set_tuner_gain(p, 102 - gain_reduction);
-    int frontend_result = mirisdr_rspduo_finish_tuner_a(p);
+    int frontend_result = mirisdr_rspduo_finish_tuner(p);
     int result = adc_result | hard_result | soft_result | gain_result | frontend_result;
     if (result < 0) {
         fprintf(stderr, "RSPduo configure failed adc=%d hard=%d soft=%d gain=%d frontend=%d\n",
@@ -325,7 +325,7 @@ static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev)
     return LIBUSB_ERROR_NO_DEVICE;
 }
 
-int mirisdr_open (mirisdr_dev_t **p, uint32_t index) {
+int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
     mirisdr_dev_t *dev = NULL;
     libusb_device **list, *device = NULL;
     struct libusb_device_descriptor dd;
@@ -338,6 +338,12 @@ int mirisdr_open (mirisdr_dev_t **p, uint32_t index) {
     if (!(dev = malloc(sizeof(*dev)))) return -ENOMEM;
 
     memset(dev, 0, sizeof(*dev));
+
+    if (tuner != 1u && tuner != 2u) {
+        free(dev);
+        return -1;
+    }
+    dev->rspduo_tuner = tuner;
 
     /* ostatní parametry */
     dev->index = index;
@@ -396,6 +402,10 @@ failed:
     }
 
     return -1;
+}
+
+int mirisdr_open (mirisdr_dev_t **p, uint32_t index) {
+    return mirisdr_open_tuner(p, index, 1u);
 }
 
 int mirisdr_open_fd (mirisdr_dev_t **p, int fd) {

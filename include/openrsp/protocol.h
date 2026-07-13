@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 2u
+#define OPENRSP_PROTOCOL_VERSION 3u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -66,7 +66,11 @@ typedef struct {
     uint32_t lna_state;
     int32_t agc_mode;
     int32_t agc_setpoint_dbfs;
+    uint32_t tuner;
 } openrsp_radio_config;
+
+#define OPENRSP_TUNER_A 1u
+#define OPENRSP_TUNER_B 2u
 
 #define OPENRSP_CHANGE_SAMPLE_RATE (1u << 0)
 #define OPENRSP_CHANGE_RF          (1u << 1)

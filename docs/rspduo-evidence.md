@@ -697,3 +697,45 @@ is not an acceptable receiver identity: bypassing the normal launch environment
 changed the apparent serial from the saved receiver serial to its bus path.
 Device discovery now reads the actual USB serial descriptor when available and
 uses the physical path only for hardware that has no readable serial.
+
+## RSPduo tuner-B single-tuner support (2026-07-13)
+
+Matched tuner-A and tuner-B captures were made with the official 3.15.1 API at
+the same RF, sample rate, bandwidth, IF, gain reduction, and LNA state. Both
+sessions delivered 8,258,880 samples in four seconds, acknowledged RF, sample
+rate, and gain changes, and uninitialized cleanly. Their PLL, ADC, packet
+format, timing, streaming, and register transfers were identical. Only the
+frontend GPIO routing, LNA transitions, and shutdown routing differed. OpenRSP
+uses those behavioral differences without distributing official binaries,
+headers, firmware, or raw captures.
+
+Protocol version 3 carries tuner A/B selection in the radio configuration. The
+API compatibility layer accepts tuner B only for an RSPduo, uses
+`rxChannelB`, and preserves the official single-tuner callback contract by
+delivering B through `StreamACbFn`. The daemon opens the selected frontend, and
+the core applies B-specific initialization, routing, gain-state, and shutdown
+GPIO sequences. Hot updates cannot silently change tuners; changing the tuner
+requires a new device session.
+
+An initial implementation incorrectly inferred that B occupied USB lane 0.
+Direct raw-lane measurements disproved that: after the startup transient, lane
+0 was nearly empty while lane 1 measured about 234 RMS counts, matching the
+official B reference of about 245. Both A and B single-tuner routes therefore
+use lane 1 before OpenRSP's analytic-IQ conversion.
+
+With SDRTrunk stopped to remove known host-load interference, tuner B at
+853.8625 MHz and 10 MS/s delivered 80,625,664 samples over 8.062949 seconds,
+for 0.0047 percent wall-clock error. Eight alternating RF and gain changes were
+all acknowledged, the stream reported one initial reset and no additional
+reset, and `Uninit` succeeded. A tuner-A regression delivered 10,321,920
+samples over 5.038295 seconds at 2.048 MS/s, for 0.0338 percent error, while
+acknowledging five RF/gain updates and cleaning up normally.
+
+The tuner-B hardware gain sweep accepted LNA states 0 through 9 and produced
+large measured level changes: at GR 55, mean-square power fell from 21,529.2 at
+LNA 0 to 107.9 at LNA 3 and 2.8 at LNA 5. IF gain-reduction updates at LNA 0
+and LNA 5 accepted GR 20, 30, 40, 50, and 59. Software AGC moved GR from 20 to
+31, then recovered a forced GR 59 to 30 before disable held the final value.
+These measurements verify tuner B independently in single-tuner mode. They do
+not verify dual-tuner operation, B spectrum orientation against a known
+connected carrier, or other RSPduo frequency-band GPIO tables.

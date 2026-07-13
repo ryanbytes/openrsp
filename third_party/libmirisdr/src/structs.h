@@ -113,5 +113,7 @@ struct mirisdr_dev {
     int                 sync_loss_cnt;
     int                 firmware_attempted;
     unsigned int        bulk_recovery_attempts;
+    unsigned int        rspduo_tuner;
+    uint16_t            rspduo_gpio13;
     mirisdr_rspduo_analytic_state analytic_state;
 };

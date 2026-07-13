@@ -339,7 +339,7 @@ int mirisdr_set_soft(mirisdr_dev_t *p)
     p->reg8=switch_plan.band_select_word;
     update_reg_8(p);
 
-    if (mirisdr_rspduo_route_tuner_a(p) < 0) return -1;
+    if (mirisdr_rspduo_route_tuner(p) < 0) return -1;
 
     mirisdr_write_reg(p, 0x09, 0x0e);
     mirisdr_write_reg(p, 0x09, reg3);

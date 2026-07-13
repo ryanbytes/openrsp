@@ -221,8 +221,9 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
 
         if (bytes > 0 && p->usb_pid == 0x3020u) {
             /* RSPduo single-tuner USB words are two real ADC lanes, not an
-             * interleaved complex pair. Tuner A is routed to lane 1. Produce
-             * analytic IQ before exposing the ordinary libmirisdr callback. */
+             * interleaved complex pair. Both A and B single-tuner routing
+             * place the active ADC on lane 1. Produce analytic IQ before
+             * exposing the ordinary libmirisdr callback. */
             mirisdr_rspduo_analytic_process(&p->analytic_state,
                                             (int16_t *)samples,
                                             (size_t)bytes / (2u * sizeof(int16_t)), 1u);
