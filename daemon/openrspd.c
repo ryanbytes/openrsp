@@ -728,13 +728,19 @@ int main(void)
         }
         if (ready == 0) continue;
         if ((fds[0].revents & POLLIN) != 0) accept_clients(server, clients);
+        /* Ownership cleanup has priority over new commands. A dead lock owner
+         * and a waiting contender can become ready in the same poll cycle;
+         * serving by descriptor-slot order would otherwise return a spurious
+         * BUSY before processing the owner's hangup. */
         for (nfds_t index = 1u; index < count; ++index) {
-            if (fds[index].revents == 0) continue;
             size_t slot = client_index[index];
             if ((fds[index].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
                 remove_client(&state, clients, slot);
-                continue;
             }
+        }
+        for (nfds_t index = 1u; index < count; ++index) {
+            size_t slot = client_index[index];
+            if (clients[slot] < 0) continue;
             if ((fds[index].revents & POLLIN) == 0) continue;
             int result = serve_request(clients[slot], &state);
             if (result != 1) remove_client(&state, clients, slot);
