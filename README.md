@@ -90,6 +90,9 @@ sudo ./scripts/install-macos.sh
 ```
 
 The installer places the versioned library under `/Library/OpenRSP/0.1` and creates `/opt/homebrew/lib/libsdrplay_api.dylib`, which SDRTrunk checks on Apple Silicon. It refuses to proceed while `com.sdrplay.service` is loaded or when the loader path is a regular file.
+When given a library from a non-default build directory, it installs the daemon
+and reset utility from that same directory so build configurations cannot be
+mixed accidentally.
 
 Some RSPduo USB states do not expose the factory serial descriptor. Set `OPENRSP_SERIAL` in the application environment to preserve a previously known stable identity; otherwise OpenRSP uses the physical USB port path. Do not commit a receiver serial to a public configuration.
 

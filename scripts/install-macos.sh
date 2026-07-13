@@ -4,7 +4,9 @@ set -eu
 
 version="0.1"
 source_library="${1:-build/libsdrplay_api.so.3.15}"
-source_daemon="build/openrspd"
+source_build_dir=$(dirname "$source_library")
+source_daemon="$source_build_dir/openrspd"
+source_reset="$source_build_dir/openrsp-reset"
 source_plist="packaging/macos/com.openrsp.openrspd.plist"
 prefix="/Library/OpenRSP/$version"
 loader_path="/opt/homebrew/lib/libsdrplay_api.dylib"
@@ -42,8 +44,8 @@ while launchctl print system/com.openrsp.openrspd >/dev/null 2>&1; do
     sleep 0.25
 done
 install -o root -g wheel -m 0644 "$source_plist" /Library/LaunchDaemons/com.openrsp.openrspd.plist
-if [ -x "build/openrsp-reset" ]; then
-    install -m 0755 "build/openrsp-reset" "$prefix/bin/openrsp-reset"
+if [ -x "$source_reset" ]; then
+    install -m 0755 "$source_reset" "$prefix/bin/openrsp-reset"
 fi
 ln -sfn "$prefix/lib/libsdrplay_api.so.3.15" "$loader_path"
 attempt=0
