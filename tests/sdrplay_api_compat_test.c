@@ -187,6 +187,23 @@ typedef struct {
     double event_current_gain;
 } callback_metrics;
 
+typedef struct {
+    atomic_int acquired;
+    sdrplay_api_ErrT lock_result;
+    sdrplay_api_ErrT unlock_result;
+} api_lock_metrics;
+
+static void *api_lock_thread(void *opaque)
+{
+    api_lock_metrics *metrics = opaque;
+    metrics->lock_result = sdrplay_api_LockDeviceApi();
+    if (metrics->lock_result == sdrplay_api_Success) {
+        atomic_store(&metrics->acquired, 1);
+        metrics->unlock_result = sdrplay_api_UnlockDeviceApi();
+    }
+    return NULL;
+}
+
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int samples, unsigned int reset, void *opaque)
 {
@@ -322,6 +339,24 @@ int main(void)
     float version = 0.0f;
     assert(sdrplay_api_ApiVersion(&version) == sdrplay_api_Success && version == 3.15f);
     assert(sdrplay_api_Open() == sdrplay_api_Success);
+    assert(sdrplay_api_LockDeviceApi() == sdrplay_api_Success);
+    assert(sdrplay_api_LockDeviceApi() == sdrplay_api_Success);
+    assert(sdrplay_api_Close() == sdrplay_api_Fail);
+    api_lock_metrics lock_metrics;
+    memset(&lock_metrics, 0, sizeof(lock_metrics));
+    atomic_init(&lock_metrics.acquired, 0);
+    pthread_t lock_thread;
+    assert(pthread_create(&lock_thread, NULL, api_lock_thread, &lock_metrics) == 0);
+    const struct timespec lock_probe = {.tv_sec = 0, .tv_nsec = 50000000L};
+    (void)nanosleep(&lock_probe, NULL);
+    assert(atomic_load(&lock_metrics.acquired) == 0);
+    assert(sdrplay_api_UnlockDeviceApi() == sdrplay_api_Success);
+    assert(atomic_load(&lock_metrics.acquired) == 0);
+    assert(sdrplay_api_UnlockDeviceApi() == sdrplay_api_Success);
+    assert(pthread_join(lock_thread, NULL) == 0);
+    assert(lock_metrics.lock_result == sdrplay_api_Success);
+    assert(lock_metrics.unlock_result == sdrplay_api_Success);
+    assert(atomic_load(&lock_metrics.acquired) == 1);
     sdrplay_api_DeviceT devices[SDRPLAY_MAX_DEVICES];
     unsigned int count = 0;
     assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) == sdrplay_api_Success);

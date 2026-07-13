@@ -207,6 +207,12 @@ callback and clean reader-thread shutdown. This covers repeated API lifecycle
 behavior without pretending it is a substitute for the still-needed long
 hardware cycle test.
 
+`LockDeviceApi` now uses an owner-aware recursive process mutex instead of
+returning false success. A competing test thread remains blocked until the
+owning thread releases both recursive levels, and `Close` refuses to invalidate
+the API while its caller holds that lock. `Open`, `Close`, and a newly acquiring
+thread serialize on the same mutex and recheck open state after acquisition.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

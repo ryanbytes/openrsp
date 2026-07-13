@@ -11,9 +11,11 @@
 #include <stdio.h>
 #include <string.h>
 
-static int api_open;
+static atomic_int api_open;
 static pthread_mutex_t hardware_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t decimation_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t device_api_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local unsigned int device_api_lock_depth;
 
 typedef struct {
     int selected;
@@ -475,17 +477,25 @@ static void reset_parameters(void)
 
 sdrplay_api_ErrT sdrplay_api_Open(void)
 {
-    if (api_open) {
+    if (device_api_lock_depth != 0u)
+        return atomic_load(&api_open) ? sdrplay_api_AlreadyInitialised : sdrplay_api_Fail;
+    if (pthread_mutex_lock(&device_api_lock) != 0) return sdrplay_api_Fail;
+    if (atomic_load(&api_open)) {
+        (void)pthread_mutex_unlock(&device_api_lock);
         return sdrplay_api_AlreadyInitialised;
     }
     reset_parameters();
-    api_open = 1;
+    atomic_store(&api_open, 1);
+    (void)pthread_mutex_unlock(&device_api_lock);
     return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_Close(void)
 {
-    api_open = 0;
+    if (device_api_lock_depth != 0u) return sdrplay_api_Fail;
+    if (pthread_mutex_lock(&device_api_lock) != 0) return sdrplay_api_Fail;
+    atomic_store(&api_open, 0);
+    (void)pthread_mutex_unlock(&device_api_lock);
     return sdrplay_api_Success;
 }
 
@@ -500,12 +510,26 @@ sdrplay_api_ErrT sdrplay_api_ApiVersion(float *apiVer)
 
 sdrplay_api_ErrT sdrplay_api_LockDeviceApi(void)
 {
-    return api_open ? sdrplay_api_Success : sdrplay_api_NotInitialised;
+    if (!atomic_load(&api_open)) return sdrplay_api_NotInitialised;
+    if (device_api_lock_depth == 0u) {
+        if (pthread_mutex_lock(&device_api_lock) != 0) return sdrplay_api_Fail;
+        if (!atomic_load(&api_open)) {
+            (void)pthread_mutex_unlock(&device_api_lock);
+            return sdrplay_api_NotInitialised;
+        }
+    }
+    ++device_api_lock_depth;
+    return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_UnlockDeviceApi(void)
 {
-    return api_open ? sdrplay_api_Success : sdrplay_api_NotInitialised;
+    if (device_api_lock_depth == 0u)
+        return atomic_load(&api_open) ? sdrplay_api_Fail : sdrplay_api_NotInitialised;
+    --device_api_lock_depth;
+    if (device_api_lock_depth == 0u && pthread_mutex_unlock(&device_api_lock) != 0)
+        return sdrplay_api_Fail;
+    return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices,
