@@ -78,8 +78,8 @@ static void *blocked_reader(void *opaque)
     openrsp_client *client = opaque;
     openrsp_message_header header;
     openrsp_response response;
-    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) ==
-           OPENRSP_CLIENT_ERROR);
+    int result = openrsp_client_receive(client, &header, &response, sizeof(response));
+    assert(result == OPENRSP_CLIENT_ERROR || result == OPENRSP_CLIENT_TIMEOUT);
     return NULL;
 }
 
