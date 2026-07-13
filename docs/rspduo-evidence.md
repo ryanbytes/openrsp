@@ -162,11 +162,14 @@ silently accepted as no-ops. That was incorrect application behavior.
 
 The compatibility layer now validates values and distinguishes wrong-model,
 invalid-mode, invalid-parameter, and out-of-range requests. Required RSPduo
-tuner-A setup calls for AUTO LO, disabled/x1 decimation, DC/IQ configuration,
-reset flags, and overload acknowledgement remain accepted. PPM correction is
-applied to the synthesizer command and acknowledged using the API's
-`fsChanged` callback convention. Unsupported hardware switches and enabled
-software decimation now fail explicitly instead of pretending to work.
+tuner-A setup calls for AUTO LO, DC/IQ configuration, reset flags, and overload
+acknowledgement remain accepted. PPM correction is applied to the synthesizer
+command and acknowledged using the API's `fsChanged` callback convention.
+Software decimation uses a stateful windowed-sinc FIR for x2, x4, x8, x16, and
+x32. Automated transport tests verify exact output accounting for every
+supported factor and rejection of unsupported factors; RF bandwidth and alias
+rejection have not yet been measured on hardware. Unsupported hardware
+switches fail explicitly instead of pretending to work.
 
 Debug, Release, and ASan/UBSan builds each pass all five tests. The sanitizer
 run uses `ASAN_OPTIONS=detect_leaks=0` because Apple AddressSanitizer does not

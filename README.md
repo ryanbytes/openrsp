@@ -21,6 +21,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
+| API software decimation | Stateful FIR decimation at x2, x4, x8, x16, and x32; automated transport tests only |
 | Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
@@ -29,17 +30,19 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 ### API update coverage
 
 The compatibility library implements live sample-rate, RF, bandwidth, IF,
-gain/LNA, AGC, and PPM updates for RSPduo tuner A. It accepts the API's required
-AUTO-LO, x1 decimation, DC/IQ configuration, reset-flag, and overload-message
-acknowledgement calls. PPM correction retunes the synthesizer by the inverse
-crystal-error factor and reports the completion through `fsChanged`, matching
-the documented API callback contract.
+gain/LNA, AGC, PPM, and software-decimation updates for RSPduo tuner A. The
+stateful windowed-sinc FIR decimator accepts x2, x4, x8, x16, and x32 and keeps
+its filter state across IQ frames. It also accepts the API's required AUTO-LO,
+DC/IQ configuration, reset-flag, and overload-message acknowledgement calls.
+PPM correction retunes the synthesizer by the inverse crystal-error factor and
+reports the completion through `fsChanged`, matching the documented API
+callback contract.
 
-Software decimation above x1, RSPduo bias-T/antenna/notch/external-reference
-switching, RSPdx extensions, and controls belonging to other RSP models are not
-implemented. Those calls return a specific API error. They do not return false
-success. The complete 3.15 update-reason values are exposed in the compatibility
-header so applications can compile against the implemented ABI.
+RSPduo bias-T/antenna/notch/external-reference switching, RSPdx extensions, and
+controls belonging to other RSP models are not implemented. Those calls return
+a specific API error. They do not return false success. The complete 3.15
+update-reason values are exposed in the compatibility header so applications
+can compile against the implemented ABI.
 
 ## Build and test
 

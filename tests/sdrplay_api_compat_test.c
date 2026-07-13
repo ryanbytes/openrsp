@@ -45,6 +45,14 @@ static int send_response(int descriptor, uint32_t sequence, uint32_t status)
     return send_frame(descriptor, OPENRSP_MSG_RESPONSE, sequence, &response, sizeof(response));
 }
 
+static int send_mock_iq(int descriptor, uint32_t sequence)
+{
+    int16_t iq[2048];
+    for (size_t index = 0u; index < sizeof(iq) / sizeof(iq[0]); ++index)
+        iq[index] = (int16_t)(index - 1024);
+    return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
+}
+
 static int serve_client(int descriptor)
 {
     int streaming = 0;
@@ -77,18 +85,15 @@ static int serve_client(int descriptor)
                 .changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED
             };
             if (send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
-                           &response, sizeof(response)) != 0) return -1;
+                           &response, sizeof(response)) != 0 ||
+                send_mock_iq(descriptor, request.sequence) != 0) return -1;
         } else {
             uint32_t status = request.type == OPENRSP_CMD_UPDATE && !streaming ?
                               OPENRSP_STATUS_BAD_REQUEST : OPENRSP_STATUS_OK;
             if (send_response(descriptor, request.sequence, status) != 0) return -1;
             if (request.type == OPENRSP_CMD_START) {
                 streaming = 1;
-                int16_t iq[2048];
-                for (size_t index = 0u; index < sizeof(iq) / sizeof(iq[0]); ++index)
-                    iq[index] = (int16_t)(index - 1024);
-                if (send_frame(descriptor, OPENRSP_EVENT_IQ, request.sequence,
-                               iq, sizeof(iq)) != 0)
+                if (send_mock_iq(descriptor, request.sequence) != 0)
                     return -1;
             } else if (request.type == OPENRSP_CMD_STOP ||
                        request.type == OPENRSP_CMD_RELEASE) {
@@ -126,6 +131,7 @@ typedef struct {
     unsigned int samples;
     int rf_changed;
     int gain_changed;
+    int validate_samples;
 } callback_metrics;
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
@@ -134,8 +140,9 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     (void)reset;
     callback_metrics *metrics = opaque;
     assert(samples == params->numSamples);
-    if (samples != 0u) assert(xi[0] == -1024 && xq[0] == -1023);
     (void)pthread_mutex_lock(&metrics->lock);
+    if (samples != 0u && metrics->validate_samples)
+        assert(xi[0] == -1024 && xq[0] == -1023);
     ++metrics->callbacks;
     metrics->samples += samples;
     metrics->rf_changed += params->rfChanged;
@@ -151,6 +158,22 @@ static int wait_for_callback(callback_metrics *metrics)
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&metrics->lock);
     while (metrics->callbacks == 0u) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_samples_above(callback_metrics *metrics, unsigned int baseline)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->samples <= baseline) {
         if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&metrics->lock);
             return -1;
@@ -206,7 +229,10 @@ int main(void)
                                       sdrplay_api_RspDuo_AMPORT_2) ==
            sdrplay_api_InvalidMode);
 
-    callback_metrics metrics = {.lock = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER};
+    params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    callback_metrics metrics = {.lock = PTHREAD_MUTEX_INITIALIZER,
+                                .ready = PTHREAD_COND_INITIALIZER,
+                                .validate_samples = 1};
     sdrplay_api_CallbackFnsT callbacks = {.StreamACbFn = stream_callback};
     assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) == sdrplay_api_Success);
     assert(wait_for_callback(&metrics) == 0);
@@ -232,12 +258,28 @@ int main(void)
                               sdrplay_api_Update_Ctrl_OverloadMsgAck,
                               sdrplay_api_Update_Ext1_None) == sdrplay_api_Success);
 
-    /* Do not lie to callers about controls that the standalone backend lacks. */
+    /* The API decimator supports every documented power-of-two factor. */
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int undecimated_samples = metrics.samples;
+    metrics.validate_samples = 0;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    const unsigned char factors[] = {2u, 4u, 8u, 16u, 32u};
     params->rxChannelA->ctrlParams.decimation.enable = 1u;
-    params->rxChannelA->ctrlParams.decimation.decimationFactor = 2u;
+    for (size_t index = 0u; index < sizeof(factors) / sizeof(factors[0]); ++index) {
+        params->rxChannelA->ctrlParams.decimation.decimationFactor = factors[index];
+        assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                                  sdrplay_api_Update_Ctrl_Decimation, 0u) ==
+               sdrplay_api_Success);
+        assert(wait_for_samples_above(&metrics, undecimated_samples) == 0);
+        (void)pthread_mutex_lock(&metrics.lock);
+        assert(metrics.samples - undecimated_samples == 1024u / factors[index]);
+        undecimated_samples = metrics.samples;
+        (void)pthread_mutex_unlock(&metrics.lock);
+    }
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = 3u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Ctrl_Decimation, 0u) ==
-           sdrplay_api_InvalidMode);
+           sdrplay_api_OutOfRange);
     params->rxChannelA->ctrlParams.decimation.enable = 0u;
     params->rxChannelA->ctrlParams.decimation.decimationFactor = 1u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,

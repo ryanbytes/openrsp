@@ -13,6 +13,7 @@
 
 static int api_open;
 static pthread_mutex_t hardware_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t decimation_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
     int selected;
@@ -36,6 +37,13 @@ typedef struct {
     atomic_uint callback_samples;
     atomic_uint agc_peak;
     atomic_int agc_stop;
+    atomic_uint decimation_factor;
+    unsigned int decimation_taps;
+    unsigned int decimation_position;
+    unsigned int decimation_phase;
+    double decimation_coefficients[513];
+    int16_t decimation_history_i[513];
+    int16_t decimation_history_q[513];
 } compat_device_context;
 
 static compat_device_context rspduo;
@@ -55,6 +63,80 @@ static int clamp_int(int value, int minimum, int maximum)
     if (value < minimum) return minimum;
     if (value > maximum) return maximum;
     return value;
+}
+
+static int valid_decimation_factor(unsigned int factor)
+{
+    return factor == 1u || factor == 2u || factor == 4u || factor == 8u ||
+           factor == 16u || factor == 32u;
+}
+
+static int configure_decimator(compat_device_context *device, unsigned int factor)
+{
+    const double pi = 3.14159265358979323846;
+    if (!valid_decimation_factor(factor)) return -1;
+    (void)pthread_mutex_lock(&decimation_lock);
+    memset(device->decimation_history_i, 0, sizeof(device->decimation_history_i));
+    memset(device->decimation_history_q, 0, sizeof(device->decimation_history_q));
+    device->decimation_position = 0u;
+    device->decimation_phase = 0u;
+    device->decimation_taps = factor == 1u ? 0u : 16u * factor + 1u;
+    if (factor > 1u) {
+        const double cutoff = 0.45 / (double)factor;
+        const double center = ((double)device->decimation_taps - 1.0) / 2.0;
+        double sum = 0.0;
+        for (unsigned int index = 0u; index < device->decimation_taps; ++index) {
+            double offset = (double)index - center;
+            double sinc = offset == 0.0 ? 2.0 * cutoff :
+                          sin(2.0 * pi * cutoff * offset) / (pi * offset);
+            double window = 0.54 - 0.46 * cos(2.0 * pi * (double)index /
+                                             (double)(device->decimation_taps - 1u));
+            device->decimation_coefficients[index] = sinc * window;
+            sum += device->decimation_coefficients[index];
+        }
+        for (unsigned int index = 0u; index < device->decimation_taps; ++index)
+            device->decimation_coefficients[index] /= sum;
+    }
+    atomic_store(&device->decimation_factor, factor);
+    (void)pthread_mutex_unlock(&decimation_lock);
+    return 0;
+}
+
+static size_t decimate_iq(compat_device_context *device, short *xi, short *xq,
+                          size_t samples)
+{
+    size_t output = 0u;
+    (void)pthread_mutex_lock(&decimation_lock);
+    unsigned int factor = atomic_load(&device->decimation_factor);
+    if (factor == 1u) {
+        (void)pthread_mutex_unlock(&decimation_lock);
+        return samples;
+    }
+    for (size_t input = 0u; input < samples; ++input) {
+        device->decimation_history_i[device->decimation_position] = xi[input];
+        device->decimation_history_q[device->decimation_position] = xq[input];
+        device->decimation_position =
+            (device->decimation_position + 1u) % device->decimation_taps;
+        if (device->decimation_phase == 0u) {
+            double sum_i = 0.0;
+            double sum_q = 0.0;
+            for (unsigned int tap = 0u; tap < device->decimation_taps; ++tap) {
+                unsigned int history = (device->decimation_position +
+                                        device->decimation_taps - 1u - tap) %
+                                       device->decimation_taps;
+                sum_i += device->decimation_coefficients[tap] *
+                         (double)device->decimation_history_i[history];
+                sum_q += device->decimation_coefficients[tap] *
+                         (double)device->decimation_history_q[history];
+            }
+            xi[output] = (short)clamp_int((int)lround(sum_i), -32768, 32767);
+            xq[output] = (short)clamp_int((int)lround(sum_q), -32768, 32767);
+            ++output;
+        }
+        device->decimation_phase = (device->decimation_phase + 1u) % factor;
+    }
+    (void)pthread_mutex_unlock(&decimation_lock);
+    return output;
 }
 
 /* RSPduo 50-ohm LNA gain-reduction tables from the SDRplay API specification. */
@@ -154,8 +236,8 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
         return sdrplay_api_InvalidMode;
     if ((reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
         const sdrplay_api_DecimationT *decimation = &device->channel_a.ctrlParams.decimation;
-        if (decimation->enable != 0u || decimation->decimationFactor != 1u)
-            return sdrplay_api_InvalidMode;
+        unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
+        if (!valid_decimation_factor(factor)) return sdrplay_api_OutOfRange;
     }
     if ((reason & sdrplay_api_Update_Ctrl_AdsbMode) != 0u &&
         device->channel_a.ctrlParams.adsbMode != sdrplay_api_ADSB_DECIMATION)
@@ -253,6 +335,7 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples, v
         unsigned int sample_peak = abs_i > abs_q ? abs_i : abs_q;
         if (sample_peak > peak) peak = sample_peak;
     }
+    samples = decimate_iq(device, xi, xq, samples);
     unsigned int observed = atomic_load(&device->agc_peak);
     while (peak > observed &&
            !atomic_compare_exchange_weak(&device->agc_peak, &observed, peak)) {}
@@ -313,6 +396,7 @@ static void reset_parameters(void)
     atomic_init(&rspduo.stream_state, 0);
     atomic_init(&rspduo.agc_peak, 0u);
     atomic_init(&rspduo.agc_stop, 0);
+    atomic_init(&rspduo.decimation_factor, 1u);
     rspduo.params.devParams = &rspduo.dev_params;
     rspduo.params.rxChannelA = &rspduo.channel_a;
     rspduo.params.rxChannelB = &rspduo.channel_b;
@@ -594,6 +678,7 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
                                 sdrplay_api_Update_Dev_Ppm)) != 0u;
     int rf_changed = (reason & sdrplay_api_Update_Tuner_Frf) != 0u;
     int gr_changed = (reason & sdrplay_api_Update_Tuner_Gr) != 0u || rf_changed;
+    uint32_t change_flags = protocol_change_flags(reason);
     pthread_mutex_lock(&hardware_lock);
     if (fs_changed) {
         atomic_store(&rspduo.callback_samples,
@@ -613,11 +698,18 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
             atomic_store(&rspduo.agc_peak, 0u);
         }
     }
+    /* Install the software-only state before a daemon response can be followed
+     * by IQ. The update round trip provides an ordering boundary for callers. */
+    if (result >= 0 && (reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
+        const sdrplay_api_DecimationT *decimation = &rspduo.channel_a.ctrlParams.decimation;
+        unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
+        if (configure_decimator(&rspduo, factor) != 0) result = -1;
+    }
     if (result >= 0) {
         openrsp_radio_config config;
         fill_radio_config(&rspduo, &config);
         result = openrsp_daemon_backend_update(rspduo.backend, &config,
-                                                protocol_change_flags(reason));
+                                                change_flags);
     }
     if (result >= 0) {
         if (gr_changed) {
