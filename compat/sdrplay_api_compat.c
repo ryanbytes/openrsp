@@ -29,6 +29,8 @@ typedef struct {
     sdrplay_api_CallbackFnsT callbacks;
     void *callback_context;
     unsigned int sample_number;
+    uint32_t last_iq_sequence;
+    int iq_sequence_seen;
     unsigned int first_callback;
     atomic_uint pending_gr_changed;
     atomic_uint pending_rf_changed;
@@ -314,10 +316,26 @@ static void *agc_thread_main(void *opaque)
     return NULL;
 }
 
-static void daemon_stream_callback(const int16_t *interleaved, size_t samples, void *opaque)
+static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
+                                   uint32_t sequence, void *opaque)
 {
     compat_device_context *device = opaque;
     atomic_store(&device->stream_state, 1);
+    int discontinuity = 0;
+    uint32_t missing_frames = 0u;
+    if (device->iq_sequence_seen) {
+        uint32_t expected = device->last_iq_sequence + 1u;
+        if (sequence != expected) {
+            uint32_t distance = sequence - expected;
+            discontinuity = 1;
+            if (distance < 0x80000000u) missing_frames = distance;
+            fprintf(stderr,
+                    "OPENRSP_API_IQ_GAP expected=%u received=%u missing_frames=%u\n",
+                    expected, sequence, missing_frames);
+        }
+    }
+    device->last_iq_sequence = sequence;
+    device->iq_sequence_seen = 1;
     short *xi = malloc((size_t)samples * sizeof(*xi));
     short *xq = malloc((size_t)samples * sizeof(*xq));
     if (xi == NULL || xq == NULL) {
@@ -336,6 +354,7 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples, v
         if (sample_peak > peak) peak = sample_peak;
     }
     samples = decimate_iq(device, xi, xq, samples);
+    device->sample_number += missing_frames * (unsigned int)samples;
     unsigned int observed = atomic_load(&device->agc_peak);
     while (peak > observed &&
            !atomic_compare_exchange_weak(&device->agc_peak, &observed, peak)) {}
@@ -353,8 +372,9 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples, v
             .fsChanged = offset == 0u ? fs_changed : 0,
             .numSamples = chunk
         };
+        unsigned int reset = offset == 0u && (device->first_callback || discontinuity);
         device->callbacks.StreamACbFn(xi + offset, xq + offset, &params, chunk,
-                                      device->first_callback, device->callback_context);
+                                      reset, device->callback_context);
         device->first_callback = 0;
         device->sample_number += chunk;
         offset += chunk;
@@ -604,6 +624,8 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     rspduo.callbacks = *callbacks;
     rspduo.callback_context = context;
     rspduo.sample_number = 0;
+    rspduo.last_iq_sequence = 0u;
+    rspduo.iq_sequence_seen = 0;
     atomic_store(&rspduo.stream_state, 0);
     atomic_store(&rspduo.agc_stop, 0);
     atomic_store(&rspduo.agc_peak, 0u);

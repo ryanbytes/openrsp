@@ -8,7 +8,8 @@
 
 typedef struct openrsp_daemon_backend openrsp_daemon_backend;
 typedef void (*openrsp_daemon_iq_callback)(const int16_t *interleaved,
-                                           size_t iq_samples, void *context);
+                                           size_t iq_samples, uint32_t sequence,
+                                           void *context);
 typedef void (*openrsp_daemon_failure_callback)(void *context);
 
 int openrsp_daemon_backend_list(openrsp_device_record *devices, size_t capacity);

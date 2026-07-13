@@ -79,6 +79,7 @@ static int serve_client(int descriptor)
                            &device, sizeof(device)) != 0)
                 return -1;
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
+            const openrsp_update_request *update = (const openrsp_update_request *)payload;
             const openrsp_response response = {
                 .status = OPENRSP_STATUS_OK,
                 .sequence = request.sequence,
@@ -87,7 +88,9 @@ static int serve_client(int descriptor)
             /* Put IQ before the response so each update has a deterministic
              * fixture boundary while also exercising response waiting with
              * an interleaved stream frame. */
-            if (send_mock_iq(descriptor, request.sequence) != 0 ||
+            uint32_t iq_sequence = request.sequence;
+            if (update->changed_flags == OPENRSP_CHANGE_RF) iq_sequence += 2u;
+            if (send_mock_iq(descriptor, iq_sequence) != 0 ||
                 send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                            &response, sizeof(response)) != 0) return -1;
         } else {
@@ -136,12 +139,13 @@ typedef struct {
     int gain_changed;
     int validate_samples;
     unsigned int device_failures;
+    unsigned int reset_callbacks;
+    unsigned int last_reset_first_sample;
 } callback_metrics;
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int samples, unsigned int reset, void *opaque)
 {
-    (void)reset;
     callback_metrics *metrics = opaque;
     assert(samples == params->numSamples);
     (void)pthread_mutex_lock(&metrics->lock);
@@ -151,6 +155,10 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     metrics->samples += samples;
     metrics->rf_changed += params->rfChanged;
     metrics->gain_changed += params->grChanged;
+    if (reset != 0u) {
+        ++metrics->reset_callbacks;
+        metrics->last_reset_first_sample = params->firstSampleNum;
+    }
     (void)pthread_cond_signal(&metrics->ready);
     (void)pthread_mutex_unlock(&metrics->lock);
 }
@@ -331,9 +339,16 @@ int main(void)
                               0x80u) == sdrplay_api_InvalidParam);
 
     params->devParams->ppm = 2.5;
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int samples_before_gap = metrics.samples;
+    (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Dev_Ppm, 0u) ==
            sdrplay_api_Success);
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.reset_callbacks == 2u);
+    assert(metrics.last_reset_first_sample == samples_before_gap + 64u);
+    (void)pthread_mutex_unlock(&metrics.lock);
     params->devParams->ppm = 301.0;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Dev_Ppm, 0u) ==

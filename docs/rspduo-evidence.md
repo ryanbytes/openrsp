@@ -181,6 +181,13 @@ without terminating the host process. The POSIX client suppresses `SIGPIPE` on
 both Linux (`MSG_NOSIGNAL`) and macOS (`SO_NOSIGPIPE`) so a vanished daemon is
 returned as a transport error instead of crashing the application.
 
+IQ frame sequence numbers now reach the compatibility layer instead of being
+discarded. An injected forward gap sets the stream callback reset flag and
+advances `firstSampleNum` by the estimated missing output samples. The test
+checks both values and repeats the combined gap/decimation case to catch
+ordering races. A sequence restart (such as daemon recovery) sets reset without
+inventing a forward sample count.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

@@ -91,7 +91,7 @@ static void *reader_main(void *opaque)
             }
             openrsp_daemon_iq_callback callback = backend->callback;
             if (callback) callback((const int16_t *)payload, header.payload_bytes / 4u,
-                                   backend->callback_context);
+                                   header.sequence, backend->callback_context);
         } else if (header.type == OPENRSP_MSG_RESPONSE &&
                    header.payload_bytes == sizeof(openrsp_response)) {
             const openrsp_response *response = (const openrsp_response *)payload;
