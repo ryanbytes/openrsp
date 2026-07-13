@@ -146,7 +146,11 @@ static void *reader_main(void *opaque)
     openrsp_daemon_backend *backend = opaque;
     unsigned char payload[262144];
     openrsp_message_header header;
-    while (openrsp_client_receive(backend->client, &header, payload, sizeof(payload)) == 0) {
+    for (;;) {
+        int receive_result = openrsp_client_receive(backend->client, &header, payload,
+                                                    sizeof(payload));
+        if (receive_result == OPENRSP_CLIENT_TIMEOUT) continue;
+        if (receive_result != OPENRSP_CLIENT_OK) break;
         if (header.type == OPENRSP_EVENT_IQ && (header.payload_bytes % 4u) == 0u) {
             static int logged_first_iq;
             if (!logged_first_iq) {

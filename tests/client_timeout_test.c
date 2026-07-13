@@ -78,7 +78,8 @@ static void *blocked_reader(void *opaque)
     openrsp_client *client = opaque;
     openrsp_message_header header;
     openrsp_response response;
-    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) == -1);
+    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) ==
+           OPENRSP_CLIENT_ERROR);
     return NULL;
 }
 
@@ -96,7 +97,8 @@ int main(void)
     openrsp_message_header header;
     openrsp_response response;
     double started = monotonic_seconds();
-    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) == -1);
+    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) ==
+           OPENRSP_CLIENT_TIMEOUT);
     double elapsed = monotonic_seconds() - started;
     assert(elapsed >= 0.05 && elapsed < 1.0);
     openrsp_client_close(client);
@@ -114,7 +116,8 @@ int main(void)
 
     client = connect_with_retry(socket_path);
     assert(client != NULL);
-    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) == -1);
+    assert(openrsp_client_receive(client, &header, &response, sizeof(response)) ==
+           OPENRSP_CLIENT_ERROR);
     openrsp_client_close(client);
 
     int status = 0;

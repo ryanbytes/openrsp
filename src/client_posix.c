@@ -21,6 +21,7 @@ struct openrsp_client {
 static int transfer_exact(int descriptor, void *buffer, size_t bytes, int writing)
 {
     unsigned char *cursor = buffer;
+    size_t transferred = 0u;
     while (bytes != 0u) {
         ssize_t count;
         if (writing) {
@@ -35,10 +36,14 @@ static int transfer_exact(int descriptor, void *buffer, size_t bytes, int writin
         if (count == 0) return -1;
         if (count < 0) {
             if (errno == EINTR) continue;
+            if (!writing && transferred == 0u &&
+                (errno == EAGAIN || errno == EWOULDBLOCK))
+                return OPENRSP_CLIENT_TIMEOUT;
             return -1;
         }
         cursor += (size_t)count;
         bytes -= (size_t)count;
+        transferred += (size_t)count;
     }
     return 0;
 }
@@ -116,11 +121,13 @@ int openrsp_client_receive(openrsp_client *client, openrsp_message_header *heade
                            void *payload, size_t capacity)
 {
     if (!client || !header) return -1;
-    if (transfer_exact(client->descriptor, header, sizeof(*header), 0) != 0) return -1;
+    int header_result = transfer_exact(client->descriptor, header, sizeof(*header), 0);
+    if (header_result != OPENRSP_CLIENT_OK) return header_result;
     if (header->magic != OPENRSP_PROTOCOL_MAGIC ||
         header->version != OPENRSP_PROTOCOL_VERSION || header->payload_bytes > capacity)
         return -1;
     if (header->payload_bytes != 0u &&
-        transfer_exact(client->descriptor, payload, header->payload_bytes, 0) != 0) return -1;
+        transfer_exact(client->descriptor, payload, header->payload_bytes, 0) != 0)
+        return OPENRSP_CLIENT_ERROR;
     return 0;
 }

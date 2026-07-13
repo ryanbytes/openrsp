@@ -267,6 +267,19 @@ IQ processing. Debug, Release, and ASan/UBSan tests pass. This change has not
 yet passed a new physical replug cycle, so transparent SDRTrunk survival is
 still unverified.
 
+The first live deployment of that queue loaded the exact Release library,
+restored GR 50/LNA 0, and produced fresh P25 grants. An uncommanded USB dropout
+then exposed a separate five-second boundary: `openrsp_client_receive` treated
+a socket receive timeout during the daemon's otherwise successful recovery as
+EOF. The API emitted `DeviceFailure` and SDRTrunk removed the tuner before the
+daemon cold-booted the receiver and resumed USB IQ. Client receive now returns
+distinct success, idle-timeout, and fatal-error results. The streaming reader
+continues after a timeout with no frame; synchronous command waits still expire
+after five seconds, and EOF, partial frames, and malformed frames remain fatal.
+The timeout fixture separately verifies silent timeout, shutdown wakeup, and
+truncated-frame classification. A new physical replug is still required to
+validate this change end to end.
+
 ## API update-reason audit (2026-07-12)
 
 The public API 3.15 update-reason surface was compared with SDRplay's published
