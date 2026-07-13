@@ -12,6 +12,11 @@ int main(void)
     const openrsp_model *rspduo = openrsp_model_lookup(0x1df7u, 0x3020u);
     assert(rspduo != NULL);
     assert(strcmp(rspduo->model, "SDRplay RSPduo") == 0);
+    assert(rspduo->support == OPENRSP_SUPPORT_EXPERIMENTAL_STREAMING);
+    const openrsp_model *rspdx = openrsp_model_lookup(0x1df7u, 0x3030u);
+    assert(rspdx != NULL);
+    assert(strcmp(rspdx->model, "SDRplay RSPdx") == 0);
+    assert(rspdx->support == OPENRSP_SUPPORT_DISCOVERY_ONLY);
     assert(openrsp_model_lookup(0x1df7u, 0xffffu) == NULL);
     assert(openrsp_model_lookup(0xffffu, 0x3000u) == NULL);
     assert(strcmp(openrsp_support_name(OPENRSP_SUPPORT_UNKNOWN), "unknown") == 0);

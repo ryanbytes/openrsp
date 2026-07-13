@@ -1,14 +1,16 @@
 #include "openrsp/openrsp.h"
 
 /*
- * IDs below are independently published by libmirisdr-5. A name is not a
- * claim of functional support. Unknown 0x1df7 devices remain discoverable.
+ * Legacy IDs through RSPdx are published by SDRplay in its VirtualHere setup
+ * guide. A name is not a claim of functional support. Unknown 0x1df7 devices
+ * remain discoverable.
  */
 static const openrsp_model models[] = {
     {OPENRSP_USB_VENDOR_ID, 0x2500u, "Mirics MSi2500 / original RSP1-class", OPENRSP_SUPPORT_DISCOVERY_ONLY},
     {OPENRSP_USB_VENDOR_ID, 0x3000u, "SDRplay RSP1A", OPENRSP_SUPPORT_DISCOVERY_ONLY},
     {OPENRSP_USB_VENDOR_ID, 0x3010u, "SDRplay RSP2", OPENRSP_SUPPORT_DISCOVERY_ONLY},
-    {OPENRSP_USB_VENDOR_ID, 0x3020u, "SDRplay RSPduo", OPENRSP_SUPPORT_DISCOVERY_ONLY},
+    {OPENRSP_USB_VENDOR_ID, 0x3020u, "SDRplay RSPduo", OPENRSP_SUPPORT_EXPERIMENTAL_STREAMING},
+    {OPENRSP_USB_VENDOR_ID, 0x3030u, "SDRplay RSPdx", OPENRSP_SUPPORT_DISCOVERY_ONLY},
 };
 
 const openrsp_model *openrsp_model_lookup(uint16_t vendor_id, uint16_t product_id)

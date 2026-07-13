@@ -20,6 +20,7 @@
 
 #define OPENRSPD_MAX_PAYLOAD 4096u
 #define OPENRSPD_MAX_CLIENTS 32
+#define OPENRSPD_MAX_DEVICES 32u
 #define OPENRSPD_STREAM_SLOT_BYTES (OPENRSP_MAX_IQ_SAMPLES * 4u)
 
 typedef struct {
@@ -425,6 +426,36 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
     return OPENRSP_STATUS_OK;
 }
 
+static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
+                                         size_t capacity)
+{
+    uint32_t raw_count = mirisdr_get_device_count();
+    uint32_t count = 0u;
+    for (uint32_t raw_index = 0u; raw_index < raw_count; ++raw_index) {
+        uint16_t vendor_id = 0u;
+        uint16_t product_id = 0u;
+        char manufacturer[256] = {0};
+        char product[256] = {0};
+        char serial[256] = {0};
+        if (mirisdr_get_device_info(raw_index, &vendor_id, &product_id,
+                                    manufacturer, product, serial) != 0 ||
+            vendor_id != 0x1df7u)
+            continue;
+        if (records && count >= capacity) break;
+        if (records && count < capacity) {
+            openrsp_device_record *record = &records[count];
+            memset(record, 0, sizeof(*record));
+            record->device_index = raw_index;
+            record->vendor_id = vendor_id;
+            record->product_id = product_id;
+            (void)snprintf(record->serial, sizeof(record->serial), "%s", serial);
+            (void)snprintf(record->model, sizeof(record->model), "%s", product);
+        }
+        ++count;
+    }
+    return count;
+}
+
 static int serve_request(int descriptor, daemon_state *state)
 {
     openrsp_message_header request;
@@ -435,6 +466,8 @@ static int serve_request(int descriptor, daemon_state *state)
     if (request.payload_bytes != 0u &&
         read_exact(descriptor, payload, request.payload_bytes) != 1) return -1;
 
+    openrsp_device_record listed_devices[OPENRSPD_MAX_DEVICES];
+    uint32_t listed_count = 0u;
     openrsp_response response = {0};
     response.sequence = request.sequence;
     if (request.magic != OPENRSP_PROTOCOL_MAGIC || request.version != OPENRSP_PROTOCOL_VERSION) {
@@ -443,7 +476,9 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = OPENRSP_STATUS_OK;
     } else if (request.type == OPENRSP_CMD_LIST && request.payload_bytes == 0u) {
         response.status = OPENRSP_STATUS_OK;
-        response.changed_flags = mirisdr_get_device_count();
+        listed_count = snapshot_sdrplay_devices(listed_devices,
+                                                OPENRSPD_MAX_DEVICES);
+        response.changed_flags = listed_count;
     } else if (request.type == OPENRSP_CMD_LOCK_API && request.payload_bytes == 0u) {
         if (state->api_lock_owner >= 0 && state->api_lock_owner != descriptor) {
             response.status = OPENRSP_STATUS_BUSY;
@@ -467,9 +502,19 @@ static int serve_request(int descriptor, daemon_state *state)
         } else if (acquire->device_index >= mirisdr_get_device_count()) {
             response.status = OPENRSP_STATUS_BAD_REQUEST;
         } else {
-            state->owner = descriptor;
-            state->acquired_device_index = acquire->device_index;
-            response.status = OPENRSP_STATUS_OK;
+            uint16_t vendor_id = 0u;
+            char manufacturer[256] = {0};
+            char product[256] = {0};
+            char serial[256] = {0};
+            if (mirisdr_get_device_info(acquire->device_index, &vendor_id,
+                                        NULL, manufacturer, product,
+                                        serial) != 0 || vendor_id != 0x1df7u) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else {
+                state->owner = descriptor;
+                state->acquired_device_index = acquire->device_index;
+                response.status = OPENRSP_STATUS_OK;
+            }
         }
     } else if (request.type == OPENRSP_CMD_START && request.payload_bytes == 0u &&
                state->owner == descriptor && state->radio && !state->stream_thread_started) {
@@ -544,19 +589,10 @@ send_response:
     if (write_control_frame(state, descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                             &response, sizeof(response)) != 0) return -1;
     if (request.type == OPENRSP_CMD_LIST && response.status == OPENRSP_STATUS_OK) {
-        for (uint32_t index = 0; index < response.changed_flags; ++index) {
-            openrsp_device_record record = {
-                .device_index = index, .vendor_id = 0x1df7u, .product_id = 0x3020u
-            };
-            char manufacturer[256] = {0};
-            char product[256] = {0};
-            char serial[256] = {0};
-            (void)mirisdr_get_device_usb_strings(index, manufacturer, product, serial);
-            (void)snprintf(record.serial, sizeof(record.serial), "%s", serial);
-            (void)snprintf(record.model, sizeof(record.model), "%s",
-                           mirisdr_get_device_name(index));
+        for (uint32_t index = 0; index < listed_count; ++index) {
             if (write_control_frame(state, descriptor, OPENRSP_EVENT_DEVICE,
-                                    request.sequence, &record, sizeof(record)) != 0)
+                                    request.sequence, &listed_devices[index],
+                                    sizeof(listed_devices[index])) != 0)
                 return -1;
         }
     }

@@ -15,11 +15,11 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Machine-readable probe output | Implemented |
 | Original RSP1-class/RSP1A/RSP2 model-ID hints | Discovery only |
 | RSPduo tuner-A direct initialization | Verified on one unit |
-| RSPdx/RSP1B/RSPdxR2 identification | Awaiting hardware evidence |
+| RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
 | IQ streaming | Direct and standalone API paths verified on hardware |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
-| API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
+| API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/raw-index propagation; implemented and loaded by SDRTrunk |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
@@ -29,7 +29,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | USB cancellation state | Atomic cross-thread state with cancellation visibility fixture |
 | IQ loss indication | Daemon frame-sequence gaps set the API stream reset flag and advance sample numbering |
 | AGC gain events | Applied software-AGC changes emit API `GainChange` payloads |
-| Device API locking | Owner-aware recursive lock blocks competing enumeration/selection threads |
+| Device API locking | Recursive in-process lock plus daemon-owned cross-process lease with crash release |
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |

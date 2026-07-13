@@ -104,17 +104,33 @@ static int serve_client(int descriptor)
             return 0;
         if (request.type == OPENRSP_CMD_LIST) {
             const openrsp_response response = {
-                .status = OPENRSP_STATUS_OK, .sequence = request.sequence, .changed_flags = 1u
+                .status = OPENRSP_STATUS_OK, .sequence = request.sequence, .changed_flags = 4u
             };
-            const openrsp_device_record device = {
-                .device_index = 0u, .vendor_id = 0x1df7u, .product_id = 0x3020u,
-                .serial = "MOCK-RSPDUO", .model = "SDRplay RSPduo"
+            const openrsp_device_record devices[] = {
+                {.device_index = 13u, .vendor_id = 0x1df7u, .product_id = 0x3020u,
+                 .serial = "MOCK-RSPDUO", .model = "SDRplay RSPduo"},
+                {.device_index = 7u, .vendor_id = 0x1df7u, .product_id = 0x2500u,
+                 .serial = "MOCK-RSP1", .model = "SDRplay RSP1"},
+                {.device_index = 9u, .vendor_id = 0x1df7u, .product_id = 0x3000u,
+                 .serial = "MOCK-RSP1A", .model = "SDRplay RSP1A"},
+                {.device_index = 11u, .vendor_id = 0x1df7u, .product_id = 0x3010u,
+                 .serial = "MOCK-RSP2", .model = "SDRplay RSP2"}
             };
             if (send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
-                           &response, sizeof(response)) != 0 ||
-                send_frame(descriptor, OPENRSP_EVENT_DEVICE, request.sequence,
-                           &device, sizeof(device)) != 0)
-                return -1;
+                           &response, sizeof(response)) != 0) return -1;
+            for (size_t index = 0u;
+                 index < sizeof(devices) / sizeof(devices[0]); ++index) {
+                if (send_frame(descriptor, OPENRSP_EVENT_DEVICE, request.sequence,
+                               &devices[index], sizeof(devices[index])) != 0)
+                    return -1;
+            }
+        } else if (request.type == OPENRSP_CMD_ACQUIRE) {
+            const openrsp_acquire_request *acquire =
+                (const openrsp_acquire_request *)payload;
+            uint32_t status = request.payload_bytes == sizeof(*acquire) &&
+                              acquire->device_index == 13u ?
+                              OPENRSP_STATUS_OK : OPENRSP_STATUS_BAD_REQUEST;
+            if (send_response(descriptor, request.sequence, status) != 0) return -1;
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
             const openrsp_update_request *update = (const openrsp_update_request *)payload;
             ++streaming_updates;
@@ -426,7 +442,16 @@ int main(void)
     sdrplay_api_DeviceT devices[SDRPLAY_MAX_DEVICES];
     unsigned int count = 0;
     assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) == sdrplay_api_Success);
-    assert(count == 1u && devices[0].hwVer == 3u && devices[0].valid == 1u);
+    assert(count == 4u && devices[0].hwVer == SDRPLAY_RSPduo_ID &&
+           devices[1].hwVer == SDRPLAY_RSP1_ID &&
+           devices[2].hwVer == SDRPLAY_RSP1A_ID &&
+           devices[3].hwVer == SDRPLAY_RSP2_ID);
+    assert(devices[0].valid == 1u && devices[1].valid == 1u &&
+           devices[2].valid == 1u && devices[3].valid == 1u);
+    assert(devices[0].dev != NULL && devices[1].dev != NULL &&
+           devices[2].dev != NULL && devices[3].dev != NULL);
+    assert(devices[0].rspDuoMode == sdrplay_api_RspDuoMode_Single_Tuner);
+    assert(devices[1].rspDuoMode == sdrplay_api_RspDuoMode_Unknown);
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_DisableHeartbeat() == sdrplay_api_Fail);
     assert(sdrplay_api_Close() == sdrplay_api_Fail);

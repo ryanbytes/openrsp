@@ -148,6 +148,14 @@ The device API lock is a daemon-owned, cross-process lease rather than only an
 in-process mutex. Contending clients receive a busy response, and disconnecting
 the owner releases the lease so an application crash cannot strand discovery.
 
+Enumeration preserves each libmirisdr device's actual VID, PID, serial, and raw
+index instead of stamping every record as an RSPduo at index zero. The daemon
+filters non-SDRplay devices, and the compatibility API maps the published
+RSP1/RSP1A/RSP2/RSPduo hardware identifiers before opening the selected raw
+index. SDRplay's published PID list also identifies RSPdx as `0x3030`; OpenRSP
+recognizes that identity in direct discovery but does not claim streaming
+support for it. See the [SDRplay VirtualHere guide](https://www.sdrplay.com/docs/VirtualHere.pdf).
+
 ## Live unplug/replug recovery (2026-07-12)
 
 The first live replug attempt exposed a stale-handle failure: libusb ended the

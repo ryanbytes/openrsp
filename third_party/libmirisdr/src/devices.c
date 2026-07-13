@@ -18,7 +18,7 @@
 static mirisdr_device_t mirisdr_devices[] = {
     { 0x1df7, 0x2500, "Mirics MSi2500 default (e.g. VTX3D card)", "Mirics", "MSi2500"},
     { 0x1df7, 0x3000, "SDRplay RSP1A", "SDRPlay", "RSP1A"},
-    { 0x1df7, 0x3010, "SDRplay RSP1A", "SDRPlay", "RSP2"},
+    { 0x1df7, 0x3010, "SDRplay RSP2", "SDRPlay", "RSP2"},
     /* OpenRSP: added 2026-07-12 for direct RSPduo transport development. */
     { 0x1df7, 0x3020, "SDRplay RSPduo (experimental tuner A)", "SDRPlay", "RSPduo"},
     { 0x2040, 0xd300, "Hauppauge WinTV 133559 LF", "Hauppauge", "WinTV 133559 LF"},
@@ -101,8 +101,9 @@ const char *mirisdr_get_device_name (uint32_t index) {
     return "";
 }
 
-/* vlastní implementace */
-int mirisdr_get_device_usb_strings (uint32_t index, char *manufact, char *product, char *serial) {
+int mirisdr_get_device_info (uint32_t index, uint16_t *vendor_id,
+                             uint16_t *product_id, char *manufact,
+                             char *product, char *serial) {
     ssize_t i, i_max;
     size_t j = 0;
     libusb_context *ctx;
@@ -110,19 +111,32 @@ int mirisdr_get_device_usb_strings (uint32_t index, char *manufact, char *produc
     struct libusb_device_descriptor dd;
     mirisdr_device_t *device = NULL;
 
+    if (!manufact || !product || !serial) return -1;
+    if (vendor_id) *vendor_id = 0u;
+    if (product_id) *product_id = 0u;
+    memset(manufact, 0, 256);
+    memset(product, 0, 256);
+    memset(serial, 0, 256);
+
 #ifdef __ANDROID__
     /* LibUSB does not support device discovery on android */
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
 #endif
 
-    libusb_init(&ctx);
+    if (libusb_init(&ctx) != 0) return -1;
     i_max = libusb_get_device_list(ctx, &list);
+    if (i_max < 0) {
+        libusb_exit(ctx);
+        return -1;
+    }
 
     for (i = 0; i < i_max; i++) {
         libusb_get_device_descriptor(list[i], &dd);
 
         if ((device = mirisdr_device_get(dd.idVendor, dd.idProduct)) &&
             (j++ == index)) {
+            if (vendor_id) *vendor_id = dd.idVendor;
+            if (product_id) *product_id = dd.idProduct;
             strcpy(manufact, device->manufacturer);
             strcpy(product, device->product);
 
@@ -185,12 +199,14 @@ serial_failed:
         }
     }
 
-    memset(manufact, 0, 256);
-    memset(product, 0, 256);
-    memset(serial, 0, 256);
-
     libusb_free_device_list(list, 1);
     libusb_exit(ctx);
 
     return -1;
+}
+
+/* vlastní implementace */
+int mirisdr_get_device_usb_strings (uint32_t index, char *manufact,
+                                    char *product, char *serial) {
+    return mirisdr_get_device_info(index, NULL, NULL, manufact, product, serial);
 }
