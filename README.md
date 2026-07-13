@@ -38,7 +38,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
-| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, every advertised rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
+| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live single/dual RSPduo discovery, concurrent 2 MS/s A/B streaming, every advertised single-tuner rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
@@ -107,6 +107,8 @@ Use `--rates` to measure every rate advertised by the module, or `--rate SPS`
 to test one rate. These modes compare delivered IQ against wall-clock time and
 restore the normal 2 MS/s configuration and AGC after a successful run. Use
 `--frequency HZ` to run the same control test at a specific RF center.
+Use `--dual` to require the upstream module to discover `mode=DT`, expose two
+RX channels, and deliver live IQ concurrently through both Soapy streams.
 
 The standalone compatibility path has an independent verifier that does not
 load SoapySDR. With other radio applications stopped, it measures native API

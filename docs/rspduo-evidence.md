@@ -983,3 +983,31 @@ ASan/UBSan builds each passed all 14 hardware-free tests after the transition
 work. The pinned upstream SoapySDRPlay3 module was rebuilt against the installed
 library after the protocol-v7 change; `SoapySDRUtil --info` loaded the module
 and registered the `sdrplay` factory.
+
+## SoapySDR direct-dual discovery and streaming (2026-07-13)
+
+An isolated public-API reference probe found one idle physical RSPduo record.
+API 3.15.1 reported tuner mask `Both` (`3`) and mode capability mask `7`:
+single tuner, direct dual tuner, and master. Selecting direct dual at 6 MHz and
+calling `GetDeviceParams` before modifying any settings returned a 6 MHz device
+rate, 1.620 MHz IF on both channels, 0.200 MHz default bandwidth on both
+channels, and disabled x1 decimation. No receiver identity was retained.
+
+OpenRSP discovery now reports tuner mask `Both` and capability mask `3`, which
+contains the implemented single and direct-dual modes but deliberately omits
+unimplemented master/slave operation. Dual selection installs the observed 6
+or 8 MHz shared clock and matching 1.620 or 2.048 MHz IF defaults on both
+channels before the application receives its parameter pointers. The
+hardware-free compatibility fixture verifies the capability mask, rejects a
+dual selection without a valid shared clock, and verifies the 6 MHz dual
+defaults.
+
+After rebuilding the current upstream SoapySDRPlay3 module against the installed
+Release library, `SoapySDRUtil --find` exposed separate `mode=ST` and `mode=DT`
+choices for the same physical receiver. The extended Soapy verifier selected
+`mode=DT`, observed two RX channels, opened separate channel 0 and channel 1
+streams, and alternated reads for three seconds. Each stream delivered
+5,935,104 samples (1.976 MS/s measured), with nonzero RMS on both, then closed
+and released cleanly. This verifies Soapy discovery and concurrent A/B stream
+routing. It does not yet verify independent per-channel frequency/gain control
+through the upstream adapter's Soapy control surface.

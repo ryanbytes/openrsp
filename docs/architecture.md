@@ -30,6 +30,12 @@ the first target-mode B frame from racing the application-visible mode change.
 If hardware reconfiguration fails, the daemon attempts to restore and restart
 the old mode before returning the error.
 
+API discovery reports RSPduo tuner and mode fields as capability masks, not as
+an already selected operating mode. OpenRSP advertises both tuners and the
+direct single/dual modes it implements. It deliberately omits the official
+master capability until cross-process master/slave ownership exists, preventing
+SoapySDR and other clients from presenting a mode that cannot be selected.
+
 The core owns no unbounded wait. Every submitted transfer has one owner, one completion path, and a cancellation path. Device removal is a normal state transition. Callbacks never perform blocking control transfers. Recovery happens inside a device session, not through a machine-wide privileged service restart.
 
 ## RSPduo state model

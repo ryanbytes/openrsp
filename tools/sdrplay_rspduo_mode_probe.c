@@ -328,6 +328,44 @@ static int run_dual_rate_swap(sdrplay_api_DeviceT *device)
     return finish(device, 1, status);
 }
 
+static int run_dual_defaults(sdrplay_api_DeviceT *device)
+{
+    device->tuner = sdrplay_api_Tuner_Both;
+    device->rspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    device->rspDuoSampleFreq = 6000000.0;
+    sdrplay_api_ErrT status = sdrplay_api_SelectDevice(device);
+    sdrplay_api_DeviceParamsT *params = NULL;
+    if (status == sdrplay_api_Success)
+        status = sdrplay_api_GetDeviceParams(device->dev, &params);
+    fprintf(stderr,
+            "MODE_DUAL_DEFAULTS status=%d dev_fs=%.0f sample_freq=%.0f "
+            "a=%p b=%p a_bw=%d b_bw=%d a_if=%d b_if=%d "
+            "a_dec_enable=%u a_dec_factor=%u b_dec_enable=%u b_dec_factor=%u\n",
+            status,
+            params != NULL && params->devParams != NULL ?
+                params->devParams->fsFreq.fsHz : 0.0,
+            device->rspDuoSampleFreq,
+            params == NULL ? NULL : (void *)params->rxChannelA,
+            params == NULL ? NULL : (void *)params->rxChannelB,
+            params == NULL || params->rxChannelA == NULL ? -1 :
+                params->rxChannelA->tunerParams.bwType,
+            params == NULL || params->rxChannelB == NULL ? -1 :
+                params->rxChannelB->tunerParams.bwType,
+            params == NULL || params->rxChannelA == NULL ? -1 :
+                params->rxChannelA->tunerParams.ifType,
+            params == NULL || params->rxChannelB == NULL ? -1 :
+                params->rxChannelB->tunerParams.ifType,
+            params == NULL || params->rxChannelA == NULL ? 0u :
+                params->rxChannelA->ctrlParams.decimation.enable,
+            params == NULL || params->rxChannelA == NULL ? 0u :
+                params->rxChannelA->ctrlParams.decimation.decimationFactor,
+            params == NULL || params->rxChannelB == NULL ? 0u :
+                params->rxChannelB->ctrlParams.decimation.enable,
+            params == NULL || params->rxChannelB == NULL ? 0u :
+                params->rxChannelB->ctrlParams.decimation.decimationFactor);
+    return finish(device, 0, status);
+}
+
 static int run_mode_swap(sdrplay_api_DeviceT *device)
 {
     device->tuner = sdrplay_api_Tuner_A;
@@ -466,7 +504,9 @@ static int run_mode_transition_once(sdrplay_api_DeviceT *device, int to_dual)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2 || (strcmp(argv[1], "dual") != 0 &&
+    if (argc != 2 || (strcmp(argv[1], "enumerate") != 0 &&
+        strcmp(argv[1], "dual") != 0 &&
+        strcmp(argv[1], "dual-defaults") != 0 &&
         strcmp(argv[1], "dual-controls") != 0 &&
         strcmp(argv[1], "dual-init") != 0 && strcmp(argv[1], "dual-a") != 0 &&
         strcmp(argv[1], "dual-b") != 0 && strcmp(argv[1], "swap") != 0 &&
@@ -474,7 +514,7 @@ int main(int argc, char **argv)
         strcmp(argv[1], "mode-swap") != 0 &&
         strcmp(argv[1], "mode-to-dual") != 0 &&
         strcmp(argv[1], "mode-to-single") != 0)) {
-        fprintf(stderr, "usage: %s dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
+        fprintf(stderr, "usage: %s enumerate|dual-defaults|dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
         return EXIT_FAILURE;
     }
     sdrplay_api_ErrT status = sdrplay_api_Open();
@@ -482,6 +522,20 @@ int main(int argc, char **argv)
     unsigned int count = 0u;
     if (status == sdrplay_api_Success)
         status = sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES);
+    if (strcmp(argv[1], "enumerate") == 0) {
+        fprintf(stderr, "MODE_ENUMERATION status=%d count=%u\n", status, count);
+        for (unsigned int index = 0u; status == sdrplay_api_Success &&
+             index < count; ++index)
+            fprintf(stderr,
+                    "MODE_ENUMERATION_DEVICE index=%u hw=%u tuner=%d mode=%d "
+                    "sample_freq=%.0f valid=%u\n",
+                    index, devices[index].hwVer, devices[index].tuner,
+                    devices[index].rspDuoMode, devices[index].rspDuoSampleFreq,
+                    devices[index].valid);
+        sdrplay_api_ErrT close = sdrplay_api_Close();
+        return status == sdrplay_api_Success && close == sdrplay_api_Success ?
+               EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (status != sdrplay_api_Success || count == 0u ||
         devices[0].hwVer != SDRPLAY_RSPduo_ID) {
         fprintf(stderr, "MODE_DISCOVERY status=%d count=%u hw=%u\n", status, count,
@@ -490,6 +544,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     if (strcmp(argv[1], "swap") == 0) return run_swap(&devices[0]);
+    if (strcmp(argv[1], "dual-defaults") == 0)
+        return run_dual_defaults(&devices[0]);
     if (strcmp(argv[1], "dual-rate-swap") == 0)
         return run_dual_rate_swap(&devices[0]);
     if (strcmp(argv[1], "mode-swap") == 0) return run_mode_swap(&devices[0]);

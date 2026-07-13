@@ -1,6 +1,7 @@
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Errors.hpp>
 #include <SoapySDR/Formats.hpp>
+#include <SoapySDR/Logger.hpp>
 #include <SoapySDR/Types.hpp>
 
 #include <algorithm>
@@ -26,6 +27,58 @@ struct Measurement {
     double rms = 0.0;
     double peak = 0.0;
 };
+
+struct DualMeasurement {
+    size_t samples[2] = {0, 0};
+    long double power[2] = {0.0, 0.0};
+    double elapsed = 0.0;
+};
+
+DualMeasurement measure_dual(SoapySDR::Device *device,
+                             SoapySDR::Stream *streams[2])
+{
+    using clock = std::chrono::steady_clock;
+    std::vector<std::complex<short>> buffers[2] = {
+        std::vector<std::complex<short>>(device->getStreamMTU(streams[0])),
+        std::vector<std::complex<short>>(device->getStreamMTU(streams[1]))
+    };
+    for (auto &buffer : buffers)
+        if (buffer.empty()) buffer.resize(4096);
+
+    DualMeasurement measurement;
+    const auto started = clock::now();
+    const auto deadline = started + std::chrono::seconds(3);
+    unsigned int consecutive_timeouts[2] = {0u, 0u};
+    while (clock::now() < deadline) {
+        for (size_t channel = 0u; channel < 2u; ++channel) {
+            void *output[] = {buffers[channel].data()};
+            int flags = 0;
+            long long time_ns = 0;
+            const int result = device->readStream(
+                streams[channel], output, buffers[channel].size(), flags,
+                time_ns, 500000);
+            if (result == SOAPY_SDR_TIMEOUT) {
+                if (++consecutive_timeouts[channel] > 5u)
+                    throw std::runtime_error("repeated dual-stream timeout on channel " +
+                                             std::to_string(channel));
+                continue;
+            }
+            if (result < 0)
+                throw std::runtime_error("dual readStream channel " +
+                                         std::to_string(channel) + ": " +
+                                         SoapySDR::errToStr(result));
+            consecutive_timeouts[channel] = 0u;
+            measurement.samples[channel] += static_cast<size_t>(result);
+            for (int index = 0; index < result; ++index) {
+                const long double i = buffers[channel][index].real();
+                const long double q = buffers[channel][index].imag();
+                measurement.power[channel] += i * i + q * q;
+            }
+        }
+    }
+    measurement.elapsed = std::chrono::duration<double>(clock::now() - started).count();
+    return measurement;
+}
 
 Measurement measure(SoapySDR::Device *device, SoapySDR::Stream *stream,
                     size_t discard_samples, size_t measure_samples)
@@ -203,14 +256,17 @@ void run_rate_matrix(SoapySDR::Device *device, SoapySDR::Stream *stream)
 
 int main(int argc, char **argv)
 {
+    SoapySDR::setLogLevel(SOAPY_SDR_WARNING);
     SoapySDR::Kwargs args;
     args["driver"] = "sdrplay";
     bool rate_matrix = false;
+    bool dual_mode = false;
     double single_rate = 0.0;
     double frequency = kFrequency;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--rates") rate_matrix = true;
+        else if (argument == "--dual") dual_mode = true;
         else if (argument == "--rate" && index + 1 < argc) {
             try {
                 single_rate = std::stod(argv[++index]);
@@ -240,7 +296,7 @@ int main(int argc, char **argv)
         else {
             std::cerr << "usage: " << argv[0]
                       << " [--serial SERIAL] [--frequency HZ]"
-                         " [--rates | --rate SPS]\n";
+                         " [--rates | --rate SPS] [--dual]\n";
             return EXIT_FAILURE;
         }
     }
@@ -248,16 +304,71 @@ int main(int argc, char **argv)
         std::cerr << "--rates and --rate are mutually exclusive\n";
         return EXIT_FAILURE;
     }
+    if (dual_mode && (rate_matrix || single_rate != 0.0)) {
+        std::cerr << "--dual cannot be combined with --rates or --rate\n";
+        return EXIT_FAILURE;
+    }
+    if (dual_mode) args["mode"] = "DT";
 
     SoapySDR::Device *device = nullptr;
     SoapySDR::Stream *stream = nullptr;
+    SoapySDR::Stream *stream_b = nullptr;
     bool active = false;
+    bool active_b = false;
     bool controls_changed = false;
     try {
         const SoapySDR::KwargsList devices = SoapySDR::Device::enumerate(args);
         if (devices.empty()) throw std::runtime_error("no Soapy SDRplay device found");
         device = SoapySDR::Device::make(devices.front());
         if (device == nullptr) throw std::runtime_error("Soapy device creation failed");
+
+        if (dual_mode) {
+            if (device->getNumChannels(SOAPY_SDR_RX) != 2u)
+                throw std::runtime_error("dual RSPduo did not expose two RX channels");
+            if (device->getSampleRate(SOAPY_SDR_RX, 0) != kSampleRate ||
+                device->getSampleRate(SOAPY_SDR_RX, 1) != kSampleRate)
+                throw std::runtime_error("dual RSPduo did not default to 2 MS/s per channel");
+            stream = device->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, {0u});
+            stream_b = device->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, {1u});
+            if (stream == nullptr || stream_b == nullptr)
+                throw std::runtime_error("dual setupStream returned null");
+            if (device->activateStream(stream) != 0)
+                throw std::runtime_error("dual activateStream failed");
+            active = true;
+            if (device->activateStream(stream_b) != 0)
+                throw std::runtime_error("dual activateStream failed");
+            active_b = true;
+            SoapySDR::Stream *streams[] = {stream, stream_b};
+            const DualMeasurement dual = measure_dual(device, streams);
+            for (size_t channel = 0u; channel < 2u; ++channel) {
+                if (dual.samples[channel] == 0u)
+                    throw std::runtime_error("dual channel delivered no IQ");
+                const double rate = static_cast<double>(dual.samples[channel]) /
+                                    dual.elapsed;
+                const double rms = std::sqrt(static_cast<double>(
+                    dual.power[channel] / dual.samples[channel]));
+                std::cout << "dual channel=" << channel
+                          << " samples=" << dual.samples[channel]
+                          << " rate=" << rate << " rms=" << rms << '\n';
+                if (dual.samples[channel] < 1000000u || rms == 0.0)
+                    throw std::runtime_error("dual channel did not deliver live IQ");
+            }
+            const double balance = static_cast<double>(dual.samples[0]) /
+                                   static_cast<double>(dual.samples[1]);
+            if (balance < 0.95 || balance > 1.05)
+                throw std::runtime_error("dual channel delivery differed by more than 5%");
+            device->deactivateStream(stream);
+            active = false;
+            device->deactivateStream(stream_b);
+            active_b = false;
+            device->closeStream(stream);
+            stream = nullptr;
+            device->closeStream(stream_b);
+            stream_b = nullptr;
+            SoapySDR::Device::unmake(device);
+            std::cout << "PASS: Soapy dual mode delivered concurrent A/B IQ\n";
+            return EXIT_SUCCESS;
+        }
 
         const std::vector<std::string> gains = device->listGains(SOAPY_SDR_RX, 0);
         if (std::find(gains.begin(), gains.end(), "IFGR") == gains.end() ||
@@ -355,6 +466,10 @@ int main(int argc, char **argv)
         if (device != nullptr && stream != nullptr) {
             if (active) (void)device->deactivateStream(stream);
             device->closeStream(stream);
+        }
+        if (device != nullptr && stream_b != nullptr) {
+            if (active_b) (void)device->deactivateStream(stream_b);
+            device->closeStream(stream_b);
         }
         if (device != nullptr) SoapySDR::Device::unmake(device);
         return EXIT_FAILURE;

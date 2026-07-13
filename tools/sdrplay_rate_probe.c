@@ -133,6 +133,10 @@ int main(int argc, char **argv)
         failed = 1;
         goto cleanup;
     }
+    if (devices[0].hwVer == SDRPLAY_RSPduo_ID) {
+        devices[0].tuner = sdrplay_api_Tuner_A;
+        devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    }
     status = sdrplay_api_SelectDevice(&devices[0]);
     if (status != sdrplay_api_Success) {
         fprintf(stderr, "SelectDevice failed: %s\n", sdrplay_api_GetErrorString(status));

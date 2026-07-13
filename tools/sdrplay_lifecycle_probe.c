@@ -144,6 +144,10 @@ static int run_cycle(unsigned int cycle)
         failed = 1;
         goto cleanup;
     }
+    if (devices[0].hwVer == SDRPLAY_RSPduo_ID) {
+        devices[0].tuner = sdrplay_api_Tuner_A;
+        devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    }
     status = sdrplay_api_SelectDevice(&devices[0]);
     if (status != sdrplay_api_Success) {
         fprintf(stderr, "cycle %u SelectDevice failed: %s\n", cycle,
@@ -248,6 +252,10 @@ static int run_crash_victim(int ready_fd)
     if (sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) !=
             sdrplay_api_Success || count == 0u)
         return -1;
+    if (devices[0].hwVer == SDRPLAY_RSPduo_ID) {
+        devices[0].tuner = sdrplay_api_Tuner_A;
+        devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    }
     if (sdrplay_api_SelectDevice(&devices[0]) != sdrplay_api_Success) return -1;
     if (sdrplay_api_GetDeviceParams(devices[0].dev, &params) !=
             sdrplay_api_Success || params == NULL)

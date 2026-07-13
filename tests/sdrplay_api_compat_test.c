@@ -698,11 +698,16 @@ static void run_dual_fixture(void)
            sdrplay_api_Success && count == 4u);
     devices[0].tuner = sdrplay_api_Tuner_Both;
     devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    devices[0].rspDuoSampleFreq = 0.0;
+    assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_InvalidMode);
     devices[0].rspDuoSampleFreq = 6000000.0;
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
     sdrplay_api_DeviceParamsT *params = NULL;
     assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==
            sdrplay_api_Success);
+    assert(params->devParams->fsFreq.fsHz == 6000000.0);
+    assert(params->rxChannelA->tunerParams.ifType == sdrplay_api_IF_1_620 &&
+           params->rxChannelB->tunerParams.ifType == sdrplay_api_IF_1_620);
     params->devParams->fsFreq.fsHz = 6000000.0;
     sdrplay_api_RxChannelParamsT *channels[] = {
         params->rxChannelA, params->rxChannelB
@@ -927,8 +932,13 @@ int main(void)
            devices[2].valid == 1u && devices[3].valid == 1u);
     assert(devices[0].dev != NULL && devices[1].dev != NULL &&
            devices[2].dev != NULL && devices[3].dev != NULL);
-    assert(devices[0].rspDuoMode == sdrplay_api_RspDuoMode_Single_Tuner);
+    assert(devices[0].rspDuoMode ==
+           (sdrplay_api_RspDuoMode_Single_Tuner |
+            sdrplay_api_RspDuoMode_Dual_Tuner));
+    assert(devices[0].tuner == sdrplay_api_Tuner_Both);
     assert(devices[1].rspDuoMode == sdrplay_api_RspDuoMode_Unknown);
+    devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    devices[0].tuner = sdrplay_api_Tuner_A;
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
     assert(sdrplay_api_DisableHeartbeat() == sdrplay_api_Fail);
     assert(sdrplay_api_Close() == sdrplay_api_Fail);
@@ -1010,6 +1020,8 @@ int main(void)
         assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) ==
                sdrplay_api_Success);
         assert(count == 4u);
+        devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+        devices[0].tuner = sdrplay_api_Tuner_A;
         assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
         params = NULL;
         assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==
@@ -1335,6 +1347,8 @@ int main(void)
     assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) ==
            sdrplay_api_Success);
     assert(count == 4u);
+    devices[0].rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+    devices[0].tuner = sdrplay_api_Tuner_A;
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
     params = NULL;
     assert(sdrplay_api_GetDeviceParams(devices[0].dev, &params) ==

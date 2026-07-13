@@ -1271,10 +1271,16 @@ sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices,
                                (found[index].serial[0] == '\0' ? "OPENRSP0" : found[index].serial);
         (void)snprintf(device->SerNo, sizeof(device->SerNo), "%s", identity);
         device->hwVer = hw_version;
-        device->tuner = sdrplay_api_Tuner_A;
+        device->tuner = found[index].product_id == 0x3020u ?
+                        sdrplay_api_Tuner_Both : sdrplay_api_Tuner_A;
+        /* GetDevices reports available RSPduo modes as a bit mask.  Advertise
+         * only modes OpenRSP can actually select: direct single and direct
+         * dual.  The official API also advertises master mode on an idle duo,
+         * but OpenRSP does not yet implement cross-process master/slave. */
         device->rspDuoMode = found[index].product_id == 0x3020u ?
-                             sdrplay_api_RspDuoMode_Single_Tuner :
-                             sdrplay_api_RspDuoMode_Unknown;
+            (sdrplay_api_RspDuoModeT)(sdrplay_api_RspDuoMode_Single_Tuner |
+                                      sdrplay_api_RspDuoMode_Dual_Tuner) :
+            sdrplay_api_RspDuoMode_Unknown;
         device->valid = 1u;
         device->dev = handle;
     }
@@ -1363,6 +1369,10 @@ sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
         return sdrplay_api_InvalidMode;
     if (device->rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner &&
         device->tuner != sdrplay_api_Tuner_Both) return sdrplay_api_InvalidMode;
+    if (device->rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner &&
+        device->rspDuoSampleFreq != 6000000.0 &&
+        device->rspDuoSampleFreq != 8000000.0)
+        return sdrplay_api_InvalidMode;
     if (device->rspDuoMode == sdrplay_api_RspDuoMode_Single_Tuner &&
         device->tuner == sdrplay_api_Tuner_Both) return sdrplay_api_InvalidMode;
     if (device->tuner == sdrplay_api_Tuner_B &&
@@ -1373,6 +1383,13 @@ sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
     rspduo.hw_version = handle->hw_version;
     rspduo.tuner = device->tuner;
     rspduo.mode = device->rspDuoMode;
+    if (rspduo.mode == sdrplay_api_RspDuoMode_Dual_Tuner) {
+        sdrplay_api_If_kHzT dual_if = device->rspDuoSampleFreq == 6000000.0 ?
+            sdrplay_api_IF_1_620 : sdrplay_api_IF_2_048;
+        rspduo.dev_params.fsFreq.fsHz = device->rspDuoSampleFreq;
+        rspduo.channel_a.tunerParams.ifType = dual_if;
+        rspduo.channel_b.tunerParams.ifType = dual_if;
+    }
     rspduo.params.rxChannelA = device->tuner == sdrplay_api_Tuner_B ? NULL :
                                                                   &rspduo.channel_a;
     rspduo.params.rxChannelB = device->tuner == sdrplay_api_Tuner_A ? NULL :
