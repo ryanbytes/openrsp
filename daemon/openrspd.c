@@ -44,9 +44,11 @@ typedef struct {
     atomic_bool first_iq_seen;
     bool recovery_config_pending;
     int recovery_identity_status;
-    uint32_t stream_sequence;
+    uint32_t stream_sequence[2];
     bool configured;
     openrsp_radio_config config;
+    bool dual_mode;
+    openrsp_dual_config dual_config;
     bool bootstrap_configured;
     openrsp_radio_config bootstrap_config;
 } daemon_state;
@@ -140,9 +142,9 @@ static int write_control_frame(daemon_state *state, int descriptor, uint16_t typ
     return result;
 }
 
-static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque)
+static void send_stream(daemon_state *state, unsigned int tuner,
+                        unsigned char *buffer, uint32_t length)
 {
-    daemon_state *state = opaque;
     while (atomic_load(&state->control_write_pending)) {
         const struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000L};
         (void)nanosleep(&pause, NULL);
@@ -158,8 +160,10 @@ static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque
         if (state->radio) (void)mirisdr_cancel_async(state->radio);
         return;
     }
-    uint32_t sequence = ++state->stream_sequence;
-    if (write_frame(state, state->owner, OPENRSP_EVENT_IQ, sequence,
+    unsigned int slot = tuner == OPENRSP_TUNER_B ? 1u : 0u;
+    uint32_t sequence = ++state->stream_sequence[slot];
+    uint16_t event = tuner == OPENRSP_TUNER_B ? OPENRSP_EVENT_IQ_B : OPENRSP_EVENT_IQ;
+    if (write_frame(state, state->owner, event, sequence,
                     buffer, length) != 0) {
         int write_error = errno;
         if (!atomic_exchange(&state->client_write_error, true)) {
@@ -177,6 +181,17 @@ static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque
     }
 }
 
+static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque)
+{
+    send_stream(opaque, OPENRSP_TUNER_A, buffer, length);
+}
+
+static void dual_stream_callback(unsigned int tuner, unsigned char *buffer,
+                                 uint32_t length, void *opaque)
+{
+    send_stream(opaque, tuner, buffer, length);
+}
+
 static void *stream_main(void *opaque)
 {
     daemon_state *state = opaque;
@@ -185,7 +200,9 @@ static void *stream_main(void *opaque)
     /* Keep the proven 32-transfer USB queue and 64 KiB USB buffers.  Aggregate
      * converted samples into 64 KiB daemon frames: a 256 KiB first socket
      * write can fill the macOS Unix-socket window before API startup finishes. */
-    int result = mirisdr_read_async(state->radio, stream_callback, state, 32u, 65536u);
+    int result = state->dual_mode ?
+        mirisdr_read_async_dual(state->radio, dual_stream_callback, state, 32u) :
+        mirisdr_read_async(state->radio, stream_callback, state, 32u, 65536u);
     state->streaming = false;
     state->stream_result = result;
     state->stream_error = result != 0;
@@ -295,6 +312,11 @@ static void release_client(daemon_state *state, int descriptor)
 {
     if (state->owner != descriptor) return;
     if (state->radio) (void)stop_stream(state);
+    if (state->dual_mode && state->radio) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        state->configured = false;
+    }
     if (state->stream_error && state->radio) {
         fprintf(stderr, "OPENRSPD_CLOSE_FAILED_STREAM result=%d\n", state->stream_result);
         (void)fflush(stderr);
@@ -306,6 +328,7 @@ static void release_client(daemon_state *state, int descriptor)
     state->streaming = false;
     state->stream_error = false;
     state->stream_result = 0;
+    state->dual_mode = false;
 }
 
 static void release_api_lock(daemon_state *state, int descriptor,
@@ -378,6 +401,11 @@ static uint32_t configure_radio(daemon_state *state,
                                 unsigned int max_attempts)
 {
     if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
+    if (state->dual_mode && state->radio) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        state->configured = false;
+    }
     if (max_attempts == 0u) max_attempts = 1u;
 
     for (unsigned int attempt = 1u; attempt <= max_attempts; ++attempt) {
@@ -399,6 +427,7 @@ static uint32_t configure_radio(daemon_state *state,
         uint32_t status = state->radio ? apply_config(state->radio, config) :
                                         OPENRSP_STATUS_IO_ERROR;
         if (status == OPENRSP_STATUS_OK) {
+            state->dual_mode = false;
             if (attempt > 1u) {
                 fprintf(stderr, "OPENRSPD_CONFIGURE_RETRY status=recovered attempt=%u/%u\n",
                         attempt, max_attempts);
@@ -419,6 +448,57 @@ static uint32_t configure_radio(daemon_state *state,
         }
     }
     return OPENRSP_STATUS_IO_ERROR;
+}
+
+static bool valid_dual_config(const openrsp_dual_config *config)
+{
+    if (!config || (config->sample_rate_hz != 6000000u &&
+                    config->sample_rate_hz != 8000000u)) return false;
+    int32_t required_if = config->sample_rate_hz == 6000000u ? 1620000 : 2048000;
+    return valid_config(&config->channel_a) && valid_config(&config->channel_b) &&
+           config->channel_a.tuner == OPENRSP_TUNER_A &&
+           config->channel_b.tuner == OPENRSP_TUNER_B &&
+           config->channel_a.sample_rate_hz == config->sample_rate_hz &&
+           config->channel_b.sample_rate_hz == config->sample_rate_hz &&
+           config->channel_a.if_frequency_hz == required_if &&
+           config->channel_b.if_frequency_hz == required_if &&
+           config->channel_a.bandwidth_hz <= 1536000u &&
+           config->channel_b.bandwidth_hz <= 1536000u;
+}
+
+static uint32_t configure_dual_radio(daemon_state *state,
+                                     const openrsp_dual_config *config)
+{
+    if (!valid_dual_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
+    if (!state->dual_mode && state->radio) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        state->configured = false;
+    }
+    if (!state->radio) {
+        uint32_t resolved_index = 0u;
+        if (resolve_acquired_device(state, &resolved_index) != 0 ||
+            mirisdr_open_tuner(&state->radio, resolved_index,
+                               OPENRSP_TUNER_BOTH) != 0)
+            return OPENRSP_STATUS_IO_ERROR;
+    }
+    int result = mirisdr_configure_rspduo_dual(
+        state->radio, config->sample_rate_hz,
+        config->channel_a.center_frequency_hz,
+        config->channel_b.center_frequency_hz,
+        (uint32_t)config->channel_a.if_frequency_hz,
+        config->channel_a.bandwidth_hz,
+        config->channel_a.gain_reduction_db, config->channel_a.lna_state,
+        config->channel_b.gain_reduction_db, config->channel_b.lna_state);
+    if (result < 0) {
+        (void)mirisdr_close(state->radio);
+        state->radio = NULL;
+        return OPENRSP_STATUS_IO_ERROR;
+    }
+    state->dual_mode = true;
+    state->dual_config = *config;
+    state->configured = true;
+    return OPENRSP_STATUS_OK;
 }
 
 static void recover_failed_stream(daemon_state *state)
@@ -467,6 +547,23 @@ static void recover_failed_stream(daemon_state *state)
      * 800 MHz channel can produce bulk data that contains no decodable RF.
      * Replay the session's proven bootstrap state, then restore the newest
      * application state after the endpoint is demonstrably alive. */
+    if (state->dual_mode) {
+        uint32_t dual_status = configure_dual_radio(state, &state->dual_config);
+        if (dual_status != OPENRSP_STATUS_OK) return;
+        state->logged_usb_iq = false;
+        state->logged_socket_iq = false;
+        atomic_store(&state->first_iq_seen, false);
+        atomic_store(&state->stream_error, false);
+        atomic_store(&state->stream_result, 0);
+        atomic_store(&state->streaming, true);
+        if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
+            atomic_store(&state->streaming, false);
+            atomic_store(&state->stream_error, true);
+            return;
+        }
+        state->stream_thread_started = true;
+        return;
+    }
     const openrsp_radio_config *bootstrap = state->bootstrap_configured ?
                                              &state->bootstrap_config :
                                              &state->config;
@@ -496,6 +593,7 @@ static void recover_failed_stream(daemon_state *state)
 
 static void finish_recovery_config(daemon_state *state)
 {
+    if (state->dual_mode) return;
     if (!state->recovery_config_pending || !atomic_load(&state->first_iq_seen) ||
         !state->radio) return;
     const openrsp_radio_config *bootstrap = state->bootstrap_configured ?
@@ -533,6 +631,22 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
     const openrsp_radio_config *old = &state->config;
     uint32_t flags = update->changed_flags;
     int result = 0;
+    if (state->dual_mode) {
+        if (next->tuner != OPENRSP_TUNER_A && next->tuner != OPENRSP_TUNER_B)
+            return OPENRSP_STATUS_BAD_REQUEST;
+        openrsp_radio_config *old_channel = next->tuner == OPENRSP_TUNER_B ?
+            &state->dual_config.channel_b : &state->dual_config.channel_a;
+        if (next->sample_rate_hz != state->dual_config.sample_rate_hz ||
+            next->if_frequency_hz != old_channel->if_frequency_hz ||
+            next->bandwidth_hz != old_channel->bandwidth_hz)
+            return OPENRSP_STATUS_BAD_REQUEST;
+        int dual_result = mirisdr_update_rspduo_dual(
+            state->radio, next->tuner, next->center_frequency_hz,
+            next->gain_reduction_db, next->lna_state);
+        if (dual_result < 0) return OPENRSP_STATUS_IO_ERROR;
+        *old_channel = *next;
+        return OPENRSP_STATUS_OK;
+    }
     if (next->tuner != old->tuner) return OPENRSP_STATUS_BAD_REQUEST;
     if ((flags & OPENRSP_CHANGE_AGC) != 0u &&
         (next->agc_mode < 0 || next->agc_mode > 4 ||
@@ -637,6 +751,7 @@ static int serve_request(int descriptor, daemon_state *state)
     openrsp_device_record listed_devices[OPENRSPD_MAX_DEVICES];
     uint32_t listed_count = 0u;
     openrsp_response response = {0};
+    bool start_stream_after_response = false;
     response.sequence = request.sequence;
     if (request.magic != OPENRSP_PROTOCOL_MAGIC || request.version != OPENRSP_PROTOCOL_VERSION) {
         response.status = OPENRSP_STATUS_BAD_REQUEST;
@@ -705,7 +820,8 @@ static int serve_request(int descriptor, daemon_state *state)
         state->streaming = true;
         state->stream_error = false;
         state->stream_result = 0;
-        state->stream_sequence = 0u;
+        state->stream_sequence[0] = 0u;
+        state->stream_sequence[1] = 0u;
         response.status = OPENRSP_STATUS_OK;
     } else if (request.type == OPENRSP_CMD_STOP && request.payload_bytes == 0u &&
                state->owner == descriptor && state->radio) {
@@ -726,6 +842,51 @@ static int serve_request(int descriptor, daemon_state *state)
             state->configured = true;
         }
         log_config("CONFIGURE", descriptor, 0u, response.status, config);
+    } else if (request.type == OPENRSP_CMD_CONFIGURE_DUAL &&
+               request.payload_bytes == sizeof(openrsp_dual_config) &&
+               state->owner == descriptor) {
+        const openrsp_dual_config *config = (const openrsp_dual_config *)payload;
+        response.status = configure_dual_radio(state, config);
+        if (response.status == OPENRSP_STATUS_OK) {
+            state->bootstrap_configured = false;
+            fprintf(stderr,
+                    "OPENRSPD_CONFIGURE_DUAL fd=%d fs=%u rf_a=%u gr_a=%d lna_a=%u rf_b=%u gr_b=%d lna_b=%u\n",
+                    descriptor, config->sample_rate_hz,
+                    config->channel_a.center_frequency_hz,
+                    config->channel_a.gain_reduction_db,
+                    config->channel_a.lna_state,
+                    config->channel_b.center_frequency_hz,
+                    config->channel_b.gain_reduction_db,
+                    config->channel_b.lna_state);
+            (void)fflush(stderr);
+        }
+    } else if (request.type == OPENRSP_CMD_SWAP_TUNER &&
+               request.payload_bytes == sizeof(openrsp_swap_request) &&
+               state->owner == descriptor && state->configured &&
+               !state->dual_mode) {
+        const openrsp_swap_request *swap = (const openrsp_swap_request *)payload;
+        if ((swap->tuner != OPENRSP_TUNER_A && swap->tuner != OPENRSP_TUNER_B) ||
+            !valid_config(&swap->config) || swap->config.tuner != swap->tuner) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
+        } else {
+            bool was_streaming = state->stream_thread_started;
+            if (was_streaming && stop_stream(state) != 0)
+                response.status = OPENRSP_STATUS_IO_ERROR;
+            if (response.status == OPENRSP_STATUS_OK && state->radio) {
+                (void)mirisdr_close(state->radio);
+                state->radio = NULL;
+            }
+            if (response.status == OPENRSP_STATUS_OK)
+                response.status = configure_radio(state, &swap->config, 3u);
+            if (response.status == OPENRSP_STATUS_OK) {
+                state->config = swap->config;
+                state->bootstrap_config = swap->config;
+                state->bootstrap_configured = true;
+                state->configured = true;
+                start_stream_after_response = was_streaming;
+                state->stream_sequence[0] = 0u;
+            }
+        }
     } else if (request.type == OPENRSP_CMD_UPDATE &&
                request.payload_bytes == sizeof(openrsp_update_request) &&
                state->owner == descriptor) {
@@ -778,6 +939,16 @@ static int serve_request(int descriptor, daemon_state *state)
         }
         state->stream_thread_started = true;
     }
+    if (start_stream_after_response && response.status == OPENRSP_STATUS_OK) {
+        state->logged_usb_iq = false;
+        state->logged_socket_iq = false;
+        atomic_store(&state->first_iq_seen, false);
+        atomic_store(&state->streaming, true);
+        atomic_store(&state->stream_error, false);
+        if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0)
+            return -1;
+        state->stream_thread_started = true;
+    }
     return 1;
 }
 
@@ -818,8 +989,11 @@ static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
          * leaving its socket open.  Never let that wedge the USB callback and
          * libusb event lock indefinitely. */
         const struct timeval send_timeout = {.tv_sec = 2, .tv_usec = 0};
+        const int stream_buffer_bytes = 4 * 1024 * 1024;
         if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout,
-                       sizeof(send_timeout)) != 0) {
+                       sizeof(send_timeout)) != 0 ||
+            setsockopt(client, SOL_SOCKET, SO_SNDBUF, &stream_buffer_bytes,
+                       sizeof(stream_buffer_bytes)) != 0) {
             (void)close(client);
             continue;
         }

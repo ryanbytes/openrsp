@@ -75,7 +75,12 @@ MIRISDR_API int mirisdr_read_sync (mirisdr_dev_t *p, void *buf, int len, int *n_
 
 /* async */
 typedef void(*mirisdr_read_async_cb_t) (unsigned char *buf, uint32_t len, void *ctx);
+typedef void(*mirisdr_read_async_dual_cb_t) (unsigned int tuner, unsigned char *buf,
+                                              uint32_t len, void *ctx);
 MIRISDR_API int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx, uint32_t num, uint32_t len);
+MIRISDR_API int mirisdr_read_async_dual(mirisdr_dev_t *p,
+                                         mirisdr_read_async_dual_cb_t cb,
+                                         void *ctx, uint32_t num);
 MIRISDR_API int mirisdr_cancel_async (mirisdr_dev_t *p);
 MIRISDR_API int mirisdr_cancel_async_now (mirisdr_dev_t *p);            /* extra */
 MIRISDR_API int mirisdr_start_async (mirisdr_dev_t *p);                 /* extra */
@@ -119,6 +124,15 @@ MIRISDR_API int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate,
                                           uint32_t freq, uint32_t if_freq,
                                           uint32_t bandwidth, int gain_reduction,
                                           unsigned int lna_state);
+MIRISDR_API int mirisdr_configure_rspduo_dual(mirisdr_dev_t *p, uint32_t rate,
+                                               uint32_t freq_a, uint32_t freq_b,
+                                               uint32_t if_freq,
+                                               uint32_t bandwidth,
+                                               int gain_a, unsigned int lna_a,
+                                               int gain_b, unsigned int lna_b);
+MIRISDR_API int mirisdr_update_rspduo_dual(mirisdr_dev_t *p, unsigned int tuner,
+                                            uint32_t freq, int gain_reduction,
+                                            unsigned int lna_state);
 MIRISDR_API int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3,
                                           uint32_t *reg4);
 MIRISDR_API uint32_t mirisdr_rspduo_252_format_word(uint32_t rate);

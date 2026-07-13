@@ -83,6 +83,13 @@ failed:
     return -1;
 }
 
+static void mirisdr_dual_noop(unsigned char *samples, uint32_t bytes, void *context)
+{
+    (void)samples;
+    (void)bytes;
+    (void)context;
+}
+
 static uint8_t *samples_realloc(mirisdr_dev_t *p, int size)
 {
     if(p->samples_size < size)
@@ -115,7 +122,11 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             p->bulk_recovery_attempts = 0u;
         if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
             transfer_length > 0) {
-            owned_buffer = malloc((size_t)transfer_length);
+            for (i = 0u; i < p->xfer_buf_num; ++i)
+                if (p->xfer[i] == xfer) {
+                    owned_buffer = p->completed_buf[i];
+                    break;
+                }
             if (owned_buffer == NULL) goto failed;
             memcpy(owned_buffer, xfer->buffer, (size_t)transfer_length);
             transfer_buffer = owned_buffer;
@@ -219,7 +230,29 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             goto failed;
         }
 
-        if (bytes > 0 && p->usb_pid == 0x3020u) {
+        if (bytes > 0 && p->usb_pid == 0x3020u && p->rspduo_dual) {
+            size_t converted = (size_t)bytes;
+            if (converted > p->dual_samples_size) goto failed;
+            size_t pairs = converted / (2u * sizeof(int16_t));
+            const int16_t *lanes = (const int16_t *)samples;
+            int16_t *stream_a = (int16_t *)p->dual_samples_a;
+            int16_t *stream_b = (int16_t *)p->dual_samples_b;
+            /* Dual mode is necessarily low-IF. Keep each real ADC lane
+             * identifiable and let the API layer's low-IF mixer produce
+             * complex baseband. A Hilbert transform here would duplicate
+             * that work and cannot sustain both hardware lanes in real time. */
+            for (size_t sample = 0u; sample < pairs; ++sample) {
+                stream_a[sample * 2u] = lanes[sample * 2u];
+                stream_a[sample * 2u + 1u] = 0;
+                stream_b[sample * 2u] = lanes[sample * 2u + 1u];
+                stream_b[sample * 2u + 1u] = 0;
+            }
+            if (p->dual_cb) {
+                p->dual_cb(1u, p->dual_samples_a, (uint32_t)converted, p->cb_ctx);
+                p->dual_cb(2u, p->dual_samples_b, (uint32_t)converted, p->cb_ctx);
+            }
+            bytes = 0;
+        } else if (bytes > 0 && p->usb_pid == 0x3020u) {
             /* RSPduo single-tuner USB words are two real ADC lanes, not an
              * interleaved complex pair. Both A and B single-tuner routing
              * place the active ADC on lane 1. Produce analytic IQ before
@@ -271,11 +304,9 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
         goto failed;
     }
 
-    free(owned_buffer);
     return;
 
 failed:
-    free(owned_buffer);
     mirisdr_cancel_async(p);
     /* stav failed má absolutní přednost */
     p->async_status = MIRISDR_ASYNC_FAILED;
@@ -373,6 +404,22 @@ static int mirisdr_async_alloc (mirisdr_dev_t *p) {
         }
     }
 
+    if (!p->completed_buf) {
+        p->completed_buf = calloc(p->xfer_buf_num, sizeof(*p->completed_buf));
+        if (!p->completed_buf) return -1;
+        for (i = 0; i < p->xfer_buf_num; ++i) {
+            p->completed_buf[i] = malloc(p->bulk_buffer_size);
+            if (!p->completed_buf[i]) return -1;
+        }
+    }
+
+    if (p->rspduo_dual && !p->dual_samples_a) {
+        p->dual_samples_size = (p->bulk_buffer_size / 1024u) * 2016u;
+        p->dual_samples_a = malloc(p->dual_samples_size);
+        p->dual_samples_b = malloc(p->dual_samples_size);
+        if (!p->dual_samples_a || !p->dual_samples_b) return -1;
+    }
+
     if ((!p->xfer_out) &&
         (p->xfer_out_len)) {
         p->xfer_out = malloc(p->xfer_out_len * sizeof(*p->xfer_out));
@@ -402,6 +449,18 @@ static int mirisdr_async_free (mirisdr_dev_t *p) {
         free(p->xfer_buf);
         p->xfer_buf = NULL;
     }
+
+    if (p->completed_buf) {
+        for (i = 0; i < p->xfer_buf_num; ++i) free(p->completed_buf[i]);
+        free(p->completed_buf);
+        p->completed_buf = NULL;
+    }
+
+    free(p->dual_samples_a);
+    free(p->dual_samples_b);
+    p->dual_samples_a = NULL;
+    p->dual_samples_b = NULL;
+    p->dual_samples_size = 0u;
 
     if (p->xfer_out) {
         free(p->xfer_out);
@@ -466,6 +525,8 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
     p->addr_valid = 0;
     if (p->usb_pid == 0x3020u)
         mirisdr_rspduo_analytic_reset(&p->analytic_state);
+    if (p->usb_pid == 0x3020u && p->rspduo_dual)
+        mirisdr_rspduo_analytic_reset(&p->analytic_state_b);
     /* použití správného rozhraní které zasílá data - není kritické */
     switch (p->transfer) {
     case MIRISDR_TRANSFER_BULK:
@@ -594,6 +655,16 @@ failed_free:
 
 failed:
     return -1;
+}
+
+int mirisdr_read_async_dual(mirisdr_dev_t *p, mirisdr_read_async_dual_cb_t cb,
+                            void *ctx, uint32_t num)
+{
+    if (!p || !cb || !p->rspduo_dual) return -1;
+    p->dual_cb = cb;
+    int result = mirisdr_read_async(p, mirisdr_dual_noop, ctx, num, 0u);
+    p->dual_cb = NULL;
+    return result;
 }
 
 /* spuštění streamování */

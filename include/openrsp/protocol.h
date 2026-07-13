@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 3u
+#define OPENRSP_PROTOCOL_VERSION 4u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -21,9 +21,12 @@ typedef enum {
     OPENRSP_CMD_UPDATE = 8,
     OPENRSP_CMD_LOCK_API = 9,
     OPENRSP_CMD_UNLOCK_API = 10,
+    OPENRSP_CMD_CONFIGURE_DUAL = 11,
+    OPENRSP_CMD_SWAP_TUNER = 12,
     OPENRSP_MSG_RESPONSE = 0x8000,
     OPENRSP_EVENT_IQ = 0x8001,
-    OPENRSP_EVENT_DEVICE = 0x8002
+    OPENRSP_EVENT_DEVICE = 0x8002,
+    OPENRSP_EVENT_IQ_B = 0x8003
 } openrsp_command_type;
 
 typedef enum {
@@ -71,6 +74,14 @@ typedef struct {
 
 #define OPENRSP_TUNER_A 1u
 #define OPENRSP_TUNER_B 2u
+#define OPENRSP_TUNER_BOTH 3u
+
+typedef struct {
+    uint32_t sample_rate_hz;
+    uint32_t reserved;
+    openrsp_radio_config channel_a;
+    openrsp_radio_config channel_b;
+} openrsp_dual_config;
 
 #define OPENRSP_CHANGE_SAMPLE_RATE (1u << 0)
 #define OPENRSP_CHANGE_RF          (1u << 1)
@@ -84,6 +95,12 @@ typedef struct {
     uint32_t reserved;
     openrsp_radio_config config;
 } openrsp_update_request;
+
+typedef struct {
+    uint32_t tuner;
+    uint32_t reserved;
+    openrsp_radio_config config;
+} openrsp_swap_request;
 
 typedef struct {
     uint32_t status;

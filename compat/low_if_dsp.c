@@ -70,15 +70,16 @@ size_t openrsp_low_if_process(openrsp_low_if_dsp *dsp, int16_t *xi, int16_t *xq,
 
         dsp->history_i[dsp->position] = mixed_i;
         dsp->history_q[dsp->position] = mixed_q;
+        dsp->history_i[dsp->position + dsp->taps] = mixed_i;
+        dsp->history_q[dsp->position + dsp->taps] = mixed_q;
         dsp->position = (dsp->position + 1u) % dsp->taps;
         if (dsp->phase == 0u) {
             double sum_i = 0.0;
             double sum_q = 0.0;
+            unsigned int newest = dsp->position + dsp->taps - 1u;
             for (unsigned int tap = 0u; tap < dsp->taps; ++tap) {
-                unsigned int history =
-                    (dsp->position + dsp->taps - 1u - tap) % dsp->taps;
-                sum_i += dsp->coefficients[tap] * dsp->history_i[history];
-                sum_q += dsp->coefficients[tap] * dsp->history_q[history];
+                sum_i += dsp->coefficients[tap] * dsp->history_i[newest - tap];
+                sum_q += dsp->coefficients[tap] * dsp->history_q[newest - tap];
             }
             xi[output] = clamp_sample(sum_i);
             xq[output] = clamp_sample(sum_q);

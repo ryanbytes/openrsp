@@ -151,7 +151,8 @@ static void *reader_main(void *opaque)
                                                     sizeof(payload));
         if (receive_result == OPENRSP_CLIENT_TIMEOUT) continue;
         if (receive_result != OPENRSP_CLIENT_OK) break;
-        if (header.type == OPENRSP_EVENT_IQ && (header.payload_bytes % 4u) == 0u) {
+        if ((header.type == OPENRSP_EVENT_IQ || header.type == OPENRSP_EVENT_IQ_B) &&
+            (header.payload_bytes % 4u) == 0u) {
             static int logged_first_iq;
             if (!logged_first_iq) {
                 logged_first_iq = 1;
@@ -159,7 +160,10 @@ static void *reader_main(void *opaque)
             }
             openrsp_daemon_iq_callback callback = backend->callback;
             if (callback) callback((const int16_t *)payload, header.payload_bytes / 4u,
-                                   header.sequence, backend->callback_context);
+                                   header.sequence,
+                                   header.type == OPENRSP_EVENT_IQ_B ? OPENRSP_TUNER_B :
+                                                                      OPENRSP_TUNER_A,
+                                   backend->callback_context);
         } else if (header.type == OPENRSP_MSG_RESPONSE &&
                    header.payload_bytes == sizeof(openrsp_response)) {
             const openrsp_response *response = (const openrsp_response *)payload;
@@ -255,6 +259,13 @@ int openrsp_daemon_backend_configure(openrsp_daemon_backend *backend,
                                                config, sizeof(*config)) : -1;
 }
 
+int openrsp_daemon_backend_configure_dual(openrsp_daemon_backend *backend,
+                                          const openrsp_dual_config *config)
+{
+    return backend && config ? direct_request(backend, OPENRSP_CMD_CONFIGURE_DUAL,
+                                               config, sizeof(*config)) : -1;
+}
+
 int openrsp_daemon_backend_start(openrsp_daemon_backend *backend,
                                  openrsp_daemon_iq_callback callback,
                                  openrsp_daemon_failure_callback failure_callback,
@@ -285,6 +296,13 @@ int openrsp_daemon_backend_update(openrsp_daemon_backend *backend,
     if (!backend || !config) return -1;
     update.config = *config;
     return async_request(backend, OPENRSP_CMD_UPDATE, &update, sizeof(update));
+}
+
+int openrsp_daemon_backend_swap(openrsp_daemon_backend *backend,
+                                const openrsp_swap_request *swap)
+{
+    return backend && swap ? async_request(backend, OPENRSP_CMD_SWAP_TUNER,
+                                            swap, sizeof(*swap)) : -1;
 }
 
 int openrsp_daemon_backend_stop(openrsp_daemon_backend *backend)

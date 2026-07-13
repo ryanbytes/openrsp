@@ -111,8 +111,10 @@ static int run_server(const char *socket_path)
 }
 
 static void iq_callback(const int16_t *iq, size_t samples, uint32_t sequence,
+                        uint32_t tuner,
                         void *opaque)
 {
+    assert(tuner == OPENRSP_TUNER_A);
     callback_state *state = opaque;
     assert(iq != NULL && samples == 4u);
     (void)pthread_mutex_lock(&state->lock);

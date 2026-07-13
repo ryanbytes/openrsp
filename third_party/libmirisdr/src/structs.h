@@ -96,10 +96,12 @@ struct mirisdr_dev {
     /* async */
     atomic_int          async_status;
     mirisdr_read_async_cb_t cb;
+    mirisdr_read_async_dual_cb_t dual_cb;
     void                *cb_ctx;
     size_t              xfer_buf_num;
     struct libusb_transfer **xfer;
     unsigned char       **xfer_buf;
+    unsigned char       **completed_buf;
     size_t              xfer_out_len;
     size_t              xfer_out_pos;
     unsigned char       *xfer_out;
@@ -110,10 +112,18 @@ struct mirisdr_dev {
     int                 reg8;
     uint8_t             *samples;
     int                 samples_size;
+    uint8_t             *dual_samples_a;
+    uint8_t             *dual_samples_b;
+    size_t              dual_samples_size;
     int                 sync_loss_cnt;
     int                 firmware_attempted;
     unsigned int        bulk_recovery_attempts;
     unsigned int        rspduo_tuner;
     uint16_t            rspduo_gpio13;
     mirisdr_rspduo_analytic_state analytic_state;
+    mirisdr_rspduo_analytic_state analytic_state_b;
+    int                 rspduo_dual;
+    uint32_t            rspduo_freq[2];
+    int                 rspduo_gain_reduction[2];
+    unsigned int        rspduo_lna_state[2];
 };

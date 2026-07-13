@@ -739,3 +739,55 @@ and LNA 5 accepted GR 20, 30, 40, 50, and 59. Software AGC moved GR from 20 to
 These measurements verify tuner B independently in single-tuner mode. They do
 not verify dual-tuner operation, B spectrum orientation against a known
 connected carrier, or other RSPduo frequency-band GPIO tables.
+
+## RSPduo live swap and dual-tuner mode (2026-07-13)
+
+The official API 3.15.1 was exercised with a purpose-built public-API client,
+then observed at its process and USB control boundary. No official source,
+private header, firmware, receiver identity, or raw capture was copied into the
+repository. In initialized single-tuner mode, swapping A to B and back returned
+success, changed the exposed channel pointer to the active tuner, preserved the
+channel settings, and produced a reset on each transition. All IQ continued
+through Stream A; Stream B was never called. A gain update addressed to tuner B
+after the first swap succeeded.
+
+The official dual-mode reference accepted a shared 6 MHz ADC rate with 1.620
+MHz low IF and separate A/B RF and gain updates. Both stream callbacks received
+6,451,200 samples during the same bounded run, each reported one initial reset,
+and each independently acknowledged its RF and gain update. Cleanup succeeded.
+The observed startup, routing, update, and shutdown transfers established that
+dual mode uses both ADC lanes and a distinct B frontend route; they did not
+support the incorrect assumption that dual mode can deliver 10 MHz per tuner.
+
+OpenRSP daemon protocol version 4 adds an explicit both-tuner selection, a dual
+configuration containing shared clock plus separate channel settings, distinct
+A/B IQ event types, and a single-mode swap request. The direct backend decodes
+the two ADC lanes into separate fixed buffers, the daemon preserves their event
+identity, and the compatibility library maintains separate callback queues,
+sample numbering, reset state, low-IF DSP, decimation, gain/AGC state, overload
+acknowledgement state, and pending update acknowledgements for A and B.
+
+With SDRTrunk stopped for an exclusive hardware window, OpenRSP dual mode used
+an 8 MHz ADC rate and 2.048 MHz low IF. Three consecutive four-second sessions
+delivered between 8,031,744 and 8,058,624 samples on each tuner, or approximately
+2.01 MS/s per tuner. Every session had one reset per stream, separate RF/gain
+acknowledgements, nonzero signal power on both streams, and successful
+`Uninit`, release, and close. A release-build dual session immediately followed
+by a single-mode A-to-B-to-A swap also completed without a USB reset or replug;
+the swap produced three Stream A resets and zero Stream B callbacks.
+
+Abruptly terminating the test daemon caused the initialized client to receive a
+`DeviceFailure` event. A replacement daemon then reopened the same receiver and
+completed fresh dual and swap sessions without a physical replug. A sanitizer
+build completed dual initialization, both-stream delivery, and cleanup without
+an AddressSanitizer or UndefinedBehaviorSanitizer report. It could not sustain
+the full 8 MHz control-plus-IQ workload on this host: update responses timed out
+while the daemon was still applying them, so full-rate performance claims are
+based on the Debug and Release hardware runs, not the instrumented build.
+
+The pinned upstream SoapySDRPlay3 module was rebuilt against this protocol-v4
+compatibility library after the mode changes. It linked successfully, and
+`SoapySDRUtil --info` loaded the resulting module and registered the `sdrplay`
+factory. That is a source/ABI integration result; dual-channel Soapy behavior
+was not claimed because the upstream adapter's application-level mode choices
+were not exercised in this hardware window.

@@ -2,7 +2,7 @@
 
 **This project is vibecoded experimental software. Do not mistake rapid development or passing tests for broad hardware validation.**
 
-OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes either RSPduo tuner in single-tuner mode, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
+OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes either RSPduo tuner in single-tuner mode or both tuners in dual low-IF mode, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
 
 That limitation is deliberate. SDRplay's public API is documented, but its USB protocol and hardware-control implementation are proprietary. SoapySDRPlay3 and gr-sdrplay3 are open application adapters that still require SDRplay's closed API. Claiming this repository is a working replacement before independently documenting USB initialization, tuner register programming, sample framing, and calibration would be bullshit.
 
@@ -15,7 +15,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Machine-readable probe output | Implemented |
 | Original RSP1-class/RSP1A/RSP2 model-ID hints | Discovery only |
 | RSPduo tuner-A direct initialization | Verified on one unit |
-| RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual-tuner mode is not implemented |
+| RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual low-IF A/B mode verified at 2 MS/s per tuner |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuners A and B independently |
 | IQ streaming | Direct/API paths verified; RSPduo single-tuner real ADC lane converted to analytic IQ, with 61.5 dB image rejection measured on tuner A using a known offset carrier |
@@ -23,6 +23,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
+| API 3.15 RSPduo modes | Live A/B single-tuner swap and simultaneous Stream A/Stream B dual mode hardware-verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
@@ -44,7 +45,9 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 
 The compatibility library implements live sample-rate, RF, bandwidth, IF,
 gain/LNA, AGC, PPM, and software-decimation updates for either RSPduo tuner in
-single-tuner mode. The
+single-tuner mode. In dual mode, RF, gain/LNA, AGC, overload acknowledgement,
+and software-decimation state are independent per tuner. The shared ADC rate,
+IF, and bandwidth cannot be changed with a per-tuner hot update. The
 stateful windowed-sinc FIR decimator accepts x2, x4, x8, x16, and x32 and keeps
 its filter state across IQ frames. It also accepts the API's required AUTO-LO,
 DC/IQ configuration, reset-flag, and overload-message acknowledgement calls.
@@ -53,12 +56,13 @@ reports the completion through `fsChanged`, matching the documented API
 callback contract.
 
 RSPduo bias-T/antenna/notch/external-reference switching, RSPdx extensions, and
-controls belonging to other RSP models are not implemented. RSPduo dual-tuner
-mode is also not implemented; the hardware's documented dual-mode ceiling is
-2 MHz per tuner. Those calls return a specific API error. They do not return
-false success. The complete 3.15
-update-reason values are exposed in the compatibility header so applications
-can compile against the implemented ABI.
+controls belonging to other RSP models are not implemented. Dual-tuner mode
+requires a shared 6 or 8 MHz ADC clock, low IF at 1.620 or 2.048 MHz, and no
+more than 1.536 MHz requested RF bandwidth; OpenRSP then delivers approximately
+2 MS/s per tuner through the separate Stream A and Stream B callbacks. Invalid
+mode combinations return a specific API error instead of false success. The
+complete 3.15 update-reason values are exposed in the compatibility header so
+applications can compile against the implemented ABI.
 
 ## Build and test
 
@@ -151,7 +155,9 @@ Example offline capture:
 sudo ./build/openrsp-iq -f 100000000 -s 2048000 -T 1 -e 2 -m 252 capture.iq
 ```
 
-The output is interleaved little-endian signed 16-bit IQ. RSPduo support is presently tuner A only and the RF routing/calibration behavior still needs measurement.
+The output is interleaved little-endian signed 16-bit IQ. This command-line tool
+supports either RSPduo tuner in single-tuner mode; simultaneous dual operation
+is exposed through the daemon protocol and API compatibility library.
 
 ## Linux replacement install
 

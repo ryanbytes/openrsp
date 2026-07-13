@@ -9,6 +9,13 @@ The intended layers are:
 3. `core`: stable device/session/stream state machines with no global daemon.
 4. `compat`: optional SoapySDR and SDRplay API 3-compatible adapters.
 
+Daemon protocol version 4 represents RSPduo mode explicitly. A single-tuner
+configuration selects A or B and emits one IQ event consumed as API Stream A.
+A dual configuration carries a shared ADC rate plus separate A and B RF/gain
+configuration and emits distinguishable A and B IQ events. Update requests
+retain their tuner identity. This prevents a dual session from collapsing two
+independent control and callback timelines into the old single-channel state.
+
 The core owns no unbounded wait. Every submitted transfer has one owner, one completion path, and a cancellation path. Device removal is a normal state transition. Callbacks never perform blocking control transfers. Recovery happens inside a device session, not through a machine-wide privileged service restart.
 
 ## RSPduo state model
@@ -21,6 +28,14 @@ absent -> discovered -> opened -> configured -> streaming
 ```
 
 Errors must preserve their source: USB transport, protocol rejection, invalid caller state, unsupported hardware, or sample discontinuity. A generic `fail` result is insufficient for diagnosing an unstable receiver stack.
+
+Dual mode owns two callback sequences, reset states, sample counters, low-IF
+DSP states, decimators, gain/AGC states, and overload acknowledgement states.
+The USB reader uses session-owned completed-transfer buffers and separates the
+two ADC lanes without allocating in the steady-state completion path. A live
+single-tuner swap stops the stream, changes the selected frontend while
+preserving the active channel settings, restarts it, and continues to expose
+only Stream A.
 
 ## Compatibility policy
 

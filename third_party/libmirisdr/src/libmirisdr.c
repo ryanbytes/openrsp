@@ -212,6 +212,58 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     return result < 0 ? -1 : 0;
 }
 
+static int mirisdr_rspduo_set_channel(mirisdr_dev_t *p, unsigned int tuner,
+                                      uint32_t freq, int gain_reduction,
+                                      unsigned int lna_state)
+{
+    if (!p || (tuner != 1u && tuner != 2u)) return -1;
+    p->rspduo_tuner = tuner;
+    p->freq = freq;
+    if (mirisdr_set_soft(p) < 0 ||
+        mirisdr_set_rspduo_gain(p, gain_reduction, lna_state) < 0) return -1;
+    p->rspduo_freq[tuner - 1u] = freq;
+    p->rspduo_gain_reduction[tuner - 1u] = gain_reduction;
+    p->rspduo_lna_state[tuner - 1u] = lna_state;
+    return 0;
+}
+
+int mirisdr_configure_rspduo_dual(mirisdr_dev_t *p, uint32_t rate,
+                                  uint32_t freq_a, uint32_t freq_b,
+                                  uint32_t if_freq, uint32_t bandwidth,
+                                  int gain_a, unsigned int lna_a,
+                                  int gain_b, unsigned int lna_b)
+{
+    if (!p || p->usb_pid != 0x3020u || (rate != 6000000u && rate != 8000000u) ||
+        !((rate == 6000000u && if_freq == 1620000u) ||
+          (rate == 8000000u && if_freq == 2048000u)) ||
+        bandwidth > 1536000u) return -1;
+    p->rspduo_dual = 1;
+    p->rate = rate;
+    p->format_auto = MIRISDR_FORMAT_AUTO_OFF;
+    mirisdr_rspduo_select_format(p);
+    p->transfer = MIRISDR_TRANSFER_BULK;
+    p->if_freq = rate == 6000000u ? MIRISDR_IF_1620KHZ : MIRISDR_IF_2048KHZ;
+    p->bandwidth = bandwidth <= 200000u ? MIRISDR_BW_200KHZ :
+                   bandwidth <= 300000u ? MIRISDR_BW_300KHZ :
+                   bandwidth <= 600000u ? MIRISDR_BW_600KHZ : MIRISDR_BW_1536KHZ;
+    if (mirisdr_adc_init(p) < 0 || mirisdr_set_hard(p) < 0 ||
+        mirisdr_rspduo_set_channel(p, 1u, freq_a, gain_a, lna_a) < 0 ||
+        mirisdr_rspduo_set_channel(p, 2u, freq_b, gain_b, lna_b) < 0) return -1;
+    p->rspduo_tuner = 3u;
+    return 0;
+}
+
+int mirisdr_update_rspduo_dual(mirisdr_dev_t *p, unsigned int tuner,
+                               uint32_t freq, int gain_reduction,
+                               unsigned int lna_state)
+{
+    if (!p || !p->rspduo_dual || (tuner != 1u && tuner != 2u)) return -1;
+    int result = mirisdr_rspduo_set_channel(p, tuner, freq, gain_reduction,
+                                            lna_state);
+    p->rspduo_tuner = 3u;
+    return result;
+}
+
 static int mirisdr_rspduo_reset_and_reopen(mirisdr_dev_t *dev)
 {
     libusb_device *device = libusb_get_device(dev->dh);
@@ -339,7 +391,7 @@ int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
 
     memset(dev, 0, sizeof(*dev));
 
-    if (tuner != 1u && tuner != 2u) {
+    if (tuner != 1u && tuner != 2u && tuner != 3u) {
         free(dev);
         return -1;
     }

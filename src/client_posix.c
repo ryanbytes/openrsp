@@ -64,10 +64,13 @@ int openrsp_client_connect(const char *socket_path, openrsp_client **out_client)
         .tv_sec = OPENRSP_SOCKET_TIMEOUT_MILLISECONDS / 1000,
         .tv_usec = (OPENRSP_SOCKET_TIMEOUT_MILLISECONDS % 1000) * 1000
     };
+    const int stream_buffer_bytes = 4 * 1024 * 1024;
     if (setsockopt(client->descriptor, SOL_SOCKET, SO_RCVTIMEO,
                    &timeout, sizeof(timeout)) != 0 ||
         setsockopt(client->descriptor, SOL_SOCKET, SO_SNDTIMEO,
-                   &timeout, sizeof(timeout)) != 0) {
+                   &timeout, sizeof(timeout)) != 0 ||
+        setsockopt(client->descriptor, SOL_SOCKET, SO_RCVBUF,
+                   &stream_buffer_bytes, sizeof(stream_buffer_bytes)) != 0) {
         (void)close(client->descriptor);
         free(client);
         return -1;

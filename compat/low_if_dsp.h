@@ -18,8 +18,8 @@ typedef struct {
     double oscillator_sine_step;
     unsigned int oscillator_samples;
     double coefficients[OPENRSP_LOW_IF_MAX_TAPS];
-    double history_i[OPENRSP_LOW_IF_MAX_TAPS];
-    double history_q[OPENRSP_LOW_IF_MAX_TAPS];
+    double history_i[OPENRSP_LOW_IF_MAX_TAPS * 2u];
+    double history_q[OPENRSP_LOW_IF_MAX_TAPS * 2u];
 } openrsp_low_if_dsp;
 
 int openrsp_low_if_configure(openrsp_low_if_dsp *dsp, double sample_rate_hz,

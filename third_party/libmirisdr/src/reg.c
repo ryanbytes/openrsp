@@ -138,6 +138,21 @@ static int mirisdr_rspduo_route_tuner(mirisdr_dev_t *p)
     };
 
     if (!p || p->usb_pid != 0x3020u) return 0;
+    if (p->rspduo_dual && p->rspduo_tuner == 2u)
+        return mirisdr_rspduo_gpio(p, 0x4a, 0x1348);
+    if (p->rspduo_dual) {
+        static const struct {
+            uint8_t request;
+            uint16_t value;
+        } dual_a_sequence[] = {
+            {0x4a, 0x12a4}, {0x4a, 0x1388},
+            {0x4b, 0x12ff}, {0x4b, 0x13ff},
+        };
+        for (size_t i = 0u; i < sizeof(dual_a_sequence) / sizeof(dual_a_sequence[0]); ++i)
+            if (mirisdr_rspduo_gpio(p, dual_a_sequence[i].request,
+                                    dual_a_sequence[i].value) < 0) return -1;
+        return 0;
+    }
     if (p->rspduo_tuner == 2u) {
         for (size_t i = 0; i < sizeof(tuner_b_sequence) / sizeof(tuner_b_sequence[0]); ++i)
             if (mirisdr_rspduo_gpio(p, tuner_b_sequence[i].request,
@@ -176,7 +191,11 @@ static int mirisdr_rspduo_shutdown(mirisdr_dev_t *p)
 {
     if (!p || p->usb_pid != 0x3020u) return -1;
     uint32_t shutdown_status = 0u;
-    int frontend_stop = p->rspduo_tuner == 2u ?
+    int frontend_stop = p->rspduo_dual ?
+        (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
+         mirisdr_rspduo_gpio(p, 0x4a, 0x138c) < 0 ||
+         mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0) :
+        p->rspduo_tuner == 2u ?
         (mirisdr_rspduo_gpio(p, 0x4b, 0x12ff) < 0 ||
          mirisdr_rspduo_gpio(p, 0x4b, 0x13bf) < 0) :
         (mirisdr_rspduo_gpio(p, 0x4b, 0x12df) < 0 ||
