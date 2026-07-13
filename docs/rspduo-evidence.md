@@ -175,6 +175,12 @@ Debug, Release, and ASan/UBSan builds each pass all five tests. The sanitizer
 run uses `ASAN_OPTIONS=detect_leaks=0` because Apple AddressSanitizer does not
 support leak detection on this platform.
 
+The compatibility test also terminates its mock daemon during an active stream.
+The socket reader reports one API `DeviceFailure` event, and `Uninit` completes
+without terminating the host process. The POSIX client suppresses `SIGPIPE` on
+both Linux (`MSG_NOSIGNAL`) and macOS (`SO_NOSIGPIPE`) so a vanished daemon is
+returned as a transport error instead of crashing the application.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

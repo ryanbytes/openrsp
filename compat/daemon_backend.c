@@ -26,7 +26,9 @@ struct openrsp_daemon_backend {
     uint32_t waiting_changed_flags;
     int response_received;
     atomic_int reader_failed;
+    atomic_int closing;
     openrsp_daemon_iq_callback callback;
+    openrsp_daemon_failure_callback failure_callback;
     void *callback_context;
 };
 
@@ -107,6 +109,8 @@ static void *reader_main(void *opaque)
     (void)pthread_mutex_lock(&backend->response_lock);
     (void)pthread_cond_broadcast(&backend->response_ready);
     (void)pthread_mutex_unlock(&backend->response_lock);
+    if (!atomic_load(&backend->closing) && backend->failure_callback)
+        backend->failure_callback(backend->callback_context);
     return NULL;
 }
 
@@ -184,10 +188,13 @@ int openrsp_daemon_backend_configure(openrsp_daemon_backend *backend,
 }
 
 int openrsp_daemon_backend_start(openrsp_daemon_backend *backend,
-                                 openrsp_daemon_iq_callback callback, void *context)
+                                 openrsp_daemon_iq_callback callback,
+                                 openrsp_daemon_failure_callback failure_callback,
+                                 void *context)
 {
     if (!backend || !callback || backend->reader_started) return -1;
     backend->callback = callback;
+    backend->failure_callback = failure_callback;
     backend->callback_context = context;
     /* START's response is emitted before the daemon launches its stream
      * thread, so receive it synchronously.  Starting the shared response/IQ
@@ -224,6 +231,7 @@ void openrsp_daemon_backend_close(openrsp_daemon_backend *backend)
     if (backend->client) {
         if (backend->reader_started) {
             (void)async_request(backend, OPENRSP_CMD_RELEASE, NULL, 0u);
+            atomic_store(&backend->closing, 1);
             openrsp_client_close(backend->client);
             backend->client = NULL;
             (void)pthread_join(backend->reader_thread, NULL);

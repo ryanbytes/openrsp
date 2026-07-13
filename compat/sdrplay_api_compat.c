@@ -363,6 +363,18 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples, v
     free(xq);
 }
 
+static void daemon_failure_callback(void *opaque)
+{
+    compat_device_context *device = opaque;
+    atomic_store(&device->stream_state, -1);
+    if (device->callbacks.EventCbFn) {
+        sdrplay_api_EventParamsT params;
+        memset(&params, 0, sizeof(params));
+        device->callbacks.EventCbFn(sdrplay_api_DeviceFailure, sdrplay_api_Tuner_A,
+                                    &params, device->callback_context);
+    }
+}
+
 static void emit_update_ack(compat_device_context *device, int fs_changed,
                             int rf_changed, int gr_changed)
 {
@@ -599,7 +611,8 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
                  rspduo.dev_params.fsFreq.fsHz > 9216000.0 ? 2016u : 1344u);
     rspduo.first_callback = 1;
     rspduo.initialized = 1;
-    if (openrsp_daemon_backend_start(rspduo.backend, daemon_stream_callback, &rspduo) != 0) {
+    if (openrsp_daemon_backend_start(rspduo.backend, daemon_stream_callback,
+                                     daemon_failure_callback, &rspduo) != 0) {
         rspduo.initialized = 0;
         openrsp_daemon_backend_close(rspduo.backend);
         rspduo.backend = NULL;

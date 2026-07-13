@@ -17,7 +17,16 @@ static int transfer_exact(int descriptor, void *buffer, size_t bytes, int writin
 {
     unsigned char *cursor = buffer;
     while (bytes != 0u) {
-        ssize_t count = writing ? write(descriptor, cursor, bytes) : read(descriptor, cursor, bytes);
+        ssize_t count;
+        if (writing) {
+#if defined(MSG_NOSIGNAL)
+            count = send(descriptor, cursor, bytes, MSG_NOSIGNAL);
+#else
+            count = write(descriptor, cursor, bytes);
+#endif
+        } else {
+            count = read(descriptor, cursor, bytes);
+        }
         if (count == 0) return -1;
         if (count < 0) {
             if (errno == EINTR) continue;
@@ -41,6 +50,15 @@ int openrsp_client_connect(const char *socket_path, openrsp_client **out_client)
         free(client);
         return -1;
     }
+#if defined(SO_NOSIGPIPE)
+    const int enabled = 1;
+    if (setsockopt(client->descriptor, SOL_SOCKET, SO_NOSIGPIPE,
+                   &enabled, sizeof(enabled)) != 0) {
+        (void)close(client->descriptor);
+        free(client);
+        return -1;
+    }
+#endif
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
     (void)strcpy(address.sun_path, path);
