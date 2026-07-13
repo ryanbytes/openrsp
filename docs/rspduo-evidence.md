@@ -200,6 +200,13 @@ enables AGC from a disabled state, supplies IQ, and requires a matching event;
 reloading the applied mode after the worker sleep prevents the first new peak
 from being consumed under a stale disabled mode.
 
+Before exercising updates and failure injection, the mock compatibility test
+now performs ten consecutive `Init`/first-IQ/`Uninit` cycles while retaining the
+same selected device and daemon. Each cycle requires a new initial reset
+callback and clean reader-thread shutdown. This covers repeated API lifecycle
+behavior without pretending it is a substitute for the still-needed long
+hardware cycle test.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

@@ -240,13 +240,13 @@ static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tu
     (void)pthread_mutex_unlock(&metrics->lock);
 }
 
-static int wait_for_callback(callback_metrics *metrics)
+static int wait_for_callbacks_above(callback_metrics *metrics, unsigned int baseline)
 {
     struct timespec deadline;
     if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&metrics->lock);
-    while (metrics->callbacks == 0u) {
+    while (metrics->callbacks <= baseline) {
         if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&metrics->lock);
             return -1;
@@ -357,8 +357,21 @@ int main(void)
     sdrplay_api_CallbackFnsT callbacks = {
         .StreamACbFn = stream_callback, .EventCbFn = event_callback
     };
+    for (unsigned int cycle = 0u; cycle < 10u; ++cycle) {
+        (void)pthread_mutex_lock(&metrics.lock);
+        unsigned int callback_baseline = metrics.callbacks;
+        (void)pthread_mutex_unlock(&metrics.lock);
+        assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) ==
+               sdrplay_api_Success);
+        assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
+        assert(sdrplay_api_Uninit(devices[0].dev) == sdrplay_api_Success);
+    }
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int callback_baseline = metrics.callbacks;
+    unsigned int session_sample_baseline = metrics.samples;
+    (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) == sdrplay_api_Success);
-    assert(wait_for_callback(&metrics) == 0);
+    assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
     params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
     params->rxChannelA->tunerParams.gain.gRdB = 42;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
@@ -445,13 +458,14 @@ int main(void)
 
     params->devParams->ppm = 2.5;
     (void)pthread_mutex_lock(&metrics.lock);
-    unsigned int samples_before_gap = metrics.samples;
+    unsigned int samples_before_gap = metrics.samples - session_sample_baseline;
+    unsigned int resets_before_gap = metrics.reset_callbacks;
     (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Dev_Ppm, 0u) ==
            sdrplay_api_Success);
     (void)pthread_mutex_lock(&metrics.lock);
-    assert(metrics.reset_callbacks == 2u);
+    assert(metrics.reset_callbacks == resets_before_gap + 1u);
     assert(metrics.last_reset_first_sample == samples_before_gap + 64u);
     (void)pthread_mutex_unlock(&metrics.lock);
     params->devParams->ppm = 301.0;
