@@ -880,3 +880,50 @@ acknowledged both RF/gain updates, and cleaned up successfully.
 No AM antenna, calibrated signal source, or spectrum analyzer was connected.
 These results verify API return behavior, register/GPIO command parity, stream
 continuity, cleanup, and recovery, not AM-port sensitivity or notch attenuation.
+
+## RSPduo all-band gain and LNA routing (2026-07-13)
+
+A timestamped public-API sweep captured every valid LNA state on tuners A and B
+at 10 MHz, 100 MHz, and 1.5 GHz. Together with the previously verified
+853.8625 MHz sweep, these frequencies exercise all four RSPduo LNA bands:
+below 60 MHz, 60--420 MHz, 420--1000 MHz, and 1--2 GHz. The official API
+accepted states 0--6, 0--9, 0--9, and 0--8 respectively. All six new reference
+sessions streamed between 8.9 and 11.1 million samples, reported one initial
+reset, accepted every update, and uninitialized, released, and closed cleanly.
+
+The official service was isolated from OpenRSP and observed only at the
+`libusb_control_transfer` argument boundary. Timestamped update boundaries
+separated initialization and cleanup traffic from each gain change. The
+independently reconstructed plans establish the complete register-9 base word,
+first GPIO-bank value, frontend GPIO value, and final GPIO-bank value for all
+52 tuner/state combinations. They also show that tuner B has no bank-bit
+transition below 60 MHz, switches banks before state 4 in the two middle
+bands, and switches before state 3 above 1 GHz. No official binary, header,
+firmware, receiver identity, proprietary source, or raw USB capture is stored
+in the repository.
+
+The direct backend now selects the band plan from the active RF frequency and
+programs IF gain reduction separately from the physical LNA route. The daemon
+no longer falls back to a generic total-gain approximation outside the
+420--1000 MHz band. Gain planning is allocation-free and merges the persistent
+notch and external-reference bits so a gain update cannot silently undo a
+control update. A deterministic fixture checks the exact reconstructed words
+for every A/B state, all four band boundaries, invalid next states, and the
+active-low control-bit merge.
+
+The installed Release build then swept every valid state at 10 MHz, 100 MHz,
+and 1.5 GHz on both physical tuners. Each of the six OpenRSP sessions continued
+streaming, delivered between 5.47 and 6.75 million samples, reported one reset,
+accepted every update, and cleaned up normally. A dual low-IF regression
+delivered 8,058,624 samples on each stream while acknowledging independent A/B
+RF, gain, and control updates. A subsequent A-to-B-to-A swap delivered
+8,568,832 Stream A samples, three Stream A resets, and no Stream B callbacks,
+matching the single-mode callback contract. Finally, a forced daemon death
+recovered through a new streaming lifecycle without a USB reset or physical
+replug.
+
+Debug, Release, and ASan/UBSan builds each passed all 14 hardware-free tests.
+No calibrated RF source or spectrum analyzer was attached for the new band
+sweeps, so this evidence proves accepted state coverage, reconstructed command
+parity, stream continuity, cleanup, and recovery--not the absolute gain or
+noise figure of each LNA state.

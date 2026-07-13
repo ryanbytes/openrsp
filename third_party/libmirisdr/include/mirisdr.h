@@ -143,6 +143,21 @@ MIRISDR_API uint32_t mirisdr_rspduo_format_samples(uint32_t rate);
 MIRISDR_API int mirisdr_set_gain (mirisdr_dev_t *p);                    /* extra */
 MIRISDR_API int mirisdr_get_tuner_gains (mirisdr_dev_t *dev, int *gains);
 MIRISDR_API int mirisdr_set_tuner_gain (mirisdr_dev_t *p, int gain);
+typedef struct {
+    uint32_t reg9;
+    uint16_t first_gpio_4b;
+    uint16_t gpio_4a;
+    uint16_t final_gpio_4b;
+} mirisdr_rspduo_gain_plan_t;
+MIRISDR_API int mirisdr_rspduo_gain_plan(uint32_t frequency,
+                                          unsigned int tuner,
+                                          int gain_reduction,
+                                          unsigned int lna_state,
+                                          uint16_t previous_gpio_4b,
+                                          unsigned int rf_notch,
+                                          unsigned int dab_notch,
+                                          unsigned int external_reference,
+                                          mirisdr_rspduo_gain_plan_t *plan);
 MIRISDR_API int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
                                          unsigned int lna_state);
 #define MIRISDR_RSPDUO_CHANGE_BIAS_TEE (1u << 0)

@@ -137,64 +137,167 @@ int mirisdr_set_rspduo_controls(mirisdr_dev_t *p, unsigned int tuner,
     return 0;
 }
 
+struct rspduo_gain_row {
+    uint16_t reg9_base;
+    uint16_t tuner_a_first_4b;
+    uint16_t tuner_a_4a;
+    uint16_t tuner_a_final_4b;
+    uint16_t tuner_b_4a;
+    uint16_t tuner_b_final_4b;
+};
+
+struct rspduo_gain_band {
+    const struct rspduo_gain_row *rows;
+    size_t count;
+    unsigned int tuner_b_bank_threshold;
+    uint16_t tuner_b_default_4b;
+    int tuner_b_toggles_bank_bit;
+};
+
+#define GAIN_ROW(reg9, a1, a4a, a2, b4a, b2) \
+    {reg9, a1, a4a, a2, b4a, b2}
+
+/* Independently observed API 3.15.1 gain updates at representative RFs in
+ * each published RSPduo LNA band.  These are reconstructed control words, not
+ * copied implementation data or raw USB captures. */
+static const struct rspduo_gain_row rspduo_gain_below_60mhz[] = {
+    GAIN_ROW(0xc000, 0x12ff, 0x12a2, 0x13ff, 0x13c4, 0x13ff),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a2, 0x13fb, 0x13c4, 0x13df),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a2, 0x13f7, 0x13c4, 0x13bf),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a2, 0x13ef, 0x13c4, 0x137f),
+    GAIN_ROW(0xd000, 0x12ff, 0x12a2, 0x13ef, 0x13c4, 0x137f),
+    GAIN_ROW(0xcc00, 0x12ff, 0x12a2, 0x13ef, 0x13c4, 0x137f),
+    GAIN_ROW(0xdc00, 0x12ff, 0x12a2, 0x13ef, 0x13c4, 0x137f),
+};
+
+static const struct rspduo_gain_row rspduo_gain_below_420mhz[] = {
+    GAIN_ROW(0xc000, 0x12df, 0x12a4, 0x13ff, 0x13c8, 0x13fe),
+    GAIN_ROW(0xc000, 0x12df, 0x12a4, 0x13fb, 0x13c8, 0x13de),
+    GAIN_ROW(0xc000, 0x12df, 0x12a4, 0x13f7, 0x13c8, 0x13be),
+    GAIN_ROW(0xc000, 0x12df, 0x12a4, 0x13ef, 0x13c8, 0x137e),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a6, 0x13ff, 0x13cc, 0x13ff),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a6, 0x13fb, 0x13cc, 0x13df),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a6, 0x13f7, 0x13cc, 0x13bf),
+    GAIN_ROW(0xc000, 0x12ff, 0x12a6, 0x13ef, 0x13cc, 0x137f),
+    GAIN_ROW(0xd000, 0x12ff, 0x12a6, 0x13ef, 0x13cc, 0x137f),
+    GAIN_ROW(0xe000, 0x12ff, 0x12a6, 0x13ef, 0x13cc, 0x137f),
+};
+
+static const struct rspduo_gain_row rspduo_gain_below_1ghz[] = {
+    GAIN_ROW(0xc000, 0x12df, 0x1224, 0x13fe, 0x13c8, 0x13fe),
+    GAIN_ROW(0xe000, 0x12df, 0x1224, 0x13fe, 0x13c8, 0x13fe),
+    GAIN_ROW(0xe000, 0x12df, 0x1224, 0x13fa, 0x13c8, 0x13de),
+    GAIN_ROW(0xe000, 0x12df, 0x1224, 0x13b6, 0x13c8, 0x13be),
+    GAIN_ROW(0xc000, 0x12df, 0x1226, 0x13fe, 0x13cc, 0x13ff),
+    GAIN_ROW(0xe000, 0x12df, 0x1226, 0x13fe, 0x13cc, 0x13ff),
+    GAIN_ROW(0xe000, 0x12df, 0x1226, 0x13fa, 0x13cc, 0x13df),
+    GAIN_ROW(0xe000, 0x12df, 0x1226, 0x13f6, 0x13cc, 0x13bf),
+    GAIN_ROW(0xe000, 0x12df, 0x1226, 0x13ee, 0x13cc, 0x137f),
+    GAIN_ROW(0xf000, 0x12df, 0x1226, 0x13ee, 0x13cc, 0x137f),
+};
+
+static const struct rspduo_gain_row rspduo_gain_below_2ghz[] = {
+    GAIN_ROW(0xc000, 0x12df, 0x12b4, 0x13ff, 0x13e8, 0x13fe),
+    GAIN_ROW(0xc000, 0x12df, 0x12b4, 0x13fb, 0x13e8, 0x13de),
+    GAIN_ROW(0xc000, 0x12df, 0x12b4, 0x13f7, 0x13e8, 0x13be),
+    GAIN_ROW(0xc000, 0x12ff, 0x12b6, 0x13ff, 0x13ec, 0x13ff),
+    GAIN_ROW(0xc000, 0x12ff, 0x12b6, 0x13fb, 0x13ec, 0x13df),
+    GAIN_ROW(0xc000, 0x12ff, 0x12b6, 0x13f7, 0x13ec, 0x13bf),
+    GAIN_ROW(0xc000, 0x12ff, 0x12b6, 0x13ef, 0x13ec, 0x137f),
+    GAIN_ROW(0xe000, 0x12ff, 0x12b6, 0x13ef, 0x13ec, 0x137f),
+    GAIN_ROW(0xf000, 0x12ff, 0x12b6, 0x13ef, 0x13ec, 0x137f),
+};
+
+#undef GAIN_ROW
+
+static int rspduo_gain_band(uint32_t frequency, struct rspduo_gain_band *band)
+{
+    if (!band || frequency < 1000u || frequency >= 2000000000u) return -1;
+    if (frequency < 60000000u) {
+        *band = (struct rspduo_gain_band){
+            rspduo_gain_below_60mhz,
+            sizeof(rspduo_gain_below_60mhz) / sizeof(rspduo_gain_below_60mhz[0]),
+            0u, 0x13ffu, 0
+        };
+    } else if (frequency < 420000000u) {
+        *band = (struct rspduo_gain_band){
+            rspduo_gain_below_420mhz,
+            sizeof(rspduo_gain_below_420mhz) / sizeof(rspduo_gain_below_420mhz[0]),
+            4u, 0x13feu, 1
+        };
+    } else if (frequency < 1000000000u) {
+        *band = (struct rspduo_gain_band){
+            rspduo_gain_below_1ghz,
+            sizeof(rspduo_gain_below_1ghz) / sizeof(rspduo_gain_below_1ghz[0]),
+            4u, 0x13feu, 1
+        };
+    } else {
+        *band = (struct rspduo_gain_band){
+            rspduo_gain_below_2ghz,
+            sizeof(rspduo_gain_below_2ghz) / sizeof(rspduo_gain_below_2ghz[0]),
+            3u, 0x13feu, 1
+        };
+    }
+    return 0;
+}
+
+int mirisdr_rspduo_gain_plan(uint32_t frequency, unsigned int tuner,
+                             int gain_reduction, unsigned int lna_state,
+                             uint16_t previous_gpio_4b,
+                             unsigned int rf_notch,
+                             unsigned int dab_notch,
+                             unsigned int external_reference,
+                             mirisdr_rspduo_gain_plan_t *plan)
+{
+    struct rspduo_gain_band band = {0};
+    if (!plan || (tuner != 1u && tuner != 2u) || gain_reduction < 20 ||
+        gain_reduction > 59 || rf_notch > 1u || dab_notch > 1u ||
+        external_reference > 1u || rspduo_gain_band(frequency, &band) < 0 ||
+        lna_state >= band.count) return -1;
+    const struct rspduo_gain_row *row = &band.rows[lna_state];
+    plan->reg9 = (uint32_t)row->reg9_base |
+                 ((uint32_t)gain_reduction << 4) | 1u;
+    if (tuner == 1u) {
+        plan->first_gpio_4b = rspduo_active_low(row->tuner_a_first_4b,
+                                                0x0010u, rf_notch);
+        plan->first_gpio_4b = rspduo_active_low(plan->first_gpio_4b,
+                                                0x0040u, dab_notch);
+        plan->gpio_4a = rspduo_active_low(row->tuner_a_4a, 0x0020u,
+                                         external_reference);
+        plan->final_gpio_4b = row->tuner_a_final_4b;
+    } else {
+        uint16_t previous = previous_gpio_4b != 0u ? previous_gpio_4b :
+                                                    band.tuner_b_default_4b;
+        if (band.tuner_b_toggles_bank_bit != 0)
+            previous = lna_state < band.tuner_b_bank_threshold ?
+                       (uint16_t)(previous & ~1u) :
+                       (uint16_t)(previous | 1u);
+        plan->first_gpio_4b = previous;
+        plan->gpio_4a = row->tuner_b_4a;
+        plan->final_gpio_4b = rspduo_active_low(row->tuner_b_final_4b,
+                                                0x0002u, dab_notch);
+    }
+    return 0;
+}
+
 int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
                             unsigned int lna_state)
 {
-    /* Captured from API 3.15.1 on an RSPduo in the 420-1000 MHz band. */
-    static const uint16_t reg9_base[] = {
-        0xc000, 0xe000, 0xe000, 0xe000, 0xc000,
-        0xe000, 0xe000, 0xe000, 0xe000, 0xf000
-    };
-    static const uint16_t gpio_12[] = {
-        0x1224, 0x1224, 0x1224, 0x1224, 0x1226,
-        0x1226, 0x1226, 0x1226, 0x1226, 0x1226
-    };
-    static const uint16_t gpio_13[] = {
-        0x13fe, 0x13fe, 0x13fa, 0x13b6, 0x13fe,
-        0x13fe, 0x13fa, 0x13f6, 0x13ee, 0x13ee
-    };
-    static const uint16_t tuner_b_gpio_4a[] = {
-        0x13c8, 0x13c8, 0x13c8, 0x13c8, 0x13cc,
-        0x13cc, 0x13cc, 0x13cc, 0x13cc, 0x13cc
-    };
-    static const uint16_t tuner_b_gpio_4b[] = {
-        0x13fe, 0x13fe, 0x13de, 0x13be, 0x13ff,
-        0x13ff, 0x13df, 0x13bf, 0x137f, 0x137f
-    };
-
-    if (!p || p->usb_pid != 0x3020u || p->freq < 420000000u ||
-        p->freq >= 1000000000u || gain_reduction < 20 ||
-        gain_reduction > 59 || lna_state >= 10u) return -1;
-
-    uint32_t reg9 = (uint32_t)reg9_base[lna_state] |
-                    ((uint32_t)gain_reduction << 4) | 1u;
-    if (mirisdr_write_reg(p, 0x09, reg9) < 0) return -1;
-    if (p->rspduo_tuner == 2u) {
-        uint16_t previous = p->rspduo_gpio13 != 0u ? p->rspduo_gpio13 : 0x13fe;
-        uint16_t bank_transition = lna_state < 4u ?
-                                   (uint16_t)(previous & ~1u) :
-                                   (uint16_t)(previous | 1u);
-        uint16_t final_gpio = rspduo_active_low(tuner_b_gpio_4b[lna_state],
-                                                0x0002u,
-                                                p->rspduo_dab_notch[1]);
-        if (mirisdr_rspduo_gpio(p, 0x4b, bank_transition) < 0 ||
-            mirisdr_rspduo_gpio(p, 0x4a, tuner_b_gpio_4a[lna_state]) < 0 ||
-            mirisdr_rspduo_gpio(p, 0x4b, final_gpio) < 0)
-            return -1;
-        p->rspduo_gpio13 = final_gpio;
-    } else {
-        uint16_t gpio_12_4b = rspduo_active_low(0x12dfu, 0x0010u,
-                                                p->rspduo_rf_notch[0]);
-        gpio_12_4b = rspduo_active_low(gpio_12_4b, 0x0040u,
-                                      p->rspduo_dab_notch[0]);
-        uint16_t gpio_12_4a = rspduo_active_low(gpio_12[lna_state], 0x0020u,
-                                                p->rspduo_external_reference);
-        if (mirisdr_rspduo_gpio(p, 0x4b, gpio_12_4b) < 0 ||
-               mirisdr_rspduo_gpio(p, 0x4a, gpio_12_4a) < 0 ||
-               mirisdr_rspduo_gpio(p, 0x4b, gpio_13[lna_state]) < 0) {
-            return -1;
-        }
-    }
+    if (!p || p->usb_pid != 0x3020u) return -1;
+    unsigned int tuner = p->rspduo_tuner == 2u ? 2u : 1u;
+    mirisdr_rspduo_gain_plan_t plan = {0};
+    if (mirisdr_rspduo_gain_plan(p->freq, tuner, gain_reduction, lna_state,
+                                 p->rspduo_gpio13,
+                                 p->rspduo_rf_notch[tuner - 1u],
+                                 p->rspduo_dab_notch[tuner - 1u],
+                                 p->rspduo_external_reference, &plan) < 0)
+        return -1;
+    if (mirisdr_write_reg(p, 0x09, plan.reg9) < 0 ||
+        mirisdr_rspduo_gpio(p, 0x4b, plan.first_gpio_4b) < 0 ||
+        mirisdr_rspduo_gpio(p, 0x4a, plan.gpio_4a) < 0 ||
+        mirisdr_rspduo_gpio(p, 0x4b, plan.final_gpio_4b) < 0)
+        return -1;
+    if (tuner == 2u) p->rspduo_gpio13 = plan.final_gpio_4b;
     unsigned int state_index = p->rspduo_tuner == 2u ? 1u : 0u;
     p->rspduo_gain_reduction[state_index] = gain_reduction;
     p->rspduo_lna_state[state_index] = lna_state;

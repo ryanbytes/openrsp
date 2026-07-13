@@ -213,41 +213,12 @@ static void *stream_main(void *opaque)
     return NULL;
 }
 
-static int clamp_int(int value, int minimum, int maximum)
-{
-    if (value < minimum) return minimum;
-    if (value > maximum) return maximum;
-    return value;
-}
-
 static int set_gain(mirisdr_dev_t *radio, const openrsp_radio_config *config)
 {
-    /* The independently captured RSPduo sequence controls IF gain reduction
-     * and the physical LNA GPIO state separately.  It is applied only after
-     * streaming has started; startup remains on the proven generic state. */
-    if (config->center_frequency_hz >= 420000000u &&
-        config->center_frequency_hz < 1000000000u)
-        return mirisdr_set_rspduo_gain(radio, config->gain_reduction_db,
-                                       config->lna_state);
-
-    /* Other bands retain the calculated total-gain path until their RSPduo
-     * GPIO tables are independently captured and verified. */
-    static const int below_60mhz[] = {0, 6, 12, 18, 37, 42, 61};
-    static const int below_420mhz[] = {0, 6, 12, 18, 20, 26, 32, 38, 57, 62};
-    static const int below_2ghz[] = {0, 6, 12, 20, 26, 32, 38, 43, 62};
-    const int *table = below_2ghz;
-    size_t count = sizeof(below_2ghz) / sizeof(below_2ghz[0]);
-    if (config->center_frequency_hz < 60000000u) {
-        table = below_60mhz;
-        count = sizeof(below_60mhz) / sizeof(below_60mhz[0]);
-    } else if (config->center_frequency_hz < 420000000u) {
-        table = below_420mhz;
-        count = sizeof(below_420mhz) / sizeof(below_420mhz[0]);
-    }
-    if (config->lna_state >= count || config->gain_reduction_db < 20 ||
-        config->gain_reduction_db > 59) return -1;
-    int total_reduction = config->gain_reduction_db + table[config->lna_state];
-    return mirisdr_set_tuner_gain(radio, clamp_int(102 - total_reduction, 0, 102));
+    /* API 3.15.1 controls IF gain and the external LNA GPIOs separately in
+     * all four RSPduo RF bands. */
+    return mirisdr_set_rspduo_gain(radio, config->gain_reduction_db,
+                                   config->lna_state);
 }
 
 static void describe_flags(uint32_t flags, char *buffer, size_t bytes)

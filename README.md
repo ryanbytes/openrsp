@@ -18,6 +18,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual low-IF A/B mode verified at 2 MS/s per tuner |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuners A and B independently |
+| RSPduo LNA routing | All valid A/B states use independently observed register/GPIO plans in the below-60 MHz, 60--420 MHz, 420--1000 MHz, and 1--2 GHz bands |
 | IQ streaming | Direct/API paths verified; RSPduo single-tuner real ADC lane converted to analytic IQ, with 61.5 dB image rejection measured on tuner A using a known offset carrier |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
@@ -107,6 +108,20 @@ callback throughput from 2 through the API maximum of 10.66 MS/s and restores
 ```sh
 ./build/sdrplay-rate-probe --rates
 ```
+
+The RSPduo gain-plan verifier accepts one tuner, RF frequency, and either one
+LNA state or `all`. It prints a timestamped boundary around every update so an
+independent control-boundary trace can distinguish initialization, each live
+gain change, and cleanup:
+
+```sh
+./build/sdrplay-rspduo-gain-probe A 100000000 all
+./build/sdrplay-rspduo-gain-probe B 1500000000 8
+```
+
+This is a disruptive hardware test. Stop radio applications first. A successful
+run requires continued IQ, successful updates, and complete API/device cleanup;
+it does not measure absolute RF gain without a calibrated source.
 
 The native stream verifier can optionally retain up to one second of
 interleaved little-endian signed 16-bit IQ for independent spectrum analysis.
