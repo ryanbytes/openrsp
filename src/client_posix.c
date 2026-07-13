@@ -6,8 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#ifndef OPENRSP_SOCKET_TIMEOUT_MILLISECONDS
+#define OPENRSP_SOCKET_TIMEOUT_MILLISECONDS 5000
+#endif
 
 struct openrsp_client {
     int descriptor;
@@ -47,6 +52,18 @@ int openrsp_client_connect(const char *socket_path, openrsp_client **out_client)
     if (!client) return -1;
     client->descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
     if (client->descriptor < 0) {
+        free(client);
+        return -1;
+    }
+    const struct timeval timeout = {
+        .tv_sec = OPENRSP_SOCKET_TIMEOUT_MILLISECONDS / 1000,
+        .tv_usec = (OPENRSP_SOCKET_TIMEOUT_MILLISECONDS % 1000) * 1000
+    };
+    if (setsockopt(client->descriptor, SOL_SOCKET, SO_RCVTIMEO,
+                   &timeout, sizeof(timeout)) != 0 ||
+        setsockopt(client->descriptor, SOL_SOCKET, SO_SNDTIMEO,
+                   &timeout, sizeof(timeout)) != 0) {
+        (void)close(client->descriptor);
         free(client);
         return -1;
     }

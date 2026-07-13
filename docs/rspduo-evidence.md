@@ -240,6 +240,12 @@ same I/Q buffer addresses across successive non-empty callbacks. This removes
 two allocations and two frees from every steady-state IQ frame while retaining
 the existing ten-cycle `Init`/stream/`Uninit` allocation-and-cleanup exercise.
 
+Every POSIX client socket now has a five-second send and receive deadline, so
+synchronous acquire/configure/start calls and a stalled streaming reader cannot
+wait forever. A private-socket fixture uses a 100 ms test deadline and requires
+a silent peer to time out, `shutdown` to wake and join a blocked reader in under
+one second, and a truncated response payload to fail instead of being accepted.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

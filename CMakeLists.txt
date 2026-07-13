@@ -68,6 +68,15 @@ if(UNIX)
     target_link_libraries(openrsp-client-test PRIVATE openrsp_client)
     target_compile_options(openrsp-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(openrsp-client-test PRIVATE -UNDEBUG)
+    add_executable(openrsp-client-timeout-test
+        tests/client_timeout_test.c src/client_posix.c)
+    target_include_directories(openrsp-client-timeout-test PRIVATE include)
+    target_link_libraries(openrsp-client-timeout-test PRIVATE Threads::Threads)
+    target_compile_definitions(openrsp-client-timeout-test PRIVATE
+        OPENRSP_SOCKET_TIMEOUT_MILLISECONDS=100)
+    target_compile_options(openrsp-client-timeout-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME openrsp-client-timeout COMMAND openrsp-client-timeout-test)
     add_executable(openrspd-multi-client-test tests/openrspd_multi_client_test.c)
     target_link_libraries(openrspd-multi-client-test PRIVATE openrsp_client)
     target_compile_options(openrspd-multi-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
