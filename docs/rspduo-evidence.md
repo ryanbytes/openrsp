@@ -296,8 +296,23 @@ RF. Recovery now records the session's successful initial configuration,
 replays that bootstrap state after reopen, waits for first IQ, and only then
 restores the newest sample rate, RF, bandwidth, IF, gain-reduction, and LNA
 state. A post-first-IQ restore failure cancels the stream and re-enters bounded
-recovery instead of reporting false success. This ordering change still needs
-a physical replug/decode test.
+recovery instead of reporting false success.
+
+The first physical test of that ordering retained the same SDRTrunk PID across
+the unplug/replug. The daemon cold-booted and identity-resolved the receiver,
+configured the recorded 101.1 MHz bootstrap state, resumed 65,536-byte IQ at
+sequence 18,649, then successfully restored 855.312383 MHz, 10 MSPS, 8 MHz
+bandwidth, GR 50, and LNA state 0. No API `DeviceFailure`, logical tuner
+removal, callback-queue drop, or application restart occurred.
+
+The SDRTrunk build under test runs its standard P25 control decode watchdog
+every five seconds and rebalances a processing channel after 25 seconds with
+no meaningful P25 control/trunking event. The same RSP-backed channel
+processors remained allocated after replug and the watchdog did not fire for
+more than two minutes. In the immediately preceding direct-at-855-MHz recovery
+test it fired for both RSP-backed control channels after 29.5 seconds. This is
+evidence for one same-process physical transport-and-decode recovery cycle. It
+does not establish repeated-cycle reliability or long-duration stability.
 
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
