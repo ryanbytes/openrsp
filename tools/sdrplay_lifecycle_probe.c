@@ -3,11 +3,15 @@
 #include "sdrplay_api_compat.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct {
     atomic_ullong samples;
@@ -22,6 +26,8 @@ typedef struct {
     atomic_int update_ack_seen;
     unsigned int expected_sample;
     int sample_seen;
+    int ready_fd;
+    int ready_sent;
 } lifecycle_metrics;
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
@@ -47,6 +53,11 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     if (atomic_load(&metrics->update_ack_seen) != 0)
         atomic_fetch_add(&metrics->samples_after_update_ack, num_samples);
     if (params->grChanged != 0) atomic_fetch_add(&metrics->gr_changed, 1u);
+    if (num_samples != 0u && metrics->ready_fd >= 0 && !metrics->ready_sent) {
+        const unsigned char ready = 1u;
+        metrics->ready_sent = 1;
+        (void)write(metrics->ready_fd, &ready, sizeof(ready));
+    }
 }
 
 static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tuner,
@@ -84,6 +95,19 @@ static void reset_metrics(lifecycle_metrics *metrics)
     atomic_init(&metrics->gr_changed, 0u);
     atomic_init(&metrics->device_failures, 0u);
     atomic_init(&metrics->update_ack_seen, 0);
+    metrics->ready_fd = -1;
+}
+
+static void configure_defaults(sdrplay_api_DeviceParamsT *params)
+{
+    params->devParams->fsFreq.fsHz = 2000000.0;
+    params->devParams->mode = sdrplay_api_BULK;
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101100000.0;
+    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_1_536;
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
+    params->rxChannelA->tunerParams.gain.gRdB = 40;
+    params->rxChannelA->tunerParams.gain.LNAstate = 5;
+    params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
 }
 
 static int run_cycle(unsigned int cycle)
@@ -132,14 +156,7 @@ static int run_cycle(unsigned int cycle)
         failed = 1;
         goto cleanup;
     }
-    params->devParams->fsFreq.fsHz = 2000000.0;
-    params->devParams->mode = sdrplay_api_BULK;
-    params->rxChannelA->tunerParams.rfFreq.rfHz = 101100000.0;
-    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_1_536;
-    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
-    params->rxChannelA->tunerParams.gain.gRdB = 40;
-    params->rxChannelA->tunerParams.gain.LNAstate = 5;
-    params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    configure_defaults(params);
     status = sdrplay_api_Init(devices[0].dev, &callbacks, &metrics);
     if (status != sdrplay_api_Success) {
         fprintf(stderr, "cycle %u Init failed: %s\n", cycle,
@@ -212,9 +229,124 @@ cleanup:
     return failed ? -1 : 0;
 }
 
+static int run_crash_victim(int ready_fd)
+{
+    sdrplay_api_DeviceT devices[SDRPLAY_MAX_DEVICES];
+    unsigned int count = 0u;
+    sdrplay_api_DeviceParamsT *params = NULL;
+    lifecycle_metrics metrics;
+    reset_metrics(&metrics);
+    metrics.ready_fd = ready_fd;
+    sdrplay_api_CallbackFnsT callbacks = {
+        .StreamACbFn = stream_callback,
+        .EventCbFn = event_callback
+    };
+    if (sdrplay_api_Open() != sdrplay_api_Success) return -1;
+    if (sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) !=
+            sdrplay_api_Success || count == 0u)
+        return -1;
+    if (sdrplay_api_SelectDevice(&devices[0]) != sdrplay_api_Success) return -1;
+    if (sdrplay_api_GetDeviceParams(devices[0].dev, &params) !=
+            sdrplay_api_Success || params == NULL)
+        return -1;
+    configure_defaults(params);
+    if (sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) !=
+        sdrplay_api_Success)
+        return -1;
+    for (;;) pause();
+}
+
+static int verify_crash_recovery(unsigned int crash_cycle)
+{
+    int ready_pipe[2];
+    if (pipe(ready_pipe) < 0) {
+        perror("pipe");
+        return -1;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork");
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        return -1;
+    }
+    if (child == 0) {
+        close(ready_pipe[0]);
+        int result = run_crash_victim(ready_pipe[1]);
+        _exit(result == 0 ? 0 : 2);
+    }
+    close(ready_pipe[1]);
+    struct pollfd ready_poll = {.fd = ready_pipe[0], .events = POLLIN};
+    int poll_result;
+    do {
+        poll_result = poll(&ready_poll, 1u, 10000);
+    } while (poll_result < 0 && errno == EINTR);
+    unsigned char ready = 0u;
+    ssize_t ready_bytes = poll_result > 0 ?
+        read(ready_pipe[0], &ready, sizeof(ready)) : -1;
+    close(ready_pipe[0]);
+    if (ready_bytes != (ssize_t)sizeof(ready) || ready != 1u) {
+        fprintf(stderr, "crash victim did not begin streaming within 10 seconds\n");
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    /* The first IQ notification can arrive just before Init returns. Give the
+     * victim time to enter its steady streaming wait before killing it. */
+    if (sleep_milliseconds(500) < 0) {
+        perror("nanosleep");
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    if (kill(child, SIGKILL) < 0) {
+        perror("kill");
+        (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) {
+            perror("waitpid");
+            return -1;
+        }
+    }
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
+        fprintf(stderr, "crash victim did not terminate with SIGKILL\n");
+        return -1;
+    }
+    if (sleep_milliseconds(2000) < 0) {
+        perror("nanosleep");
+        return -1;
+    }
+    if (run_cycle(crash_cycle) < 0) return -1;
+    printf("crash_cycle=%u recovered=1\n", crash_cycle);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     unsigned long cycles = 10u;
+    if ((argc == 2 || argc == 3) && strcmp(argv[1], "--crash-recovery") == 0) {
+        unsigned long crash_cycles = 1u;
+        if (argc == 3) {
+            char *end = NULL;
+            crash_cycles = strtoul(argv[2], &end, 10);
+            if (end == argv[2] || *end != '\0' || crash_cycles == 0u ||
+                crash_cycles > 100u) {
+                fputs("crash recovery count must be an integer from 1 through 100\n",
+                      stderr);
+                return EXIT_FAILURE;
+            }
+        }
+        for (unsigned long cycle = 1u; cycle <= crash_cycles; ++cycle) {
+            if (verify_crash_recovery((unsigned int)cycle) < 0)
+                return EXIT_FAILURE;
+        }
+        printf("PASS: daemon recovered from %lu SIGKILLed stream owners without a reconnect\n",
+               crash_cycles);
+        return EXIT_SUCCESS;
+    }
     if (argc == 3 && strcmp(argv[1], "--cycles") == 0) {
         char *end = NULL;
         cycles = strtoul(argv[2], &end, 10);
@@ -223,7 +355,8 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
     } else if (argc != 1) {
-        fprintf(stderr, "usage: %s [--cycles COUNT]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--cycles COUNT | --crash-recovery [COUNT]]\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
 

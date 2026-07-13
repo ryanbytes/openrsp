@@ -104,6 +104,13 @@ Each cycle must stream before and after a live rate/RF/gain update, preserve
 sample numbering, report only the initial reset indication, and release every
 API/device/stream resource without reconnecting the receiver.
 
+To kill a disposable streaming child process and verify that the daemon releases
+its ownership for a new complete lifecycle on the same receiver:
+
+```sh
+./build/sdrplay-lifecycle-probe --crash-recovery 10
+```
+
 The `openrsp-probe` USB descriptor probe is read-only. The official SDRplay
 service may prevent string-descriptor access; that tool reports the libusb
 error instead of stopping or detaching anything. Do not stop a production

@@ -458,6 +458,17 @@ acknowledgement reaches the application callback. Three additional cycles each
 delivered 1,867,776 samples at or after that acknowledgement, ruling out a pass
 based only on IQ already queued before the update completed.
 
+Crash cleanup was then tested separately. The lifecycle probe forks a disposable
+API client, waits until that child has received physical IQ, kills it with
+`SIGKILL` without calling Uninit or Close, waits for the daemon to observe the
+dead socket, and requires a new complete lifecycle on the same receiver. Ten
+consecutive crash/recovery cycles passed. Every replacement stream had one
+initial reset, zero discontinuities, exact rate/RF/gain acknowledgements, no
+device-failure event, and at least 1,867,776 samples delivered at or after the
+update acknowledgement. The daemon retained its PID and returned to 12,128 KB
+RSS; SDRTrunk also remained running. This proves bounded recovery from abrupt
+client death, not recovery from a daemon crash or host power loss.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
