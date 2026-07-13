@@ -19,7 +19,8 @@ int openrsp_daemon_api_lock_list(openrsp_daemon_api_lock *lock,
                                  openrsp_device_record *devices, size_t capacity);
 int openrsp_daemon_api_lock_release(openrsp_daemon_api_lock *lock);
 
-int openrsp_daemon_backend_open(openrsp_daemon_backend **backend, uint32_t device_index);
+int openrsp_daemon_backend_open(openrsp_daemon_backend **backend,
+                                const openrsp_acquire_request *identity);
 int openrsp_daemon_backend_configure(openrsp_daemon_backend *backend,
                                      const openrsp_radio_config *config);
 int openrsp_daemon_backend_start(openrsp_daemon_backend *backend,

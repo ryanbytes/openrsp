@@ -20,8 +20,7 @@ static _Thread_local unsigned int device_api_lock_depth;
 static openrsp_daemon_api_lock *daemon_api_lock;
 
 typedef struct {
-    uint32_t daemon_index;
-    uint16_t product_id;
+    openrsp_acquire_request identity;
     unsigned char hw_version;
     int valid;
 } compat_discovery_handle;
@@ -40,7 +39,7 @@ typedef struct {
 typedef struct {
     int selected;
     int initialized;
-    uint32_t daemon_index;
+    openrsp_acquire_request identity;
     uint16_t product_id;
     unsigned char hw_version;
     sdrplay_api_DevParamsT dev_params;
@@ -862,8 +861,11 @@ sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices,
         unsigned char hw_version = api_hardware_version(found[index].product_id);
         if (hw_version == 0u || written >= SDRPLAY_MAX_DEVICES) continue;
         compat_discovery_handle *handle = &discovery_handles[written];
-        handle->daemon_index = found[index].device_index;
-        handle->product_id = found[index].product_id;
+        handle->identity.device_index = found[index].device_index;
+        handle->identity.vendor_id = found[index].vendor_id;
+        handle->identity.product_id = found[index].product_id;
+        (void)snprintf(handle->identity.serial, sizeof(handle->identity.serial),
+                       "%s", found[index].serial);
         handle->hw_version = hw_version;
         handle->valid = 1;
         sdrplay_api_DeviceT *device = &devices[written++];
@@ -951,8 +953,8 @@ sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
     if (handle == NULL || !handle->valid || device->hwVer != handle->hw_version)
         return sdrplay_api_InvalidParam;
     rspduo.selected = 1;
-    rspduo.daemon_index = handle->daemon_index;
-    rspduo.product_id = handle->product_id;
+    rspduo.identity = handle->identity;
+    rspduo.product_id = handle->identity.product_id;
     rspduo.hw_version = handle->hw_version;
     device->dev = &rspduo;
     return sdrplay_api_Success;
@@ -965,7 +967,7 @@ sdrplay_api_ErrT sdrplay_api_ReleaseDevice(sdrplay_api_DeviceT *device)
     if (rspduo.initialized) return sdrplay_api_AlreadyInitialised;
     device->dev = NULL;
     rspduo.selected = 0;
-    rspduo.daemon_index = 0u;
+    memset(&rspduo.identity, 0, sizeof(rspduo.identity));
     rspduo.product_id = 0u;
     rspduo.hw_version = 0u;
     return sdrplay_api_Success;
@@ -985,8 +987,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     if (callbacks == NULL || callbacks->StreamACbFn == NULL) return sdrplay_api_InvalidParam;
     if (rspduo.initialized) return sdrplay_api_AlreadyInitialised;
     if (allocate_stream_buffers(&rspduo) != 0) return sdrplay_api_HwError;
-    int result = openrsp_daemon_backend_open(&rspduo.backend,
-                                             rspduo.daemon_index);
+    int result = openrsp_daemon_backend_open(&rspduo.backend, &rspduo.identity);
     if (result < 0 || rspduo.backend == NULL) {
         free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;

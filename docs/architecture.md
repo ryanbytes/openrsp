@@ -25,3 +25,18 @@ Errors must preserve their source: USB transport, protocol rejection, invalid ca
 ## Compatibility policy
 
 Protocol support is model- and revision-specific. Unknown product IDs may be enumerated but cannot be opened. Firmware or calibration writes are forbidden until their persistence and rollback behavior are independently established.
+
+## Receiver identity
+
+The compatibility API passes the daemon the receiver's USB vendor ID, product
+ID, and actual descriptor identity captured during discovery. The daemon
+resolves that tuple against a fresh enumeration before opening or recovering a
+receiver; it does not assume that libusb's raw device index remains stable after
+an unplug/replug. Duplicate matches fail as ambiguous rather than selecting an
+arbitrary radio. If no serial or physical-port identity is available, the raw
+index is retained as a limited fallback and stable replug recovery is not
+claimed.
+
+Application-facing serial overrides are deliberately excluded from hardware
+selection. A caller-controlled display name must not be able to redirect a
+session to another attached receiver.

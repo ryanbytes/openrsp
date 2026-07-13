@@ -19,7 +19,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
 | IQ streaming | Direct and standalone API paths verified on hardware |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
-| API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/raw-index propagation; implemented and loaded by SDRTrunk |
+| API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
@@ -93,14 +93,17 @@ cmake --build build --parallel
 ./build/openrsp-extract-firmware /Library/SDRplayAPI/3.15.1 \
   --output /tmp/rspduo-3020.bin
 test "$(wc -c < /tmp/rspduo-3020.bin | tr -d ' ')" = 6115
-shasum -a 256 /tmp/rspduo-3020.bin
+firmware_sha256=$(shasum -a 256 /tmp/rspduo-3020.bin | awk '{print $1}')
+test "$firmware_sha256" = \
+  f2a9451acd81fd8f09c5a0e506335d5d1ec9ab2c4ed53dd98de5cfff2a249387
 ```
 
 The extractor accepts either the versioned official install directory or the
 full path to its `bin/sdrplay_apiService` executable. It reads that file only;
 it does not launch the proprietary service. The extractor requires both known
 firmware signatures, rejects conflicting embedded copies, and writes exactly
-6,115 bytes.
+6,115 bytes. The checksum above is the image extracted from SDRplay API 3.15.1;
+do not assume a different official API release contains the same image.
 
 If the official package is downloaded but not installed, expand it and point
 the extractor at the service inside its payload:
@@ -140,7 +143,11 @@ needed. Development runs can override that location with the
 file makes cold-boot initialization fail explicitly; OpenRSP does not download
 firmware from the network or silently substitute another image.
 
-Some RSPduo USB states do not expose the factory serial descriptor. Set `OPENRSP_SERIAL` in the application environment to preserve a previously known stable identity; otherwise OpenRSP uses the physical USB port path. Do not commit a receiver serial to a public configuration.
+Some RSPduo USB states do not expose the factory serial descriptor. In that
+case OpenRSP uses the physical USB port path reported by the backend, so reconnect
+the receiver to the same port for deterministic recovery. `OPENRSP_SERIAL`
+changes only the serial shown to API applications; it is never trusted to choose
+hardware. Do not commit a receiver serial to a public configuration.
 
 ## Licensing and trademarks
 

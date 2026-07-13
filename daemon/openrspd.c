@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "openrsp/protocol.h"
+#include "openrsp/identity.h"
 #include "mirisdr.h"
 
 #include <errno.h>
@@ -27,7 +28,7 @@ typedef struct {
     mirisdr_dev_t *radio;
     int owner;
     int api_lock_owner;
-    uint32_t acquired_device_index;
+    openrsp_acquire_request acquired_identity;
     atomic_bool streaming;
     bool stream_thread_started;
     atomic_bool stream_error;
@@ -45,6 +46,10 @@ typedef struct {
 } daemon_state;
 
 static volatile sig_atomic_t running = 1;
+
+static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
+                                         size_t capacity);
+static int resolve_acquired_device(daemon_state *state, uint32_t *device_index);
 
 static void stop_server(int signal_number)
 {
@@ -357,11 +362,20 @@ static void recover_failed_stream(daemon_state *state)
     state->configured = false;
     state->recovery_gain_pending = false;
     if (state->owner < 0) return;
-    if (state->acquired_device_index >= mirisdr_get_device_count()) return;
+    uint32_t previous_index = state->acquired_identity.device_index;
+    uint32_t resolved_index = 0u;
+    int identity_result = resolve_acquired_device(state, &resolved_index);
+    if (identity_result != 0) {
+        fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=%s\n",
+                identity_result == OPENRSP_IDENTITY_AMBIGUOUS ? "ambiguous" : "not-found");
+        (void)fflush(stderr);
+        return;
+    }
 
-    fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN index=%u\n", state->acquired_device_index);
+    fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u\n",
+            previous_index, resolved_index);
     (void)fflush(stderr);
-    if (mirisdr_open(&state->radio, state->acquired_device_index) != 0) return;
+    if (mirisdr_open(&state->radio, resolved_index) != 0) return;
     uint32_t status = apply_config(state->radio, &state->config);
     if (status != OPENRSP_STATUS_OK) {
         (void)mirisdr_close(state->radio);
@@ -456,6 +470,16 @@ static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
     return count;
 }
 
+static int resolve_acquired_device(daemon_state *state, uint32_t *device_index)
+{
+    openrsp_device_record devices[OPENRSPD_MAX_DEVICES];
+    uint32_t count = snapshot_sdrplay_devices(devices, OPENRSPD_MAX_DEVICES);
+    int result = openrsp_identity_resolve(&state->acquired_identity, devices,
+                                          count, device_index);
+    if (result == 0) state->acquired_identity.device_index = *device_index;
+    return result;
+}
+
 static int serve_request(int descriptor, daemon_state *state)
 {
     openrsp_message_header request;
@@ -499,20 +523,36 @@ static int serve_request(int descriptor, daemon_state *state)
             response.status = OPENRSP_STATUS_BUSY;
         } else if (state->owner == descriptor) {
             response.status = OPENRSP_STATUS_OK;
-        } else if (acquire->device_index >= mirisdr_get_device_count()) {
-            response.status = OPENRSP_STATUS_BAD_REQUEST;
         } else {
-            uint16_t vendor_id = 0u;
-            char manufacturer[256] = {0};
-            char product[256] = {0};
-            char serial[256] = {0};
-            if (mirisdr_get_device_info(acquire->device_index, &vendor_id,
-                                        NULL, manufacturer, product,
-                                        serial) != 0 || vendor_id != 0x1df7u) {
+            openrsp_device_record devices[OPENRSPD_MAX_DEVICES];
+            uint32_t count = snapshot_sdrplay_devices(devices, OPENRSPD_MAX_DEVICES);
+            uint32_t resolved_index = 0u;
+            int identity_result = openrsp_identity_resolve(acquire, devices, count,
+                                                           &resolved_index);
+            if (identity_result != 0) {
+                fprintf(stderr, "OPENRSPD_ACQUIRE_IDENTITY status=%s\n",
+                        identity_result == OPENRSP_IDENTITY_AMBIGUOUS ?
+                        "ambiguous" : "not-found");
+                (void)fflush(stderr);
                 response.status = OPENRSP_STATUS_BAD_REQUEST;
             } else {
+                const openrsp_device_record *selected = NULL;
+                for (uint32_t index = 0u; index < count; ++index) {
+                    if (devices[index].device_index == resolved_index) {
+                        selected = &devices[index];
+                        break;
+                    }
+                }
+                if (state->radio &&
+                    (!selected || !openrsp_identity_matches(&state->acquired_identity,
+                                                             selected))) {
+                    (void)mirisdr_close(state->radio);
+                    state->radio = NULL;
+                    state->configured = false;
+                }
                 state->owner = descriptor;
-                state->acquired_device_index = acquire->device_index;
+                state->acquired_identity = *acquire;
+                state->acquired_identity.device_index = resolved_index;
                 response.status = OPENRSP_STATUS_OK;
             }
         }
@@ -536,7 +576,13 @@ static int serve_request(int descriptor, daemon_state *state)
         const openrsp_radio_config *config = (const openrsp_radio_config *)payload;
         bool opened_here = false;
         if (!state->radio) {
-            if (mirisdr_open(&state->radio, state->acquired_device_index) != 0) {
+            uint32_t resolved_index = 0u;
+            if (resolve_acquired_device(state, &resolved_index) != 0) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+                log_config("CONFIGURE", descriptor, 0u, response.status, config);
+                goto send_response;
+            }
+            if (mirisdr_open(&state->radio, resolved_index) != 0) {
                 response.status = OPENRSP_STATUS_IO_ERROR;
                 log_config("CONFIGURE", descriptor, 0u, response.status, config);
                 goto send_response;

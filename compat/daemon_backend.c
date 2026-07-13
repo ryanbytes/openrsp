@@ -224,9 +224,10 @@ static int async_request(openrsp_daemon_backend *backend, uint16_t command,
     return result;
 }
 
-int openrsp_daemon_backend_open(openrsp_daemon_backend **out_backend, uint32_t device_index)
+int openrsp_daemon_backend_open(openrsp_daemon_backend **out_backend,
+                                const openrsp_acquire_request *identity)
 {
-    if (!out_backend) return -1;
+    if (!out_backend || !identity) return -1;
     openrsp_daemon_backend *backend = calloc(1, sizeof(*backend));
     if (!backend) return -1;
     (void)pthread_mutex_init(&backend->request_lock, NULL);
@@ -234,9 +235,8 @@ int openrsp_daemon_backend_open(openrsp_daemon_backend **out_backend, uint32_t d
     (void)pthread_cond_init(&backend->response_ready, NULL);
     atomic_init(&backend->next_sequence, 1u);
     const char *socket_path = getenv("OPENRSPD_SOCKET");
-    openrsp_acquire_request acquire = {.device_index = device_index};
     if (openrsp_client_connect(socket_path, &backend->client) != 0 ||
-        direct_request(backend, OPENRSP_CMD_ACQUIRE, &acquire, sizeof(acquire)) != 0) {
+        direct_request(backend, OPENRSP_CMD_ACQUIRE, identity, sizeof(*identity)) != 0) {
         openrsp_daemon_backend_close(backend);
         return -1;
     }

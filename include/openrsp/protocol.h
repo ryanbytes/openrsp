@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 1u
+#define OPENRSP_PROTOCOL_VERSION 2u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -44,7 +44,9 @@ typedef struct {
 
 typedef struct {
     uint32_t device_index;
-    uint32_t reserved;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    char serial[64];
 } openrsp_acquire_request;
 
 typedef struct {

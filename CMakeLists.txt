@@ -24,6 +24,10 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 find_package(Threads REQUIRED)
 
+add_library(openrsp_identity src/identity.c)
+target_include_directories(openrsp_identity PUBLIC include)
+target_compile_options(openrsp_identity PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_library(openrsp src/device_db.c src/discovery.c src/session.c)
 add_library(openrsp::openrsp ALIAS openrsp)
 target_include_directories(openrsp PUBLIC include)
@@ -60,7 +64,7 @@ target_compile_options(openrsp-extract-firmware PRIVATE -Wall -Wextra -Wpedantic
 if(UNIX)
     add_executable(openrspd daemon/openrspd.c)
     target_include_directories(openrspd PRIVATE include)
-    target_link_libraries(openrspd PRIVATE openrsp_miri Threads::Threads m)
+    target_link_libraries(openrspd PRIVATE openrsp_miri openrsp_identity Threads::Threads m)
     target_compile_options(openrspd PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
@@ -70,6 +74,11 @@ target_link_libraries(device-db-test PRIVATE openrsp::openrsp)
 target_compile_options(device-db-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_compile_options(device-db-test PRIVATE -UNDEBUG)
 add_test(NAME device-db COMMAND device-db-test)
+
+add_executable(device-identity-test tests/device_identity_test.c)
+target_link_libraries(device-identity-test PRIVATE openrsp_identity)
+target_compile_options(device-identity-test PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+add_test(NAME device-identity COMMAND device-identity-test)
 
 if(UNIX)
     add_executable(openrsp-client-test tests/client_test.c)

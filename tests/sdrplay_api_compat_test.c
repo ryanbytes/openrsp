@@ -128,7 +128,10 @@ static int serve_client(int descriptor)
             const openrsp_acquire_request *acquire =
                 (const openrsp_acquire_request *)payload;
             uint32_t status = request.payload_bytes == sizeof(*acquire) &&
-                              acquire->device_index == 13u ?
+                              acquire->device_index == 13u &&
+                              acquire->vendor_id == 0x1df7u &&
+                              acquire->product_id == 0x3020u &&
+                              strcmp(acquire->serial, "MOCK-RSPDUO") == 0 ?
                               OPENRSP_STATUS_OK : OPENRSP_STATUS_BAD_REQUEST;
             if (send_response(descriptor, request.sequence, status) != 0) return -1;
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {

@@ -151,8 +151,8 @@ the owner releases the lease so an application crash cannot strand discovery.
 Enumeration preserves each libmirisdr device's actual VID, PID, serial, and raw
 index instead of stamping every record as an RSPduo at index zero. The daemon
 filters non-SDRplay devices, and the compatibility API maps the published
-RSP1/RSP1A/RSP2/RSPduo hardware identifiers before opening the selected raw
-index. SDRplay's published PID list also identifies RSPdx as `0x3030`; OpenRSP
+RSP1/RSP1A/RSP2/RSPduo hardware identifiers. SDRplay's published PID list also
+identifies RSPdx as `0x3030`; OpenRSP
 recognizes that identity in direct discovery but does not claim streaming
 support for it. See the [SDRplay VirtualHere guide](https://www.sdrplay.com/docs/VirtualHere.pdf).
 
@@ -174,7 +174,26 @@ the live scanner: OpenRSP and SDRTrunk retained their original PIDs, the daemon
 resumed 65,536-byte IQ frames and restored GR 50/LNA 0, SDRTrunk logged no
 terminal update failure or tuner removal, and decoding resumed.  This is one
 successful recovery cycle on one RSPduo; repeated-cycle and long-disconnect
-testing remain required before claiming general recovery stability.
+testing remain required before claiming general recovery stability. That live
+test still reused the discovery-time raw USB index; the correction below has
+software-test coverage but still needs a physical replug validation.
+
+## Stable receiver selection across re-enumeration (2026-07-13)
+
+Protocol version 2 carries the selected receiver's actual USB VID, PID, serial
+or physical-port identity, and discovery-time raw index. Before initial open or
+recovery, the daemon takes a fresh discovery snapshot and resolves the stable
+tuple again. A changed raw index is accepted only when the stable tuple matches;
+duplicate tuples and missing receivers fail closed. The raw index is used as a
+fallback only when no identity string exists.
+
+The hardware-free identity fixture moves an RSPduo from raw index 13 to 7,
+excludes a different product with the same serial, rejects duplicate matches
+without altering the caller's output, exercises the no-serial fallback, and
+rejects malformed non-terminated identities. The compatibility mock also
+requires the full RSPduo VID/PID/serial tuple in its acquire request. Debug,
+Release, and ASan/UBSan test suites pass; this section does not claim a new live
+unplug/replug result.
 
 ## API update-reason audit (2026-07-12)
 
