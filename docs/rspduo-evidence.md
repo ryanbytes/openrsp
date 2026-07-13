@@ -225,6 +225,14 @@ AGC modes/set points outside the public API ranges before any daemon command is
 sent. RSPduo limits use SDRplay's published 1 kHz--2 GHz coverage and
 2--10.66 MSPS sample-frequency range.
 
+API events now use a bounded dispatcher queue instead of invoking application
+event callbacks on the daemon socket reader or AGC worker. This prevents an
+event callback that calls `Update` from blocking the same reader needed to
+finish that update. The overload fixture injects a saturated IQ frame, receives
+`Overload_Detected`, acknowledges it by calling `Update` from inside the event
+callback, then requires a hysteretic `Overload_Corrected` event from the next
+normal frame. Gain and device-failure events use the same dispatcher.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

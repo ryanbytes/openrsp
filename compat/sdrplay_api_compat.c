@@ -18,6 +18,14 @@ static pthread_mutex_t decimation_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t device_api_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local unsigned int device_api_lock_depth;
 
+#define OPENRSP_EVENT_QUEUE_CAPACITY 32u
+
+typedef struct {
+    sdrplay_api_EventT event;
+    sdrplay_api_TunerSelectT tuner;
+    sdrplay_api_EventParamsT params;
+} compat_api_event;
+
 typedef struct {
     int selected;
     int initialized;
@@ -44,6 +52,9 @@ typedef struct {
     atomic_int agc_stop;
     atomic_int agc_mode;
     atomic_int agc_setpoint;
+    atomic_int overload_state;
+    atomic_int overload_event_pending;
+    atomic_int overload_reported_state;
     atomic_uint decimation_factor;
     unsigned int decimation_taps;
     unsigned int decimation_position;
@@ -51,12 +62,115 @@ typedef struct {
     double decimation_coefficients[513];
     int16_t decimation_history_i[513];
     int16_t decimation_history_q[513];
+    pthread_mutex_t event_lock;
+    pthread_cond_t event_ready;
+    pthread_cond_t event_idle;
+    pthread_t event_thread;
+    int event_thread_started;
+    int event_stop;
+    int event_dispatching;
+    unsigned int event_head;
+    unsigned int event_count;
+    compat_api_event event_queue[OPENRSP_EVENT_QUEUE_CAPACITY];
 } compat_device_context;
 
 static compat_device_context rspduo;
 static sdrplay_api_ErrorInfoT last_error;
 static _Thread_local sdrplay_api_ErrorInfoT last_error_view;
 static pthread_mutex_t last_error_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *event_thread_main(void *opaque)
+{
+    compat_device_context *device = opaque;
+    (void)pthread_mutex_lock(&device->event_lock);
+    for (;;) {
+        while (device->event_count == 0u && !device->event_stop)
+            (void)pthread_cond_wait(&device->event_ready, &device->event_lock);
+        if (device->event_count == 0u && device->event_stop) break;
+        compat_api_event event = device->event_queue[device->event_head];
+        device->event_head = (device->event_head + 1u) % OPENRSP_EVENT_QUEUE_CAPACITY;
+        --device->event_count;
+        device->event_dispatching = 1;
+        sdrplay_api_EventCallback_t callback = device->callbacks.EventCbFn;
+        void *context = device->callback_context;
+        (void)pthread_mutex_unlock(&device->event_lock);
+        if (callback) callback(event.event, event.tuner, &event.params, context);
+        (void)pthread_mutex_lock(&device->event_lock);
+        device->event_dispatching = 0;
+        if (device->event_count == 0u)
+            (void)pthread_cond_broadcast(&device->event_idle);
+    }
+    (void)pthread_cond_broadcast(&device->event_idle);
+    (void)pthread_mutex_unlock(&device->event_lock);
+    return NULL;
+}
+
+static int queue_api_event(compat_device_context *device, sdrplay_api_EventT event,
+                           sdrplay_api_TunerSelectT tuner,
+                           const sdrplay_api_EventParamsT *params)
+{
+    if (!device->event_thread_started) return -1;
+    (void)pthread_mutex_lock(&device->event_lock);
+    if (device->event_stop || device->event_count == OPENRSP_EVENT_QUEUE_CAPACITY) {
+        (void)pthread_mutex_unlock(&device->event_lock);
+        return -1;
+    }
+    unsigned int tail = (device->event_head + device->event_count) %
+                        OPENRSP_EVENT_QUEUE_CAPACITY;
+    device->event_queue[tail].event = event;
+    device->event_queue[tail].tuner = tuner;
+    device->event_queue[tail].params = *params;
+    ++device->event_count;
+    (void)pthread_cond_signal(&device->event_ready);
+    (void)pthread_mutex_unlock(&device->event_lock);
+    return 0;
+}
+
+static void wait_for_event_idle(compat_device_context *device)
+{
+    if (!device->event_thread_started ||
+        pthread_equal(pthread_self(), device->event_thread)) return;
+    (void)pthread_mutex_lock(&device->event_lock);
+    while (device->event_count != 0u || device->event_dispatching)
+        (void)pthread_cond_wait(&device->event_idle, &device->event_lock);
+    (void)pthread_mutex_unlock(&device->event_lock);
+}
+
+static int start_event_thread(compat_device_context *device)
+{
+    if (pthread_mutex_init(&device->event_lock, NULL) != 0) return -1;
+    if (pthread_cond_init(&device->event_ready, NULL) != 0) {
+        (void)pthread_mutex_destroy(&device->event_lock);
+        return -1;
+    }
+    if (pthread_cond_init(&device->event_idle, NULL) != 0) {
+        (void)pthread_cond_destroy(&device->event_ready);
+        (void)pthread_mutex_destroy(&device->event_lock);
+        return -1;
+    }
+    if (pthread_create(&device->event_thread, NULL, event_thread_main, device) != 0) {
+        (void)pthread_cond_destroy(&device->event_idle);
+        (void)pthread_cond_destroy(&device->event_ready);
+        (void)pthread_mutex_destroy(&device->event_lock);
+        return -1;
+    }
+    device->event_thread_started = 1;
+    return 0;
+}
+
+static void stop_event_thread(compat_device_context *device)
+{
+    if (!device->event_thread_started) return;
+    (void)pthread_mutex_lock(&device->event_lock);
+    device->event_stop = 1;
+    (void)pthread_cond_broadcast(&device->event_ready);
+    (void)pthread_mutex_unlock(&device->event_lock);
+    (void)pthread_join(device->event_thread, NULL);
+    device->event_thread_started = 0;
+    (void)pthread_cond_destroy(&device->event_idle);
+    (void)pthread_cond_destroy(&device->event_ready);
+    (void)pthread_mutex_destroy(&device->event_lock);
+}
 
 static void record_last_error(const char *function, const char *format, ...)
 {
@@ -411,17 +525,32 @@ static void *agc_thread_main(void *opaque)
                 event_params.gainParams.lnaGRdB = (unsigned int)lna_reduction;
                 event_params.gainParams.currGain =
                     device->channel_a.tunerParams.gain.gainVals.curr;
-                notify_gain = device->callbacks.EventCbFn != NULL;
+                notify_gain = 1;
             } else {
                 device->channel_a.tunerParams.gain.gRdB = old_reduction;
             }
         }
         pthread_mutex_unlock(&hardware_lock);
         if (notify_gain)
-            device->callbacks.EventCbFn(sdrplay_api_GainChange, sdrplay_api_Tuner_A,
-                                        &event_params, device->callback_context);
+            (void)queue_api_event(device, sdrplay_api_GainChange,
+                                  sdrplay_api_Tuner_A, &event_params);
     }
     return NULL;
+}
+
+static void emit_overload_event(compat_device_context *device, int overloaded)
+{
+    sdrplay_api_EventParamsT params;
+    memset(&params, 0, sizeof(params));
+    params.powerOverloadParams.powerOverloadChangeType =
+        overloaded ? sdrplay_api_Overload_Detected : sdrplay_api_Overload_Corrected;
+    if (queue_api_event(device, sdrplay_api_PowerOverloadChange,
+                        sdrplay_api_Tuner_A, &params) == 0) {
+        atomic_store(&device->overload_reported_state, overloaded);
+        atomic_store(&device->overload_event_pending, 1);
+    } else {
+        atomic_store(&device->overload_event_pending, 0);
+    }
 }
 
 static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
@@ -461,6 +590,15 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
         unsigned int sample_peak = abs_i > abs_q ? abs_i : abs_q;
         if (sample_peak > peak) peak = sample_peak;
     }
+    int overloaded = atomic_load(&device->overload_state);
+    int next_overload = overloaded ? peak > 30000u : peak >= 32700u;
+    if (next_overload != overloaded) {
+        atomic_store(&device->overload_state, next_overload);
+        int expected_pending = 0;
+        if (atomic_compare_exchange_strong(&device->overload_event_pending,
+                                           &expected_pending, 1))
+            emit_overload_event(device, next_overload);
+    }
     samples = decimate_iq(device, xi, xq, samples);
     device->sample_number += missing_frames * (unsigned int)samples;
     unsigned int observed = atomic_load(&device->agc_peak);
@@ -495,12 +633,10 @@ static void daemon_failure_callback(void *opaque)
 {
     compat_device_context *device = opaque;
     atomic_store(&device->stream_state, -1);
-    if (device->callbacks.EventCbFn) {
-        sdrplay_api_EventParamsT params;
-        memset(&params, 0, sizeof(params));
-        device->callbacks.EventCbFn(sdrplay_api_DeviceFailure, sdrplay_api_Tuner_A,
-                                    &params, device->callback_context);
-    }
+    sdrplay_api_EventParamsT params;
+    memset(&params, 0, sizeof(params));
+    (void)queue_api_event(device, sdrplay_api_DeviceFailure,
+                          sdrplay_api_Tuner_A, &params);
 }
 
 static void emit_update_ack(compat_device_context *device, int fs_changed,
@@ -538,6 +674,9 @@ static void reset_parameters(void)
     atomic_init(&rspduo.agc_stop, 0);
     atomic_init(&rspduo.agc_mode, sdrplay_api_AGC_CTRL_EN);
     atomic_init(&rspduo.agc_setpoint, -60);
+    atomic_init(&rspduo.overload_state, 0);
+    atomic_init(&rspduo.overload_event_pending, 0);
+    atomic_init(&rspduo.overload_reported_state, 0);
     atomic_init(&rspduo.decimation_factor, 1u);
     rspduo.params.devParams = &rspduo.dev_params;
     rspduo.params.rxChannelA = &rspduo.channel_a;
@@ -572,6 +711,10 @@ sdrplay_api_ErrT sdrplay_api_Open(void)
         return sdrplay_api_AlreadyInitialised;
     }
     reset_parameters();
+    if (start_event_thread(&rspduo) != 0) {
+        (void)pthread_mutex_unlock(&device_api_lock);
+        return sdrplay_api_OutOfMemError;
+    }
     atomic_store(&api_open, 1);
     (void)pthread_mutex_unlock(&device_api_lock);
     return sdrplay_api_Success;
@@ -581,6 +724,12 @@ sdrplay_api_ErrT sdrplay_api_Close(void)
 {
     if (device_api_lock_depth != 0u) return sdrplay_api_Fail;
     if (pthread_mutex_lock(&device_api_lock) != 0) return sdrplay_api_Fail;
+    if (rspduo.initialized || rspduo.selected ||
+        (rspduo.event_thread_started && pthread_equal(pthread_self(), rspduo.event_thread))) {
+        (void)pthread_mutex_unlock(&device_api_lock);
+        return sdrplay_api_AlreadyInitialised;
+    }
+    stop_event_thread(&rspduo);
     atomic_store(&api_open, 0);
     (void)pthread_mutex_unlock(&device_api_lock);
     return sdrplay_api_Success;
@@ -833,6 +982,9 @@ sdrplay_api_ErrT sdrplay_api_Uninit(HANDLE dev)
     rspduo.thread_started = 0;
     rspduo.agc_thread_started = 0;
     rspduo.initialized = 0;
+    wait_for_event_idle(&rspduo);
+    memset(&rspduo.callbacks, 0, sizeof(rspduo.callbacks));
+    rspduo.callback_context = NULL;
     return sdrplay_api_Success;
 }
 
@@ -875,6 +1027,12 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
             atomic_store(&rspduo.agc_setpoint,
                          rspduo.channel_a.ctrlParams.agc.setPoint_dBfs);
         }
+    }
+    if ((reason & sdrplay_api_Update_Ctrl_OverloadMsgAck) != 0u) {
+        atomic_store(&rspduo.overload_event_pending, 0);
+        int state = atomic_load(&rspduo.overload_state);
+        if (state != atomic_load(&rspduo.overload_reported_state))
+            emit_overload_event(&rspduo, state);
     }
     /* Install the software-only state before a daemon response can be followed
      * by IQ. The update round trip provides an ordering boundary for callers. */

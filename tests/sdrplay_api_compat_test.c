@@ -54,6 +54,16 @@ static int send_mock_iq(int descriptor, uint32_t sequence)
     return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
 }
 
+static int send_overload_iq(int descriptor, uint32_t sequence)
+{
+    int16_t iq[2048];
+    for (size_t sample = 0u; sample < 1024u; ++sample) {
+        iq[sample * 2u] = sample % 2u == 0u ? 32767 : -32767;
+        iq[sample * 2u + 1u] = 0;
+    }
+    return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
+}
+
 static int send_stopband_iq(int descriptor, uint32_t sequence)
 {
     const double pi = 3.14159265358979323846;
@@ -124,10 +134,14 @@ static int serve_client(int descriptor)
              * fixture boundary while also exercising response waiting with
              * an interleaved stream frame. */
             if (update->changed_flags == OPENRSP_CHANGE_RF &&
-                update->config.center_frequency_hz != 101000000u)
+                update->config.center_frequency_hz >= 100999000u &&
+                update->config.center_frequency_hz < 101000000u)
                 iq_sequence += 2u;
             int iq_result = 0;
-            if (streaming_updates == 4u) {
+            if ((update->changed_flags & OPENRSP_CHANGE_RF) != 0u &&
+                update->config.center_frequency_hz == 102000000u) {
+                iq_result = send_overload_iq(descriptor, ++iq_sequence);
+            } else if (streaming_updates == 4u) {
                 for (unsigned int frame = 0u; frame < 8u && iq_result == 0; ++frame)
                     iq_result = send_passband_iq(descriptor, ++iq_sequence);
                 for (unsigned int frame = 0u; frame < 8u && iq_result == 0; ++frame)
@@ -194,6 +208,11 @@ typedef struct {
     unsigned int gain_events;
     unsigned int event_gr_db;
     double event_current_gain;
+    unsigned int overload_events;
+    sdrplay_api_PowerOverloadCbEventIdT last_overload_event;
+    HANDLE device_handle;
+    int auto_ack_overload;
+    sdrplay_api_ErrT overload_ack_result;
 } callback_metrics;
 
 typedef struct {
@@ -254,6 +273,8 @@ static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tu
     callback_metrics *metrics = opaque;
     assert(tuner == sdrplay_api_Tuner_A);
     assert(params != NULL);
+    int acknowledge_overload = 0;
+    HANDLE device_handle = NULL;
     (void)pthread_mutex_lock(&metrics->lock);
     if (event == sdrplay_api_DeviceFailure) {
         ++metrics->device_failures;
@@ -261,9 +282,27 @@ static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tu
         ++metrics->gain_events;
         metrics->event_gr_db = params->gainParams.gRdB;
         metrics->event_current_gain = params->gainParams.currGain;
+    } else if (event == sdrplay_api_PowerOverloadChange) {
+        ++metrics->overload_events;
+        metrics->last_overload_event =
+            params->powerOverloadParams.powerOverloadChangeType;
+        if (metrics->auto_ack_overload &&
+            metrics->last_overload_event == sdrplay_api_Overload_Detected) {
+            acknowledge_overload = 1;
+            device_handle = metrics->device_handle;
+        }
     }
     (void)pthread_cond_signal(&metrics->ready);
     (void)pthread_mutex_unlock(&metrics->lock);
+    if (acknowledge_overload) {
+        sdrplay_api_ErrT result = sdrplay_api_Update(
+            device_handle, sdrplay_api_Tuner_A,
+            sdrplay_api_Update_Ctrl_OverloadMsgAck, 0u);
+        (void)pthread_mutex_lock(&metrics->lock);
+        metrics->overload_ack_result = result;
+        (void)pthread_cond_signal(&metrics->ready);
+        (void)pthread_mutex_unlock(&metrics->lock);
+    }
 }
 
 static int wait_for_callbacks_above(callback_metrics *metrics, unsigned int baseline)
@@ -321,6 +360,22 @@ static int wait_for_gain_event(callback_metrics *metrics)
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&metrics->lock);
     while (metrics->gain_events == 0u) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_overload_events(callback_metrics *metrics, unsigned int count)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->overload_events < count) {
         if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&metrics->lock);
             return -1;
@@ -416,6 +471,9 @@ int main(void)
     (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) == sdrplay_api_Success);
     assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);
+    (void)pthread_mutex_lock(&metrics.lock);
+    metrics.device_handle = devices[0].dev;
+    (void)pthread_mutex_unlock(&metrics.lock);
     params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
     params->rxChannelA->tunerParams.gain.gRdB = 42;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
@@ -530,6 +588,31 @@ int main(void)
            sdrplay_api_InvalidMode);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A, 0u,
                               0x80u) == sdrplay_api_InvalidParam);
+
+    (void)pthread_mutex_lock(&metrics.lock);
+    metrics.auto_ack_overload = 1;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 102000000.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Frf, 0u) ==
+           sdrplay_api_Success);
+    if (wait_for_overload_events(&metrics, 2u) != 0) {
+        (void)pthread_mutex_lock(&metrics.lock);
+        fprintf(stderr, "overload timeout events=%u last=%d ack=%d\n",
+                metrics.overload_events, (int)metrics.last_overload_event,
+                (int)metrics.overload_ack_result);
+        (void)pthread_mutex_unlock(&metrics.lock);
+        abort();
+    }
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.overload_ack_result == sdrplay_api_Success);
+    assert(metrics.last_overload_event == sdrplay_api_Overload_Corrected);
+    metrics.auto_ack_overload = 0;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Frf, 0u) ==
+           sdrplay_api_Success);
 
     params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_CTRL_EN;
     params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -60;
