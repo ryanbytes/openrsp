@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 include(CheckLanguage)
+include(GNUInstallDirs)
 check_language(CXX)
 if(CMAKE_CXX_COMPILER)
     enable_language(CXX)
@@ -35,6 +36,8 @@ target_link_libraries(openrsp PUBLIC PkgConfig::LIBUSB)
 target_compile_options(openrsp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 if(UNIX)
+    configure_file(packaging/sdrplay_api.pc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/sdrplay_api.pc" @ONLY)
     add_library(openrsp_client src/client_posix.c)
     set_target_properties(openrsp_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(openrsp_client PUBLIC include)
@@ -119,6 +122,15 @@ add_library(openrsp_miri STATIC third_party/libmirisdr/src/libmirisdr.c)
 target_include_directories(openrsp_miri PUBLIC third_party/libmirisdr/include)
 target_include_directories(openrsp_miri PRIVATE third_party/libmirisdr/src)
 target_compile_definitions(openrsp_miri PUBLIC mirisdr_STATIC)
+if(APPLE)
+    set(OPENRSP_DEFAULT_FIRMWARE_PATH
+        "/Library/OpenRSP/0.1/firmware/rspduo-3020.bin")
+else()
+    set(OPENRSP_DEFAULT_FIRMWARE_PATH
+        "${CMAKE_INSTALL_FULL_DATADIR}/openrsp/firmware/rspduo-3020.bin")
+endif()
+target_compile_definitions(openrsp_miri PRIVATE
+    OPENRSP_DEFAULT_FIRMWARE_PATH="${OPENRSP_DEFAULT_FIRMWARE_PATH}")
 target_link_libraries(openrsp_miri PUBLIC PkgConfig::LIBUSB Threads::Threads m)
 
 add_executable(rspduo-pll-test tests/rspduo_pll_test.c)
@@ -149,9 +161,16 @@ if(UNIX)
     target_compile_options(sdrplay_api_compat PRIVATE -Wall -Wextra -Wpedantic -Werror)
     set_target_properties(sdrplay_api_compat PROPERTIES
         OUTPUT_NAME sdrplay_api
-        PREFIX "lib"
-        SUFFIX ".so.3.15"
-    )
+        PREFIX "lib")
+    if(APPLE)
+        # SDRTrunk's macOS loader uses a .dylib symlink to this API-compatible
+        # filename; retain it for compatibility with the existing installer.
+        set_target_properties(sdrplay_api_compat PROPERTIES SUFFIX ".so.3.15")
+    else()
+        # Standard ELF SONAME and loader symlinks: libsdrplay_api.so,
+        # libsdrplay_api.so.3, and libsdrplay_api.so.3.15.
+        set_target_properties(sdrplay_api_compat PROPERTIES VERSION 3.15 SOVERSION 3)
+    endif()
 
     add_executable(sdrplay-api-compat-test tests/sdrplay_api_compat_test.c)
     target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
@@ -200,6 +219,39 @@ if(UNIX)
     target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 else()
     message(STATUS "OpenRSP direct driver builds on this platform; the local API-compatibility daemon is currently Unix-only")
+endif()
+
+if(UNIX)
+    install(TARGETS sdrplay_api_compat
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    install(TARGETS openrspd
+        RUNTIME DESTINATION "${CMAKE_INSTALL_SBINDIR}")
+    install(TARGETS openrsp-probe openrsp-reset openrsp-extract-firmware
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES
+        compat/sdrplay_api.h
+        compat/sdrplay_api_callback.h
+        compat/sdrplay_api_control.h
+        compat/sdrplay_api_dev.h
+        compat/sdrplay_api_rsp1a.h
+        compat/sdrplay_api_rsp2.h
+        compat/sdrplay_api_rspDuo.h
+        compat/sdrplay_api_rspDx.h
+        compat/sdrplay_api_rx_channel.h
+        compat/sdrplay_api_tuner.h
+        compat/sdrplay_api_compat.h
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+    install(FILES packaging/firmware/README
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/openrsp/firmware")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sdrplay_api.pc"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+endif()
+
+if(UNIX AND NOT APPLE)
+    configure_file(packaging/linux/openrspd.service.in
+        "${CMAKE_CURRENT_BINARY_DIR}/openrspd.service" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/openrspd.service"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system")
 endif()
 
 if(APPLE)

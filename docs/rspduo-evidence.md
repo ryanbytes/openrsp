@@ -314,6 +314,13 @@ test it fired for both RSP-backed control channels after 29.5 seconds. This is
 evidence for one same-process physical transport-and-decode recovery cycle. It
 does not establish repeated-cycle reliability or long-duration stability.
 
+A second consecutive physical cycle retained the same SDRTrunk and daemon
+PIDs. IQ resumed at sequence 153,650, bootstrap replay restored 855.312313 MHz
+with GR 50/LNA state 0, no failure or reallocation event appeared, and the
+five-second watchdog again remained quiet beyond its 25-second stall limit.
+Two cycles are useful regression evidence, not a soak or broad reliability
+claim.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames

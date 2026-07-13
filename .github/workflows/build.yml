@@ -29,3 +29,23 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 20 --verbose
+      - name: Verify staged install
+        run: |
+          prefix="$RUNNER_TEMP/openrsp-install"
+          cmake --install build --prefix "$prefix"
+          test -x "$prefix/bin/openrsp-probe"
+          test -x "$prefix/bin/openrsp-reset"
+          test -x "$prefix/bin/openrsp-extract-firmware"
+          test -x "$prefix/sbin/openrspd"
+          test -f "$prefix/include/sdrplay_api.h"
+          test -f "$prefix/include/sdrplay_api_rspDuo.h"
+          test -d "$prefix/share/openrsp/firmware"
+          test -f "$prefix/lib/pkgconfig/sdrplay_api.pc"
+          if [ "$RUNNER_OS" = Linux ]; then
+            test -L "$prefix/lib/libsdrplay_api.so"
+            test -L "$prefix/lib/libsdrplay_api.so.3"
+            test -f "$prefix/lib/libsdrplay_api.so.3.15"
+            test -f "$prefix/lib/systemd/system/openrspd.service"
+          else
+            test -f "$prefix/lib/libsdrplay_api.so.3.15"
+          fi

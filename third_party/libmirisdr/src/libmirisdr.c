@@ -41,6 +41,14 @@
 #include "constants.h"
 #include "structs.h"
 
+#ifndef OPENRSP_DEFAULT_FIRMWARE_PATH
+#if defined(__APPLE__)
+#define OPENRSP_DEFAULT_FIRMWARE_PATH "/Library/OpenRSP/0.1/firmware/rspduo-3020.bin"
+#else
+#define OPENRSP_DEFAULT_FIRMWARE_PATH "/usr/local/share/openrsp/firmware/rspduo-3020.bin"
+#endif
+#endif
+
 /* interní funkce - inline */
 #include "reg.c"
 #include "adc.c"
@@ -251,7 +259,7 @@ static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev)
 {
     const char *path = getenv("OPENRSP_RSPDUO_FIRMWARE");
     if (!path || path[0] == '\0')
-        path = "/Library/OpenRSP/0.1/firmware/rspduo-3020.bin";
+        path = OPENRSP_DEFAULT_FIRMWARE_PATH;
     unsigned char firmware[6115];
     FILE *file = fopen(path, "rb");
     if (!file) {

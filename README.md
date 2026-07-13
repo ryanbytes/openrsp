@@ -32,7 +32,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Device API locking | Recursive in-process lock plus daemon-owned cross-process lease with crash release |
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
-| Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for one physical RSPduo cycle; repeated-cycle/soak validation remains |
+| Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for two consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
@@ -81,6 +81,55 @@ sudo ./build/openrsp-iq -f 100000000 -s 2048000 -T 1 -e 2 -m 252 capture.iq
 ```
 
 The output is interleaved little-endian signed 16-bit IQ. RSPduo support is presently tuner A only and the RF routing/calibration behavior still needs measurement.
+
+## Linux replacement install
+
+Linux builds install a standard ELF library with the loader names
+`libsdrplay_api.so`, `libsdrplay_api.so.3`, and
+`libsdrplay_api.so.3.15`, the public API headers, a `sdrplay_api.pc`
+pkg-config file, `openrspd`, command-line tools, and a systemd unit. Build with
+the final prefix because that prefix is compiled into the firmware fallback
+and service unit:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Before uninstalling SDRplay's package, locate its official
+`sdrplay_apiService` executable and extract the firmware without launching it:
+
+```sh
+service=$(command -v sdrplay_apiService || true)
+if test -z "$service"; then
+  service=$(find /usr/local -type f -name sdrplay_apiService -print -quit)
+fi
+test -n "$service"
+./build/openrsp-extract-firmware "$service" --output /tmp/rspduo-3020.bin
+test "$(wc -c < /tmp/rspduo-3020.bin | tr -d ' ')" = 6115
+test "$(sha256sum /tmp/rspduo-3020.bin | awk '{print $1}')" = \
+  f2a9451acd81fd8f09c5a0e506335d5d1ec9ab2c4ed53dd98de5cfff2a249387
+```
+
+Use SDRplay's supplied uninstaller to remove its API and service before
+installing OpenRSP. Do not run two services against the same receiver. Then:
+
+```sh
+sudo cmake --install build
+sudo install -m 0644 /tmp/rspduo-3020.bin \
+  /usr/local/share/openrsp/firmware/rspduo-3020.bin
+sudo ldconfig
+sudo systemctl daemon-reload
+sudo systemctl enable --now openrspd.service
+systemctl --no-pager --full status openrspd.service
+```
+
+The systemd service runs the standalone driver as root so it can claim the USB
+interface without a permissive global udev rule. Application processes use the
+local Unix socket and do not need root. Linux installation is build/CI
+verified; RSPduo hardware operation has only been verified on macOS so far.
 
 ## macOS replacement install
 

@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: OpenRSP SDRplay API compatibility
+Description: Open-source SDRplay API 3-compatible userspace driver library
+Version: 3.15
+Libs: -L${libdir} -lsdrplay_api
+Cflags: -I${includedir}

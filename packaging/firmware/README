@@ -1,0 +1,5 @@
+OpenRSP does not distribute SDRplay firmware.
+
+For RSPduo cold boot, place the locally extracted 6,115-byte image in this
+directory as rspduo-3020.bin. See the repository README for extraction and
+checksum instructions.

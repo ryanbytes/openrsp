@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenRSP standalone SDRplay-compatible userspace driver
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_SBINDIR@/openrspd
+Environment="OPENRSP_RSPDUO_FIRMWARE=@OPENRSP_DEFAULT_FIRMWARE_PATH@"
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
