@@ -435,6 +435,10 @@ combined 2.048 MS/s, RF, and gain updates; all ten acknowledgements for each
 field arrived, streaming continued for the remaining half, and uninitialization
 succeeded. The OpenRSP daemon and SDRTrunk retained their original process IDs
 throughout. This is useful bounded evidence, but it is not a long-duration soak.
+The native verifier now treats any reset after the initial stream indication or
+more than five percent error from the configured wall-clock sample total as a
+failure. An eight-second, ten-update hardware run passed those stricter gates
+with one reset and 1.9953 percent sample-count error.
 
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,

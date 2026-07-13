@@ -123,14 +123,24 @@ int main(int argc, char **argv)
     sdrplay_api_ReleaseDevice(&devices[0]);
     sdrplay_api_Close();
     unsigned long long samples = atomic_load(&result.samples);
+    const double first_rate_seconds = (double)(run_seconds / 2);
+    const double second_rate_seconds = (double)(run_seconds - run_seconds / 2);
+    const double expected_samples = sample_rate_hz * first_rate_seconds +
+        (updated_sample_rate_hz > 0.0 ? updated_sample_rate_hz : sample_rate_hz) *
+        second_rate_seconds;
+    const double sample_error = expected_samples > 0.0 ?
+        fabs((double)samples - expected_samples) / expected_samples : 1.0;
     double rms = samples == 0u ? 0.0 :
                  sqrt((double)atomic_load(&result.power) / ((double)samples * 2.0));
-    printf("COMPAT_STREAM_RESULT samples=%llu callbacks=%u resets=%u rf_changed=%u fs_changed=%u gr_changed=%u peak=%d rms=%.2f updates=%u update=%d uninit=%d\n",
-           samples, atomic_load(&result.callbacks), atomic_load(&result.resets),
+    printf("COMPAT_STREAM_RESULT samples=%llu sample_error=%.4f%% callbacks=%u resets=%u rf_changed=%u fs_changed=%u gr_changed=%u peak=%d rms=%.2f updates=%u update=%d uninit=%d\n",
+           samples, sample_error * 100.0, atomic_load(&result.callbacks),
+           atomic_load(&result.resets),
            atomic_load(&result.rf_changed), atomic_load(&result.fs_changed),
            atomic_load(&result.gr_changed), atomic_load(&result.peak), rms,
            update_count, update, uninit);
-    return samples > 1000000u && atomic_load(&result.callbacks) > 0u &&
+    return samples > 1000000u && sample_error <= 0.05 &&
+           atomic_load(&result.callbacks) > 0u &&
+           atomic_load(&result.resets) == 1u &&
            atomic_load(&result.rf_changed) == update_count &&
            atomic_load(&result.gr_changed) == update_count &&
            atomic_load(&result.fs_changed) ==
