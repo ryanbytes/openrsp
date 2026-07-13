@@ -4,6 +4,7 @@
 #include "sdrplay_api_compat.h"
 
 #include <assert.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -53,9 +54,35 @@ static int send_mock_iq(int descriptor, uint32_t sequence)
     return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
 }
 
+static int send_stopband_iq(int descriptor, uint32_t sequence)
+{
+    const double pi = 3.14159265358979323846;
+    int16_t iq[2048];
+    for (size_t sample = 0u; sample < 1024u; ++sample) {
+        double phase = 2.0 * pi * 0.375 * (double)sample;
+        iq[sample * 2u] = (int16_t)lround(12000.0 * sin(phase));
+        iq[sample * 2u + 1u] = (int16_t)lround(12000.0 * cos(phase));
+    }
+    return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
+}
+
+static int send_passband_iq(int descriptor, uint32_t sequence)
+{
+    const double pi = 3.14159265358979323846;
+    int16_t iq[2048];
+    for (size_t sample = 0u; sample < 1024u; ++sample) {
+        double phase = 2.0 * pi * 0.0625 * (double)sample;
+        iq[sample * 2u] = (int16_t)lround(12000.0 * sin(phase));
+        iq[sample * 2u + 1u] = (int16_t)lround(12000.0 * cos(phase));
+    }
+    return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
+}
+
 static int serve_client(int descriptor)
 {
     int streaming = 0;
+    unsigned int streaming_updates = 0u;
+    uint32_t iq_sequence = 0u;
     for (;;) {
         openrsp_message_header request;
         unsigned char payload[4096];
@@ -80,6 +107,7 @@ static int serve_client(int descriptor)
                 return -1;
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
             const openrsp_update_request *update = (const openrsp_update_request *)payload;
+            ++streaming_updates;
             const openrsp_response response = {
                 .status = OPENRSP_STATUS_OK,
                 .sequence = request.sequence,
@@ -88,9 +116,17 @@ static int serve_client(int descriptor)
             /* Put IQ before the response so each update has a deterministic
              * fixture boundary while also exercising response waiting with
              * an interleaved stream frame. */
-            uint32_t iq_sequence = request.sequence;
             if (update->changed_flags == OPENRSP_CHANGE_RF) iq_sequence += 2u;
-            if (send_mock_iq(descriptor, iq_sequence) != 0 ||
+            int iq_result = 0;
+            if (streaming_updates == 4u) {
+                for (unsigned int frame = 0u; frame < 8u && iq_result == 0; ++frame)
+                    iq_result = send_passband_iq(descriptor, ++iq_sequence);
+                for (unsigned int frame = 0u; frame < 8u && iq_result == 0; ++frame)
+                    iq_result = send_stopband_iq(descriptor, ++iq_sequence);
+            } else {
+                iq_result = send_mock_iq(descriptor, ++iq_sequence);
+            }
+            if (iq_result != 0 ||
                 send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
                            &response, sizeof(response)) != 0) return -1;
         } else {
@@ -99,7 +135,7 @@ static int serve_client(int descriptor)
             if (send_response(descriptor, request.sequence, status) != 0) return -1;
             if (request.type == OPENRSP_CMD_START) {
                 streaming = 1;
-                if (send_mock_iq(descriptor, request.sequence) != 0)
+                if (send_mock_iq(descriptor, ++iq_sequence) != 0)
                     return -1;
             } else if (request.type == OPENRSP_CMD_STOP ||
                        request.type == OPENRSP_CMD_RELEASE) {
@@ -141,6 +177,11 @@ typedef struct {
     unsigned int device_failures;
     unsigned int reset_callbacks;
     unsigned int last_reset_first_sample;
+    unsigned int last_peak;
+    int measure_filter;
+    unsigned int filter_frames;
+    unsigned int passband_peak;
+    unsigned int stopband_peak;
 } callback_metrics;
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
@@ -158,6 +199,21 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     if (reset != 0u) {
         ++metrics->reset_callbacks;
         metrics->last_reset_first_sample = params->firstSampleNum;
+    }
+    unsigned int peak = 0u;
+    for (unsigned int index = 0u; index < samples; ++index) {
+        unsigned int abs_i = (unsigned int)(xi[index] < 0 ? -(int)xi[index] : xi[index]);
+        unsigned int abs_q = (unsigned int)(xq[index] < 0 ? -(int)xq[index] : xq[index]);
+        if (abs_i > peak) peak = abs_i;
+        if (abs_q > peak) peak = abs_q;
+    }
+    metrics->last_peak = peak;
+    if (metrics->measure_filter && samples != 0u) {
+        ++metrics->filter_frames;
+        if (metrics->filter_frames <= 8u)
+            metrics->passband_peak = peak;
+        else
+            metrics->stopband_peak = peak;
     }
     (void)pthread_cond_signal(&metrics->ready);
     (void)pthread_mutex_unlock(&metrics->lock);
@@ -307,6 +363,12 @@ int main(void)
     const unsigned char factors[] = {2u, 4u, 8u, 16u, 32u};
     params->rxChannelA->ctrlParams.decimation.enable = 1u;
     for (size_t index = 0u; index < sizeof(factors) / sizeof(factors[0]); ++index) {
+        if (factors[index] == 2u) {
+            (void)pthread_mutex_lock(&metrics.lock);
+            metrics.measure_filter = 1;
+            metrics.filter_frames = 0u;
+            (void)pthread_mutex_unlock(&metrics.lock);
+        }
         params->rxChannelA->ctrlParams.decimation.decimationFactor = factors[index];
         assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                                   sdrplay_api_Update_Ctrl_Decimation, 0u) ==
@@ -314,11 +376,18 @@ int main(void)
         assert(wait_for_samples_above(&metrics, undecimated_samples) == 0);
         (void)pthread_mutex_lock(&metrics.lock);
         unsigned int produced = metrics.samples - undecimated_samples;
-        unsigned int expected = 1024u / factors[index];
+        unsigned int frames = factors[index] == 2u ? 16u : 1u;
+        unsigned int expected = frames * 1024u / factors[index];
         if (produced != expected) {
             fprintf(stderr, "decimation x%u produced %u samples, expected %u\n",
                     factors[index], produced, expected);
             abort();
+        }
+        if (factors[index] == 2u) {
+            assert(metrics.filter_frames == 16u);
+            assert(metrics.passband_peak > 10000u);
+            assert(metrics.stopband_peak < 100u);
+            metrics.measure_filter = 0;
         }
         undecimated_samples = metrics.samples;
         (void)pthread_mutex_unlock(&metrics.lock);

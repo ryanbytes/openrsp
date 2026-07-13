@@ -21,7 +21,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
-| API software decimation | Stateful FIR decimation at x2, x4, x8, x16, and x32; automated transport tests only |
+| API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
 | IQ loss indication | Daemon frame-sequence gaps set the API stream reset flag and advance sample numbering |
 | Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |

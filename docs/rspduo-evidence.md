@@ -167,9 +167,13 @@ acknowledgement remain accepted. PPM correction is applied to the synthesizer
 command and acknowledged using the API's `fsChanged` callback convention.
 Software decimation uses a stateful windowed-sinc FIR for x2, x4, x8, x16, and
 x32. Automated transport tests verify exact output accounting for every
-supported factor and rejection of unsupported factors; RF bandwidth and alias
-rejection have not yet been measured on hardware. Unsupported hardware
-switches fail explicitly instead of pretending to work.
+supported factor and rejection of unsupported factors. The x2 fixture runs
+eight continuous pass-band frames at 0.0625 cycles/input sample followed by
+eight stop-band frames at 0.375 cycles/input sample; the settled pass-band peak
+must remain above 10,000 for a 12,000-count input and the settled stop-band peak
+must fall below 100. RF bandwidth and alias rejection have not yet been
+measured on hardware. Unsupported hardware switches fail explicitly instead of
+pretending to work.
 
 Debug, Release, and ASan/UBSan builds each pass all five tests. The sanitizer
 run uses `ASAN_OPTIONS=detect_leaks=0` because Apple AddressSanitizer does not
