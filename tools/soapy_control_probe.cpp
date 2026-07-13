@@ -4,6 +4,7 @@
 #include <SoapySDR/Types.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -18,6 +19,7 @@ namespace {
 constexpr double kSampleRate = 2000000.0;
 constexpr double kFrequency = 101100000.0;
 constexpr double kBandwidth = 1536000.0;
+constexpr double kMaximumRateError = 0.05;
 
 struct Measurement {
     size_t samples = 0;
@@ -103,21 +105,139 @@ void print_measurement(const char *label, const Measurement &measurement)
               << " peak=" << measurement.peak << '\n';
 }
 
+double measure_rate(SoapySDR::Device *device, SoapySDR::Stream *stream,
+                    double expected_rate)
+{
+    using clock = std::chrono::steady_clock;
+    std::vector<std::complex<short>> samples(device->getStreamMTU(stream));
+    if (samples.empty()) samples.resize(4096);
+    const size_t request_samples = std::min(
+        samples.size(), std::max(static_cast<size_t>(1024),
+                                 static_cast<size_t>(expected_rate / 10.0)));
+    const auto settle_until = clock::now() + std::chrono::milliseconds(750);
+    const auto measure_for = std::chrono::milliseconds(1500);
+    unsigned int timeouts = 0;
+
+    while (clock::now() < settle_until) {
+        void *buffers[] = {samples.data()};
+        int flags = 0;
+        long long time_ns = 0;
+        const int result = device->readStream(stream, buffers, request_samples,
+                                              flags, time_ns, 1000000);
+        if (result == SOAPY_SDR_TIMEOUT) {
+            if (++timeouts > 5) throw std::runtime_error("repeated stream timeout while settling");
+            continue;
+        }
+        if (result < 0)
+            throw std::runtime_error(std::string("readStream while settling: ") +
+                                     SoapySDR::errToStr(result));
+        timeouts = 0;
+    }
+
+    size_t count = 0;
+    const auto started = clock::now();
+    const auto measure_until = started + measure_for;
+    while (clock::now() < measure_until) {
+        void *buffers[] = {samples.data()};
+        int flags = 0;
+        long long time_ns = 0;
+        const int result = device->readStream(stream, buffers, request_samples,
+                                              flags, time_ns, 1000000);
+        if (result == SOAPY_SDR_TIMEOUT) {
+            if (++timeouts > 5) throw std::runtime_error("repeated stream timeout while measuring rate");
+            continue;
+        }
+        if (result < 0)
+            throw std::runtime_error(std::string("readStream while measuring rate: ") +
+                                     SoapySDR::errToStr(result));
+        timeouts = 0;
+        count += static_cast<size_t>(result);
+    }
+    const double elapsed = std::chrono::duration<double>(clock::now() - started).count();
+    return static_cast<double>(count) / elapsed;
+}
+
+void verify_rate(SoapySDR::Device *device, SoapySDR::Stream *stream,
+                 double requested)
+{
+    device->setSampleRate(SOAPY_SDR_RX, 0, requested);
+    const double reported = device->getSampleRate(SOAPY_SDR_RX, 0);
+    if (reported != requested)
+        throw std::runtime_error("sample-rate readback mismatch: requested " +
+                                 std::to_string(requested) + ", got " +
+                                 std::to_string(reported));
+    const double actual = measure_rate(device, stream, requested);
+    const double error = std::fabs(actual - requested) / requested;
+    std::cout << "rate requested=" << requested << " measured=" << actual
+              << " error=" << error * 100.0 << "%\n";
+    if (error > kMaximumRateError)
+        throw std::runtime_error("measured sample rate differs by more than 5% at " +
+                                 std::to_string(requested));
+}
+
+void prepare_rate_measurement(SoapySDR::Device *device)
+{
+    device->setGainMode(SOAPY_SDR_RX, 0, false);
+    require_gain(device, "IFGR", 40.0);
+    require_gain(device, "RFGR", 5.0);
+}
+
+void finish_rate_measurement(SoapySDR::Device *device)
+{
+    device->setSampleRate(SOAPY_SDR_RX, 0, kSampleRate);
+    device->setGainMode(SOAPY_SDR_RX, 0, true);
+}
+
+void run_rate_matrix(SoapySDR::Device *device, SoapySDR::Stream *stream)
+{
+    const std::vector<double> rates = device->listSampleRates(SOAPY_SDR_RX, 0);
+    if (rates.empty()) throw std::runtime_error("Soapy module advertised no sample rates");
+    prepare_rate_measurement(device);
+    for (const double requested : rates) verify_rate(device, stream, requested);
+    finish_rate_measurement(device);
+    std::cout << "PASS: every Soapy-advertised single-tuner sample rate remained "
+                 "within 5% of wall-clock output; AGC restored\n";
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
     SoapySDR::Kwargs args;
     args["driver"] = "sdrplay";
-    if (argc == 3 && std::string(argv[1]) == "--serial") args["serial"] = argv[2];
-    else if (argc != 1) {
-        std::cerr << "usage: " << argv[0] << " [--serial SERIAL]\n";
+    bool rate_matrix = false;
+    double single_rate = 0.0;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument = argv[index];
+        if (argument == "--rates") rate_matrix = true;
+        else if (argument == "--rate" && index + 1 < argc) {
+            try {
+                single_rate = std::stod(argv[++index]);
+            } catch (const std::exception &) {
+                std::cerr << "--rate requires a numeric samples-per-second value\n";
+                return EXIT_FAILURE;
+            }
+            if (!std::isfinite(single_rate) || single_rate <= 0.0) {
+                std::cerr << "--rate must be finite and greater than zero\n";
+                return EXIT_FAILURE;
+            }
+        }
+        else if (argument == "--serial" && index + 1 < argc) args["serial"] = argv[++index];
+        else {
+            std::cerr << "usage: " << argv[0]
+                      << " [--serial SERIAL] [--rates | --rate SPS]\n";
+            return EXIT_FAILURE;
+        }
+    }
+    if (rate_matrix && single_rate != 0.0) {
+        std::cerr << "--rates and --rate are mutually exclusive\n";
         return EXIT_FAILURE;
     }
 
     SoapySDR::Device *device = nullptr;
     SoapySDR::Stream *stream = nullptr;
     bool active = false;
+    bool controls_changed = false;
     try {
         const SoapySDR::KwargsList devices = SoapySDR::Device::enumerate(args);
         if (devices.empty()) throw std::runtime_error("no Soapy SDRplay device found");
@@ -129,6 +249,12 @@ int main(int argc, char **argv)
             std::find(gains.begin(), gains.end(), "RFGR") == gains.end())
             throw std::runtime_error("Soapy module did not advertise IFGR and RFGR");
 
+        controls_changed = true;
+        if (rate_matrix || single_rate != 0.0) {
+            device->setGainMode(SOAPY_SDR_RX, 0, false);
+            device->setGain(SOAPY_SDR_RX, 0, "IFGR", 40.0);
+            device->setGain(SOAPY_SDR_RX, 0, "RFGR", 5.0);
+        }
         device->setSampleRate(SOAPY_SDR_RX, 0, kSampleRate);
         device->setFrequency(SOAPY_SDR_RX, 0, kFrequency);
         device->setBandwidth(SOAPY_SDR_RX, 0, kBandwidth);
@@ -139,6 +265,28 @@ int main(int argc, char **argv)
             throw std::runtime_error(std::string("activateStream: ") +
                                      SoapySDR::errToStr(activate_result));
         active = true;
+
+        if (rate_matrix) {
+            run_rate_matrix(device, stream);
+            device->deactivateStream(stream);
+            active = false;
+            device->closeStream(stream);
+            stream = nullptr;
+            SoapySDR::Device::unmake(device);
+            return EXIT_SUCCESS;
+        }
+        if (single_rate != 0.0) {
+            prepare_rate_measurement(device);
+            verify_rate(device, stream, single_rate);
+            finish_rate_measurement(device);
+            std::cout << "PASS: requested Soapy sample rate verified; AGC restored\n";
+            device->deactivateStream(stream);
+            active = false;
+            device->closeStream(stream);
+            stream = nullptr;
+            SoapySDR::Device::unmake(device);
+            return EXIT_SUCCESS;
+        }
 
         device->setGainMode(SOAPY_SDR_RX, 0, false);
         if (device->getGainMode(SOAPY_SDR_RX, 0))
@@ -180,6 +328,15 @@ int main(int argc, char **argv)
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';
+        if (device != nullptr && controls_changed) {
+            try {
+                device->setSampleRate(SOAPY_SDR_RX, 0, kSampleRate);
+                device->setGainMode(SOAPY_SDR_RX, 0, true);
+            } catch (const std::exception &cleanup_error) {
+                std::cerr << "cleanup warning: could not restore 2 MS/s and AGC: "
+                          << cleanup_error.what() << '\n';
+            }
+        }
         if (device != nullptr && stream != nullptr) {
             if (active) (void)device->deactivateStream(stream);
             device->closeStream(stream);

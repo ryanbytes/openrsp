@@ -180,9 +180,12 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     p->rate = rate;
     p->freq = freq;
     p->format_auto = MIRISDR_FORMAT_AUTO_OFF;
-    p->format = rate <= 6048000u ? MIRISDR_FORMAT_252_S16 :
-                rate <= 8064000u ? MIRISDR_FORMAT_336_S16 :
-                rate <= 9216000u ? MIRISDR_FORMAT_384_S16 : MIRISDR_FORMAT_504_S16;
+    switch (mirisdr_rspduo_format_samples(rate)) {
+    case 252u: p->format = MIRISDR_FORMAT_252_S16; break;
+    case 336u: p->format = MIRISDR_FORMAT_336_S16; break;
+    case 384u: p->format = MIRISDR_FORMAT_384_S16; break;
+    default: p->format = MIRISDR_FORMAT_504_S16; break;
+    }
     p->transfer = MIRISDR_TRANSFER_BULK;
     p->if_freq = if_freq == 0u ? MIRISDR_IF_ZERO :
                  if_freq == 450000u ? MIRISDR_IF_450KHZ :

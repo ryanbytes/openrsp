@@ -120,6 +120,8 @@ MIRISDR_API int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate,
 MIRISDR_API int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3,
                                           uint32_t *reg4);
 MIRISDR_API uint32_t mirisdr_rspduo_252_format_word(uint32_t rate);
+MIRISDR_API uint32_t mirisdr_rspduo_format_word(uint32_t rate);
+MIRISDR_API uint32_t mirisdr_rspduo_format_samples(uint32_t rate);
 
 /* gain */
 MIRISDR_API int mirisdr_set_gain (mirisdr_dev_t *p);                    /* extra */

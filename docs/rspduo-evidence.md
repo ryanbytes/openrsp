@@ -394,6 +394,19 @@ when SoapySDR development files are present. Debug, Release, and ASan/UBSan
 builds, all 13 automated tests, and compilation of that probe passed afterward.
 SDRTrunk then rediscovered the same RSPduo on the still-running daemon.
 
+A subsequent full-rate probe exposed a native packet-decoder error at exactly
+2.048 MS/s and then at 3 MS/s. Register 7 value `0x05` produces 336 IQ pairs
+per USB packet on the tested RSPduo, while the inherited Mirics thresholds had
+selected the 252-pair converter and discarded exactly 25 percent of the
+samples. OpenRSP now selects the RSPduo register word and packet converter as
+one rate tuple in the core `libmirisdr` backend. With SDRTrunk stopped to remove
+host-load interference, the physical receiver passed all 19 rates advertised
+by SoapySDRPlay3: 62.5, 96, 125, 192, 250, 384, 500, and 768 kS/s, and 1,
+2, 2.048, 3, 4, 5, 6, 7, 8, 9, and 10 MS/s. Measured wall-clock error ranged
+from 0.0026 percent at 6 MS/s to 0.353 percent at 2.048 MS/s. The probe restored
+2 MS/s and AGC after the sweep. This verifies single-tuner sample delivery rate
+on one RSPduo; it does not establish RF bandwidth flatness or dual-tuner support.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames

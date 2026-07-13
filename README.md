@@ -33,7 +33,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
-| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, 2 MS/s receive, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
+| SoapySDRPlay3 compatibility | Current upstream module builds/loads against OpenRSP; live RSPduo enumeration, every advertised rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
@@ -80,6 +80,10 @@ it:
 SOAPY_SDR_PLUGIN_PATH=/path/to/SoapySDRPlay3/build \
   ./build/openrsp-soapy-control-probe --serial YOUR_SERIAL
 ```
+
+Use `--rates` to measure every rate advertised by the module, or `--rate SPS`
+to test one rate. These modes compare delivered IQ against wall-clock time and
+restore the normal 2 MS/s configuration and AGC after a successful run.
 
 The `openrsp-probe` USB descriptor probe is read-only. The official SDRplay
 service may prevent string-descriptor access; that tool reports the libusb
@@ -217,3 +221,7 @@ hardware. Do not commit a receiver serial to a public configuration.
 ## Licensing and trademarks
 
 OpenRSP is licensed under GPL-2.0-or-later because its direct hardware backend derives from the GPL libmirisdr implementation. The imported source and its history are preserved under `third_party/libmirisdr`. SDRplay, RSP, and Mirics names identify compatible or investigated hardware; this project is unaffiliated with and not endorsed by SDRplay Limited or Mirics Limited.
+
+## Dedication
+
+For Carolyn, with love.

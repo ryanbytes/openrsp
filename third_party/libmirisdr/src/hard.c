@@ -19,7 +19,38 @@
 
 uint32_t mirisdr_rspduo_252_format_word(uint32_t rate)
 {
-	return rate == 6000000u ? 0x000094u : 0x000005u;
+	return mirisdr_rspduo_format_word(rate);
+}
+
+uint32_t mirisdr_rspduo_format_word(uint32_t rate)
+{
+	if (rate == 3072000u || rate == 6000000u) return 0x000094u;
+	if (rate <= 6048000u) return 0x000005u;
+	if (rate <= 8064000u) return 0x000085u;
+	if (rate <= 9216000u) return 0x0000a5u;
+	return 0x000c94u;
+}
+
+uint32_t mirisdr_rspduo_format_samples(uint32_t rate)
+{
+	/* Register value 0x05 produces 336 IQ pairs on the RSPduo, despite the
+	 * legacy MSi2500 mapping treating sub-6.048 MS/s rates as 252-pair
+	 * packets. The hardware-verified 0x94 tuples use 252 pairs. */
+	if (rate <= 6048000u)
+		return mirisdr_rspduo_format_word(rate) == 0x000094u ? 252u : 336u;
+	if (rate <= 8064000u) return 336u;
+	if (rate <= 9216000u) return 384u;
+	return 504u;
+}
+
+static void mirisdr_rspduo_select_format(mirisdr_dev_t *p)
+{
+	switch (mirisdr_rspduo_format_samples(p->rate)) {
+	case 252u: p->format = MIRISDR_FORMAT_252_S16; break;
+	case 336u: p->format = MIRISDR_FORMAT_336_S16; break;
+	case 384u: p->format = MIRISDR_FORMAT_384_S16; break;
+	default: p->format = MIRISDR_FORMAT_504_S16; break;
+	}
 }
 
 int mirisdr_rspduo_pll_words(uint32_t rate, uint32_t *reg3_out, uint32_t *reg4_out)
@@ -88,7 +119,9 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 	/* automatic choice format */
 	if (p->format_auto == MIRISDR_FORMAT_AUTO_ON)
 	{
-		if (p->rate <= 6048000) {
+		if (p->usb_pid == 0x3020u) {
+			mirisdr_rspduo_select_format(p);
+		} else if (p->rate <= 6048000) {
 			p->format = MIRISDR_FORMAT_252_S16;
 		} else if (p->rate <= 8064000) {
 			p->format = MIRISDR_FORMAT_336_S16;
@@ -108,11 +141,11 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 #if MIRISDR_DEBUG >= 1
 		fprintf( stderr, "format: 252\n");
 #endif
-		/* The live RSPduo delivers the full six-megasample stream with the
-		 * standard 252-word format value.  Retain the captured 0x05 value for
-		 * other rates until each tuple has its own hardware evidence. */
+		/* The live RSPduo delivers the full 3.072- and 6-megasample streams
+		 * with the standard 252-word format value. Retain the captured 0x05
+		 * value for other rates until each tuple has hardware evidence. */
 		mirisdr_write_reg(p, 0x07, p->usb_pid == 0x3020u ?
-		                  mirisdr_rspduo_252_format_word(p->rate) : 0x000094);
+		                  mirisdr_rspduo_format_word(p->rate) : 0x000094);
 		p->addr = 252 + 2;
 		break;
 	case MIRISDR_FORMAT_336_S16:
@@ -120,7 +153,8 @@ int mirisdr_set_hard(mirisdr_dev_t *p)
 #if MIRISDR_DEBUG >= 1
 		fprintf( stderr, "format: 336\n");
 #endif
-		mirisdr_write_reg(p, 0x07, 0x000085);
+		mirisdr_write_reg(p, 0x07, p->usb_pid == 0x3020u ?
+		                  mirisdr_rspduo_format_word(p->rate) : 0x000085);
 		p->addr = 336 + 2;
 		break;
 	case MIRISDR_FORMAT_384_S16:
@@ -235,9 +269,7 @@ int mirisdr_set_sample_rate(mirisdr_dev_t *p, uint32_t rate)
     p->rate = rate;
     if (p->usb_pid == 0x3020u) {
         p->format_auto = MIRISDR_FORMAT_AUTO_OFF;
-        p->format = rate <= 6048000u ? MIRISDR_FORMAT_252_S16 :
-                    rate <= 8064000u ? MIRISDR_FORMAT_336_S16 :
-                    rate <= 9216000u ? MIRISDR_FORMAT_384_S16 : MIRISDR_FORMAT_504_S16;
+        mirisdr_rspduo_select_format(p);
     }
 
     return mirisdr_set_hard(p);
