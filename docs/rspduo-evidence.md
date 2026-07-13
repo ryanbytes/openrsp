@@ -927,3 +927,59 @@ No calibrated RF source or spectrum analyzer was attached for the new band
 sweeps, so this evidence proves accepted state coverage, reconstructed command
 parity, stream continuity, cleanup, and recovery--not the absolute gain or
 noise figure of each LNA state.
+
+## Initialized RSPduo mode transitions (2026-07-13)
+
+The public API 3.15 guide documents `sdrplay_api_SwapRspDuoMode()` as an
+initialized master-application operation that updates the current device
+enumeration and device-parameter pointer. It also limits
+`sdrplay_api_SwapRspDuoDualTunerModeSampleRate()` to 6/8 MHz master/slave
+operation. In a directly owned dual session, the official 3.15.1 library
+returned `InvalidParam` for both requested sample-rate changes and left the
+6 MHz rate and both streams unchanged.
+
+Clean-room reference probes then started valid direct single mode at 2.048 MHz,
+zero IF and valid direct dual mode at a shared 6 MHz ADC rate with 1.620 MHz low
+IF. In both single-to-dual and dual-to-single directions, the official function
+returned success and updated the mode, tuner, sample rate, A/B pointers, and
+device-parameter pointer. Both IQ streams then stopped. A second `Init` returned
+`AlreadyInitialised`, and cleanup terminated the probe with signal 10 instead
+of returning from `Uninit`. Three single-to-dual observations and one
+dual-to-single observation reproduced the stopped-stream behavior. This is
+recorded as an API 3.15.1 direct-mode defect; OpenRSP does not intentionally
+reproduce the dead stream or cleanup signal.
+
+Protocol version 7 adds an explicit whole-mode swap request and a separate
+resume command. The daemon reconfigures the direct hardware while IQ is paused.
+The compatibility layer then changes its mode and parameter pointers,
+reconfigures per-tuner low-IF DSP and decimation, clears queued old-mode frames,
+resets A/B sample timelines and gain/AGC state, and only then resumes the
+daemon. A deterministic mock-daemon fixture verifies single A to dual to single
+B, separate A/B callbacks and resets, an independent tuner-B frequency update,
+the direct-dual sample-rate error, pointer changes, and Stream-A routing after
+returning to single B.
+
+The installed Release build completed separate live single-to-dual and
+dual-to-single probes on the physical RSPduo without a USB reset or replug. The
+single-to-dual run delivered 9,477,888 A samples and 6,381,312 B samples, added
+one reset to each stream, and cleaned up normally. The dual-to-single run
+delivered 9,547,264 A samples, stopped B at 3,042,816 samples, added one A reset,
+and cleaned up normally. A combined single-to-dual-to-single run reported
+success for both transitions, 8,093,440 A samples, 2,768,640 B samples, three A
+resets, one B reset, and complete cleanup.
+
+Independent dual RF, gain, and hardware-control updates subsequently delivered
+8,053,248 A samples and 8,047,872 B samples with separate acknowledgements. A
+single A-to-B-to-A regression delivered 8,552,448 samples through Stream A,
+three resets, no Stream B callbacks, and delivered tuner B's gain-change
+acknowledgement through Stream A. A separate single-B 6 MHz/1.620 MHz low-IF
+run delivered 8,039,083 samples over 4.016 seconds (0.0872% rate error),
+acknowledged its RF/gain update, and cleaned up normally. Killing the daemon
+during a disposable stream produced a replacement daemon PID; three fresh
+lifecycle cycles then streamed, acknowledged rate/RF/gain changes, and cleaned
+up with one reset and
+zero discontinuities per cycle, without a physical replug. Debug, Release, and
+ASan/UBSan builds each passed all 14 hardware-free tests after the transition
+work. The pinned upstream SoapySDRPlay3 module was rebuilt against the installed
+library after the protocol-v7 change; `SoapySDRUtil --info` loaded the module
+and registered the `sdrplay` factory.

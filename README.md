@@ -24,7 +24,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
 | API 3.15 public headers | Documented entry points, typedefs, enums, fields, sizes, and standard header names provided |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
-| API 3.15 RSPduo modes | Live A/B single-tuner swap and simultaneous Stream A/Stream B dual mode hardware-verified |
+| API 3.15 RSPduo modes | Live A/B single-tuner swap, initialized single/dual mode transitions, and simultaneous Stream A/Stream B dual mode hardware-verified |
 | RSPduo hardware controls | Bias-T on tuner B, RF/DAB notch on A/B, external-reference output on A/B, and tuner-A AM port/notch match observed API/USB control behavior; electrical voltage/filter/reference output not instrument-measured |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
@@ -68,6 +68,14 @@ more than 1.536 MHz requested RF bandwidth; OpenRSP then delivers approximately
 mode combinations return a specific API error instead of false success. The
 complete 3.15 update-reason values are exposed in the compatibility header so
 applications can compile against the implemented ABI.
+
+`sdrplay_api_SwapRspDuoMode()` supports initialized single-to-dual and
+dual-to-single transitions. It updates the caller's device enumeration and
+channel pointers before resuming IQ, produces a fresh reset on each newly
+active stream, and keeps single-tuner B on Stream A. Direct dual sessions return
+`InvalidParam` from `sdrplay_api_SwapRspDuoDualTunerModeSampleRate()` because
+the documented 6/8 MHz hot-swap entry point is restricted to master/slave mode,
+which OpenRSP does not yet expose.
 
 ## Build and test
 
@@ -117,6 +125,8 @@ gain change, and cleanup:
 ```sh
 ./build/sdrplay-rspduo-gain-probe A 100000000 all
 ./build/sdrplay-rspduo-gain-probe B 1500000000 8
+./build/sdrplay-rspduo-mode-probe mode-to-dual
+./build/sdrplay-rspduo-mode-probe mode-to-single
 ```
 
 This is a disruptive hardware test. Stop radio applications first. A successful

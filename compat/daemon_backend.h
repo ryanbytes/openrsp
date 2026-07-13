@@ -34,6 +34,9 @@ int openrsp_daemon_backend_update(openrsp_daemon_backend *backend,
                                   const openrsp_radio_config *config, uint32_t changed_flags);
 int openrsp_daemon_backend_swap(openrsp_daemon_backend *backend,
                                 const openrsp_swap_request *swap);
+int openrsp_daemon_backend_swap_mode(openrsp_daemon_backend *backend,
+                                     const openrsp_mode_swap_request *swap);
+int openrsp_daemon_backend_resume_mode(openrsp_daemon_backend *backend);
 int openrsp_daemon_backend_stop(openrsp_daemon_backend *backend);
 void openrsp_daemon_backend_close(openrsp_daemon_backend *backend);
 

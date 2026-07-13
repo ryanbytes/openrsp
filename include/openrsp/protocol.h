@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 6u
+#define OPENRSP_PROTOCOL_VERSION 7u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -23,6 +23,8 @@ typedef enum {
     OPENRSP_CMD_UNLOCK_API = 10,
     OPENRSP_CMD_CONFIGURE_DUAL = 11,
     OPENRSP_CMD_SWAP_TUNER = 12,
+    OPENRSP_CMD_SWAP_MODE = 13,
+    OPENRSP_CMD_RESUME_MODE = 14,
     OPENRSP_MSG_RESPONSE = 0x8000,
     OPENRSP_EVENT_IQ = 0x8001,
     OPENRSP_EVENT_DEVICE = 0x8002,
@@ -117,6 +119,16 @@ typedef struct {
     uint32_t reserved;
     openrsp_radio_config config;
 } openrsp_swap_request;
+
+#define OPENRSP_MODE_SINGLE 1u
+#define OPENRSP_MODE_DUAL 2u
+
+typedef struct {
+    uint32_t mode;
+    uint32_t reserved;
+    openrsp_radio_config single;
+    openrsp_dual_config dual;
+} openrsp_mode_swap_request;
 
 typedef struct {
     uint32_t status;

@@ -9,7 +9,7 @@ The intended layers are:
 3. `core`: stable device/session/stream state machines with no global daemon.
 4. `compat`: optional SoapySDR and SDRplay API 3-compatible adapters.
 
-Daemon protocol version 6 represents RSPduo mode explicitly. A single-tuner
+Daemon protocol version 7 represents RSPduo mode explicitly. A single-tuner
 configuration selects A or B and emits one IQ event consumed as API Stream A.
 A dual configuration carries a shared ADC rate plus separate A and B RF/gain
 configuration and emits distinguishable A and B IQ events. Update requests
@@ -20,6 +20,15 @@ external-reference, AM-port, and AM-notch state so recovery and tuner swaps can
 restore controls without a second out-of-band state model. AM controls are
 tuner-A-only; a direct protocol update that addresses them to tuner B is
 rejected.
+
+An initialized API mode transition is a two-phase daemon operation. The swap
+request stops and closes the old hardware session, opens and configures the
+target mode, and leaves IQ paused. Only after the compatibility layer has
+atomically changed its A/B parameter pointers, DSP state, callback queue,
+sample counters, and reset state does it send the resume request. This prevents
+the first target-mode B frame from racing the application-visible mode change.
+If hardware reconfiguration fails, the daemon attempts to restore and restart
+the old mode before returning the error.
 
 The core owns no unbounded wait. Every submitted transfer has one owner, one completion path, and a cancellation path. Device removal is a normal state transition. Callbacks never perform blocking control transfers. Recovery happens inside a device session, not through a machine-wide privileged service restart.
 
@@ -40,7 +49,9 @@ The USB reader uses session-owned completed-transfer buffers and separates the
 two ADC lanes without allocating in the steady-state completion path. A live
 single-tuner swap stops the stream, changes the selected frontend while
 preserving the active channel settings, restarts it, and continues to expose
-only Stream A.
+only Stream A. A live single/dual mode transition preserves the stored A and B
+channel settings, resets the newly active callback timelines, and starts dual
+IQ only after both application parameter pointers are valid.
 
 ## Compatibility policy
 

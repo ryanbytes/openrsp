@@ -84,6 +84,8 @@ typedef struct {
     pthread_mutex_t stream_callback_lock;
     pthread_cond_t stream_callback_ready;
     int stream_callback_stop;
+    int stream_callback_paused;
+    int stream_callback_active;
     unsigned int stream_callback_head;
     unsigned int stream_callback_count;
     unsigned int stream_callback_drop_count;
@@ -772,7 +774,8 @@ static void *stream_callback_thread_main(void *opaque)
     compat_device_context *device = opaque;
     for (;;) {
         (void)pthread_mutex_lock(&device->stream_callback_lock);
-        while (device->stream_callback_count == 0u && !device->stream_callback_stop)
+        while ((device->stream_callback_count == 0u ||
+                device->stream_callback_paused) && !device->stream_callback_stop)
             (void)pthread_cond_wait(&device->stream_callback_ready,
                                     &device->stream_callback_lock);
         if (device->stream_callback_stop) {
@@ -797,6 +800,7 @@ static void *stream_callback_thread_main(void *opaque)
         device->stream_callback_head =
             (device->stream_callback_head + 1u) % OPENRSP_STREAM_QUEUE_CAPACITY;
         --device->stream_callback_count;
+        device->stream_callback_active = 1;
         *seen = 1;
         *next = first_sample + (unsigned int)samples;
         (void)pthread_mutex_unlock(&device->stream_callback_lock);
@@ -815,6 +819,10 @@ static void *stream_callback_thread_main(void *opaque)
                 device->callbacks.StreamBCbFn : device->callbacks.StreamACbFn;
             callback(device->callback_i, device->callback_q, &params, 0u, reset,
                      device->callback_context);
+            (void)pthread_mutex_lock(&device->stream_callback_lock);
+            device->stream_callback_active = 0;
+            (void)pthread_cond_broadcast(&device->stream_callback_ready);
+            (void)pthread_mutex_unlock(&device->stream_callback_lock);
             continue;
         }
         for (size_t offset = 0u; offset < samples;) {
@@ -837,6 +845,10 @@ static void *stream_callback_thread_main(void *opaque)
                      device->callback_context);
             offset += chunk;
         }
+        (void)pthread_mutex_lock(&device->stream_callback_lock);
+        device->stream_callback_active = 0;
+        (void)pthread_cond_broadcast(&device->stream_callback_ready);
+        (void)pthread_mutex_unlock(&device->stream_callback_lock);
     }
     return NULL;
 }
@@ -849,6 +861,8 @@ static int start_stream_callback_thread(compat_device_context *device)
         return -1;
     }
     device->stream_callback_stop = 0;
+    device->stream_callback_paused = 0;
+    device->stream_callback_active = 0;
     device->stream_callback_head = 0u;
     device->stream_callback_count = 0u;
     device->stream_callback_drop_count = 0u;
@@ -862,6 +876,26 @@ static int start_stream_callback_thread(compat_device_context *device)
     }
     device->stream_callback_thread_started = 1;
     return 0;
+}
+
+static void pause_stream_callbacks(compat_device_context *device)
+{
+    (void)pthread_mutex_lock(&device->stream_callback_lock);
+    device->stream_callback_paused = 1;
+    while (device->stream_callback_active)
+        (void)pthread_cond_wait(&device->stream_callback_ready,
+                                &device->stream_callback_lock);
+    device->stream_callback_head = 0u;
+    device->stream_callback_count = 0u;
+    (void)pthread_mutex_unlock(&device->stream_callback_lock);
+}
+
+static void resume_stream_callbacks(compat_device_context *device)
+{
+    (void)pthread_mutex_lock(&device->stream_callback_lock);
+    device->stream_callback_paused = 0;
+    (void)pthread_cond_signal(&device->stream_callback_ready);
+    (void)pthread_mutex_unlock(&device->stream_callback_lock);
 }
 
 static void stop_stream_callback_thread(compat_device_context *device)
@@ -925,8 +959,11 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
                                    void *opaque)
 {
     compat_device_context *device = opaque;
-    sdrplay_api_TunerSelectT tuner = protocol_tuner == OPENRSP_TUNER_B ?
-        sdrplay_api_Tuner_B : sdrplay_api_Tuner_A;
+    sdrplay_api_TunerSelectT tuner =
+        device->mode == sdrplay_api_RspDuoMode_Dual_Tuner ?
+        (protocol_tuner == OPENRSP_TUNER_B ? sdrplay_api_Tuner_B :
+                                             sdrplay_api_Tuner_A) :
+        device->tuner;
     uint32_t *last_sequence = tuner == sdrplay_api_Tuner_B ?
         &device->last_iq_sequence_b : &device->last_iq_sequence;
     int *sequence_seen = tuner == sdrplay_api_Tuner_B ?
@@ -1382,7 +1419,9 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
     (void)pthread_mutex_lock(&decimation_lock);
     int dsp_result = openrsp_low_if_configure(
-        &rspduo.low_if_dsp, rspduo.dev_params.fsFreq.fsHz,
+        rspduo.tuner == sdrplay_api_Tuner_B ?
+            &rspduo.low_if_dsp_b : &rspduo.low_if_dsp,
+        rspduo.dev_params.fsFreq.fsHz,
         (int)channel->tunerParams.ifType * 1000);
     (void)pthread_mutex_unlock(&decimation_lock);
     if (dsp_result != 0 ||
@@ -1724,28 +1763,73 @@ sdrplay_api_ErrT sdrplay_api_SwapRspDuoActiveTuner(
         .tuner = next == sdrplay_api_Tuner_B ? OPENRSP_TUNER_B : OPENRSP_TUNER_A
     };
     fill_radio_config_tuner(&rspduo, next, &swap.config);
+    pause_stream_callbacks(&rspduo);
     pthread_mutex_lock(&hardware_lock);
     int result = openrsp_daemon_backend_swap(rspduo.backend, &swap);
     if (result >= 0) {
+        pause_stream_callbacks(&rspduo);
+        sdrplay_api_RxChannelParamsT *next_channel =
+            channel_for_tuner(&rspduo, next);
+        unsigned int factor = next_channel->ctrlParams.decimation.enable != 0u ?
+            next_channel->ctrlParams.decimation.decimationFactor : 1u;
+        (void)pthread_mutex_lock(&decimation_lock);
+        int dsp_result = openrsp_low_if_configure(
+            next == sdrplay_api_Tuner_B ? &rspduo.low_if_dsp_b :
+                                          &rspduo.low_if_dsp,
+            rspduo.dev_params.fsFreq.fsHz,
+            (int)next_channel->tunerParams.ifType * 1000);
+        (void)pthread_mutex_unlock(&decimation_lock);
+        if (dsp_result != 0 || configure_decimator(&rspduo, next, factor) != 0) {
+            atomic_store(&rspduo.stream_state, -1);
+            pthread_mutex_unlock(&hardware_lock);
+            resume_stream_callbacks(&rspduo);
+            return sdrplay_api_HwError;
+        }
         rspduo.tuner = next;
         *current_tuner = next;
         rspduo.params.rxChannelA = next == sdrplay_api_Tuner_A ? &rspduo.channel_a : NULL;
         rspduo.params.rxChannelB = next == sdrplay_api_Tuner_B ? &rspduo.channel_b : NULL;
-        rspduo.first_callback = 1u;
-        rspduo.iq_sequence_seen = 0;
+        (void)pthread_mutex_lock(&rspduo.stream_callback_lock);
+        rspduo.stream_callback_head = 0u;
+        rspduo.stream_callback_count = 0u;
+        if (next == sdrplay_api_Tuner_B)
+            rspduo.stream_callback_seen_b = 0;
+        else
+            rspduo.stream_callback_seen = 0;
+        (void)pthread_mutex_unlock(&rspduo.stream_callback_lock);
+        if (next == sdrplay_api_Tuner_B) {
+            rspduo.first_callback_b = 1u;
+            rspduo.iq_sequence_seen_b = 0;
+            atomic_store(&rspduo.sample_number_b, 0u);
+        } else {
+            rspduo.first_callback = 1u;
+            rspduo.iq_sequence_seen = 0;
+            atomic_store(&rspduo.sample_number, 0u);
+        }
+        if (openrsp_daemon_backend_resume_mode(rspduo.backend) < 0) {
+            atomic_store(&rspduo.stream_state, -1);
+            pthread_mutex_unlock(&hardware_lock);
+            resume_stream_callbacks(&rspduo);
+            return sdrplay_api_HwError;
+        }
     } else {
         *channel_for_tuner(&rspduo, next) = saved;
     }
     pthread_mutex_unlock(&hardware_lock);
+    resume_stream_callbacks(&rspduo);
     return result >= 0 ? sdrplay_api_Success : sdrplay_api_HwError;
 }
 
 sdrplay_api_ErrT sdrplay_api_SwapRspDuoDualTunerModeSampleRate(
     HANDLE dev, double *current_sample_rate, double new_sample_rate)
 {
-    (void)new_sample_rate;
     if (dev != &rspduo || current_sample_rate == NULL) return sdrplay_api_InvalidParam;
-    return sdrplay_api_InvalidMode;
+    if (!rspduo.initialized) return sdrplay_api_InvalidMode;
+    /* API 3.15.1 restricts this entry point to master/slave operation.  A
+     * directly owned dual-tuner session returns InvalidParam; OpenRSP does not
+     * yet expose master/slave ownership. */
+    (void)new_sample_rate;
+    return sdrplay_api_InvalidParam;
 }
 
 sdrplay_api_ErrT sdrplay_api_SwapRspDuoMode(
@@ -1754,12 +1838,159 @@ sdrplay_api_ErrT sdrplay_api_SwapRspDuoMode(
     sdrplay_api_Bw_MHzT bandwidth, sdrplay_api_If_kHzT if_type,
     sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port)
 {
-    (void)mode;
-    (void)sample_rate;
-    (void)tuner;
-    (void)bandwidth;
-    (void)if_type;
-    (void)tuner1_am_port;
     if (current_device == NULL || device_params == NULL) return sdrplay_api_InvalidParam;
-    return sdrplay_api_InvalidMode;
+    if (current_device->dev != &rspduo || !rspduo.initialized)
+        return sdrplay_api_InvalidMode;
+    if (mode != sdrplay_api_RspDuoMode_Single_Tuner &&
+        mode != sdrplay_api_RspDuoMode_Dual_Tuner)
+        return sdrplay_api_InvalidParam;
+    if (mode == rspduo.mode) return sdrplay_api_InvalidMode;
+    if (!isfinite(sample_rate) || !valid_bandwidth(bandwidth) ||
+        !valid_if(if_type) ||
+        (tuner1_am_port != sdrplay_api_RspDuo_AMPORT_1 &&
+         tuner1_am_port != sdrplay_api_RspDuo_AMPORT_2))
+        return sdrplay_api_OutOfRange;
+    if (mode == sdrplay_api_RspDuoMode_Dual_Tuner) {
+        sdrplay_api_If_kHzT required_if = sample_rate == 6000000.0 ?
+            sdrplay_api_IF_1_620 : sample_rate == 8000000.0 ?
+            sdrplay_api_IF_2_048 : sdrplay_api_IF_Undefined;
+        if (tuner != sdrplay_api_Tuner_Both || required_if == sdrplay_api_IF_Undefined ||
+            if_type != required_if || bandwidth > sdrplay_api_BW_1_536 ||
+            rspduo.callbacks.StreamBCbFn == NULL)
+            return sdrplay_api_OutOfRange;
+    } else if ((tuner != sdrplay_api_Tuner_A && tuner != sdrplay_api_Tuner_B) ||
+               sample_rate < 2000000.0 || sample_rate > 10660000.0 ||
+               (if_type != sdrplay_api_IF_Zero && bandwidth > sdrplay_api_BW_1_536)) {
+        return sdrplay_api_OutOfRange;
+    }
+
+    sdrplay_api_DevParamsT saved_dev = rspduo.dev_params;
+    sdrplay_api_RxChannelParamsT saved_a = rspduo.channel_a;
+    sdrplay_api_RxChannelParamsT saved_b = rspduo.channel_b;
+    rspduo.dev_params.fsFreq.fsHz = sample_rate;
+    sdrplay_api_RxChannelParamsT *target =
+        tuner == sdrplay_api_Tuner_B ? &rspduo.channel_b : &rspduo.channel_a;
+    if (mode == sdrplay_api_RspDuoMode_Dual_Tuner) {
+        rspduo.channel_a.tunerParams.bwType = bandwidth;
+        rspduo.channel_b.tunerParams.bwType = bandwidth;
+        rspduo.channel_a.tunerParams.ifType = if_type;
+        rspduo.channel_b.tunerParams.ifType = if_type;
+        rspduo.channel_a.rspDuoTunerParams.tuner1AmPortSel = tuner1_am_port;
+    } else {
+        target->tunerParams.bwType = bandwidth;
+        target->tunerParams.ifType = if_type;
+        if (tuner == sdrplay_api_Tuner_A)
+            target->rspDuoTunerParams.tuner1AmPortSel = tuner1_am_port;
+    }
+
+    openrsp_mode_swap_request swap = {
+        .mode = mode == sdrplay_api_RspDuoMode_Dual_Tuner ?
+                OPENRSP_MODE_DUAL : OPENRSP_MODE_SINGLE
+    };
+    if (swap.mode == OPENRSP_MODE_DUAL) {
+        swap.dual.sample_rate_hz = (uint32_t)sample_rate;
+        fill_radio_config_tuner(&rspduo, sdrplay_api_Tuner_A,
+                                &swap.dual.channel_a);
+        fill_radio_config_tuner(&rspduo, sdrplay_api_Tuner_B,
+                                &swap.dual.channel_b);
+    } else {
+        fill_radio_config_tuner(&rspduo, tuner, &swap.single);
+    }
+
+    pause_stream_callbacks(&rspduo);
+    (void)pthread_mutex_lock(&hardware_lock);
+    int result = openrsp_daemon_backend_swap_mode(rspduo.backend, &swap);
+    if (result < 0) {
+        rspduo.dev_params = saved_dev;
+        rspduo.channel_a = saved_a;
+        rspduo.channel_b = saved_b;
+        (void)pthread_mutex_unlock(&hardware_lock);
+        resume_stream_callbacks(&rspduo);
+        return sdrplay_api_HwError;
+    }
+    pause_stream_callbacks(&rspduo);
+
+    rspduo.mode = mode;
+    rspduo.tuner = tuner;
+    rspduo.params.rxChannelA = tuner == sdrplay_api_Tuner_B ? NULL :
+                                                               &rspduo.channel_a;
+    rspduo.params.rxChannelB = tuner == sdrplay_api_Tuner_A ? NULL :
+                                                               &rspduo.channel_b;
+    if (tuner == sdrplay_api_Tuner_Both) {
+        rspduo.params.rxChannelA = &rspduo.channel_a;
+        rspduo.params.rxChannelB = &rspduo.channel_b;
+    }
+    current_device->rspDuoMode = mode;
+    current_device->tuner = tuner;
+    current_device->rspDuoSampleFreq = sample_rate;
+    *device_params = &rspduo.params;
+
+    sdrplay_api_RxChannelParamsT *stream_a_channel =
+        mode == sdrplay_api_RspDuoMode_Dual_Tuner ? &rspduo.channel_a : target;
+    openrsp_low_if_dsp *stream_a_dsp =
+        mode == sdrplay_api_RspDuoMode_Single_Tuner &&
+        tuner == sdrplay_api_Tuner_B ? &rspduo.low_if_dsp_b : &rspduo.low_if_dsp;
+    (void)pthread_mutex_lock(&decimation_lock);
+    int dsp_result = openrsp_low_if_configure(
+        stream_a_dsp, sample_rate,
+        (int)stream_a_channel->tunerParams.ifType * 1000);
+    if (dsp_result == 0 && mode == sdrplay_api_RspDuoMode_Dual_Tuner)
+        dsp_result = openrsp_low_if_configure(
+            &rspduo.low_if_dsp_b, sample_rate,
+            (int)rspduo.channel_b.tunerParams.ifType * 1000);
+    (void)pthread_mutex_unlock(&decimation_lock);
+    unsigned int factor_a = stream_a_channel->ctrlParams.decimation.enable != 0u ?
+        stream_a_channel->ctrlParams.decimation.decimationFactor : 1u;
+    unsigned int factor_b = rspduo.channel_b.ctrlParams.decimation.enable != 0u ?
+        rspduo.channel_b.ctrlParams.decimation.decimationFactor : 1u;
+    if (dsp_result != 0 || configure_decimator(&rspduo,
+                                                mode == sdrplay_api_RspDuoMode_Single_Tuner ?
+                                                tuner : sdrplay_api_Tuner_A,
+                                                factor_a) != 0 ||
+        (mode == sdrplay_api_RspDuoMode_Dual_Tuner &&
+         configure_decimator(&rspduo, sdrplay_api_Tuner_B, factor_b) != 0)) {
+        /* All values were validated before the hardware request, so reaching
+         * this path indicates an internal state error rather than a caller
+         * parameter problem. */
+        atomic_store(&rspduo.stream_state, -1);
+        (void)pthread_mutex_unlock(&hardware_lock);
+        resume_stream_callbacks(&rspduo);
+        return sdrplay_api_HwError;
+    }
+    (void)pthread_mutex_lock(&rspduo.stream_callback_lock);
+    rspduo.stream_callback_head = 0u;
+    rspduo.stream_callback_count = 0u;
+    rspduo.stream_callback_seen = 0;
+    rspduo.stream_callback_seen_b = 0;
+    (void)pthread_mutex_unlock(&rspduo.stream_callback_lock);
+    atomic_store(&rspduo.sample_number, 0u);
+    atomic_store(&rspduo.sample_number_b, 0u);
+    rspduo.last_iq_sequence = 0u;
+    rspduo.last_iq_sequence_b = 0u;
+    rspduo.iq_sequence_seen = 0;
+    rspduo.iq_sequence_seen_b = 0;
+    rspduo.first_callback = 1u;
+    rspduo.first_callback_b = 1u;
+    atomic_store(&rspduo.callback_samples,
+                 sample_rate > 9216000.0 ? 2016u : 1344u);
+    atomic_store(tuner == sdrplay_api_Tuner_B &&
+                 mode == sdrplay_api_RspDuoMode_Single_Tuner ?
+                 &rspduo.agc_mode_b : &rspduo.agc_mode,
+                 stream_a_channel->ctrlParams.agc.enable);
+    atomic_store(tuner == sdrplay_api_Tuner_B &&
+                 mode == sdrplay_api_RspDuoMode_Single_Tuner ?
+                 &rspduo.agc_setpoint_b : &rspduo.agc_setpoint,
+                 stream_a_channel->ctrlParams.agc.setPoint_dBfs);
+    atomic_store(&rspduo.agc_mode_b, rspduo.channel_b.ctrlParams.agc.enable);
+    atomic_store(&rspduo.agc_setpoint_b,
+                 rspduo.channel_b.ctrlParams.agc.setPoint_dBfs);
+    if (openrsp_daemon_backend_resume_mode(rspduo.backend) < 0) {
+        atomic_store(&rspduo.stream_state, -1);
+        (void)pthread_mutex_unlock(&hardware_lock);
+        resume_stream_callbacks(&rspduo);
+        return sdrplay_api_HwError;
+    }
+    (void)pthread_mutex_unlock(&hardware_lock);
+    resume_stream_callbacks(&rspduo);
+    return sdrplay_api_Success;
 }

@@ -43,6 +43,7 @@ typedef struct {
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
     bool recovery_config_pending;
+    bool mode_swap_paused;
     int recovery_identity_status;
     uint32_t stream_sequence[2];
     bool configured;
@@ -309,6 +310,7 @@ static void release_client(daemon_state *state, int descriptor)
     state->stream_error = false;
     state->stream_result = 0;
     state->dual_mode = false;
+    state->mode_swap_paused = false;
 }
 
 static void release_api_lock(daemon_state *state, int descriptor,
@@ -791,6 +793,7 @@ static int serve_request(int descriptor, daemon_state *state)
     uint32_t listed_count = 0u;
     openrsp_response response = {0};
     bool start_stream_after_response = false;
+    bool start_stream_after_error = false;
     response.sequence = request.sequence;
     if (request.magic != OPENRSP_PROTOCOL_MAGIC || request.version != OPENRSP_PROTOCOL_VERSION) {
         response.status = OPENRSP_STATUS_BAD_REQUEST;
@@ -855,7 +858,8 @@ static int serve_request(int descriptor, daemon_state *state)
             }
         }
     } else if (request.type == OPENRSP_CMD_START && request.payload_bytes == 0u &&
-               state->owner == descriptor && state->radio && !state->stream_thread_started) {
+               state->owner == descriptor && state->radio &&
+               !state->stream_thread_started && !state->mode_swap_paused) {
         state->streaming = true;
         state->stream_error = false;
         state->stream_result = 0;
@@ -922,10 +926,81 @@ static int serve_request(int descriptor, daemon_state *state)
                 state->bootstrap_config = swap->config;
                 state->bootstrap_configured = true;
                 state->configured = true;
-                start_stream_after_response = was_streaming;
+                state->mode_swap_paused = was_streaming;
                 state->stream_sequence[0] = 0u;
             }
         }
+    } else if (request.type == OPENRSP_CMD_SWAP_MODE &&
+               request.payload_bytes == sizeof(openrsp_mode_swap_request) &&
+               state->owner == descriptor && state->configured) {
+        const openrsp_mode_swap_request *swap =
+            (const openrsp_mode_swap_request *)payload;
+        bool valid_target = swap->mode == OPENRSP_MODE_SINGLE ?
+                            valid_config(&swap->single) :
+                            swap->mode == OPENRSP_MODE_DUAL ?
+                            valid_dual_config(&swap->dual) : false;
+        if (!valid_target) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
+        } else {
+            bool was_streaming = state->stream_thread_started;
+            bool old_dual_mode = state->dual_mode;
+            openrsp_radio_config old_config = state->config;
+            openrsp_radio_config old_bootstrap = state->bootstrap_config;
+            openrsp_dual_config old_dual_config = state->dual_config;
+            bool old_bootstrap_configured = state->bootstrap_configured;
+            if (was_streaming && stop_stream(state) != 0)
+                response.status = OPENRSP_STATUS_IO_ERROR;
+            if (response.status == OPENRSP_STATUS_OK && state->radio) {
+                (void)mirisdr_close(state->radio);
+                state->radio = NULL;
+            }
+            if (response.status == OPENRSP_STATUS_OK) {
+                response.status = swap->mode == OPENRSP_MODE_DUAL ?
+                    configure_dual_radio(state, &swap->dual) :
+                    configure_radio(state, &swap->single, 3u);
+            }
+            if (response.status == OPENRSP_STATUS_OK) {
+                if (swap->mode == OPENRSP_MODE_DUAL) {
+                    state->dual_config = swap->dual;
+                    state->bootstrap_configured = false;
+                } else {
+                    state->config = swap->single;
+                    state->bootstrap_config = swap->single;
+                    state->bootstrap_configured = true;
+                }
+                state->configured = true;
+                state->recovery_config_pending = false;
+                state->mode_swap_paused = was_streaming;
+                state->stream_sequence[0] = 0u;
+                state->stream_sequence[1] = 0u;
+                fprintf(stderr,
+                        "OPENRSPD_SWAP_MODE fd=%d mode=%u status=%u fs=%u\n",
+                        descriptor, swap->mode, response.status,
+                        swap->mode == OPENRSP_MODE_DUAL ?
+                        swap->dual.sample_rate_hz : swap->single.sample_rate_hz);
+                (void)fflush(stderr);
+            } else if (was_streaming) {
+                uint32_t rollback = old_dual_mode ?
+                    configure_dual_radio(state, &old_dual_config) :
+                    configure_radio(state, &old_config, 3u);
+                if (rollback == OPENRSP_STATUS_OK) {
+                    state->dual_mode = old_dual_mode;
+                    state->config = old_config;
+                    state->dual_config = old_dual_config;
+                    state->bootstrap_config = old_bootstrap;
+                    state->bootstrap_configured = old_bootstrap_configured;
+                    state->configured = true;
+                    state->mode_swap_paused = false;
+                    start_stream_after_response = true;
+                    start_stream_after_error = true;
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_RESUME_MODE &&
+               request.payload_bytes == 0u && state->owner == descriptor &&
+               state->configured && state->mode_swap_paused) {
+        state->mode_swap_paused = false;
+        start_stream_after_response = true;
     } else if (request.type == OPENRSP_CMD_UPDATE &&
                request.payload_bytes == sizeof(openrsp_update_request) &&
                state->owner == descriptor) {
@@ -978,13 +1053,14 @@ static int serve_request(int descriptor, daemon_state *state)
         }
         state->stream_thread_started = true;
     }
-    if (start_stream_after_response && response.status == OPENRSP_STATUS_OK) {
+    if (start_stream_after_response &&
+        (response.status == OPENRSP_STATUS_OK || start_stream_after_error)) {
         state->logged_usb_iq = false;
         state->logged_socket_iq = false;
         atomic_store(&state->first_iq_seen, false);
         atomic_store(&state->streaming, true);
         atomic_store(&state->stream_error, false);
-        state->recovery_config_pending = true;
+        state->recovery_config_pending = request.type == OPENRSP_CMD_SWAP_TUNER;
         if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0)
             return -1;
         state->stream_thread_started = true;

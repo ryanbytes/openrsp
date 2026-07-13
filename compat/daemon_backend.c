@@ -305,6 +305,19 @@ int openrsp_daemon_backend_swap(openrsp_daemon_backend *backend,
                                             swap, sizeof(*swap)) : -1;
 }
 
+int openrsp_daemon_backend_swap_mode(openrsp_daemon_backend *backend,
+                                     const openrsp_mode_swap_request *swap)
+{
+    return backend && swap ? async_request(backend, OPENRSP_CMD_SWAP_MODE,
+                                            swap, sizeof(*swap)) : -1;
+}
+
+int openrsp_daemon_backend_resume_mode(openrsp_daemon_backend *backend)
+{
+    return backend ? async_request(backend, OPENRSP_CMD_RESUME_MODE,
+                                    NULL, 0u) : -1;
+}
+
 int openrsp_daemon_backend_stop(openrsp_daemon_backend *backend)
 {
     return backend && backend->reader_started ?
