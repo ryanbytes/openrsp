@@ -368,6 +368,18 @@ factory. This verifies source/ABI integration but not Soapy stream behavior or
 future unpinned upstream changes. Hardware streaming remains a separate local
 gate because hosted CI has no receiver.
 
+Commit `c1d1bfc` then passed hosted macOS and Ubuntu run `29232008268`; the
+Ubuntu job also built and loaded the pinned upstream Soapy module. The deployed
+Release daemon and compatibility library matched the tested artifacts at
+SHA-256 `6dd862abcace409026f3fbfd69583351f0845165af9a113e3f0305211d4de444`
+and `d72141528e9805132725f1b069f81a4a667e6822912147c3ca9efef07de3482e`.
+A fresh Soapy module linked with an rpath to `/Library/OpenRSP/0.1/lib` then
+repeated the physical receive test against the installed service and converged
+to 1.98897 MS/s. The installed daemon logged 6 MS/s, 1.620 MHz IF, first IQ,
+and continuing AGC gain updates without a callback drop, IQ gap, device
+failure, or stream-stop error. SDRTrunk subsequently rediscovered the RSPduo
+and restored the Wabash channel and JMBE on the same installed artifacts.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
