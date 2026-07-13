@@ -205,6 +205,34 @@ serial_failed:
     return -1;
 }
 
+int mirisdr_device_requires_firmware (uint32_t index) {
+    ssize_t i, count;
+    size_t matched = 0u;
+    libusb_context *ctx = NULL;
+    libusb_device **list = NULL;
+    struct libusb_device_descriptor descriptor;
+    int result = -1;
+
+    if (libusb_init(&ctx) != 0) return -1;
+    count = libusb_get_device_list(ctx, &list);
+    if (count < 0) goto done;
+    for (i = 0; i < count; ++i) {
+        if (libusb_get_device_descriptor(list[i], &descriptor) != 0 ||
+            mirisdr_device_get(descriptor.idVendor, descriptor.idProduct) == NULL)
+            continue;
+        if (matched++ != index) continue;
+        result = descriptor.idVendor == 0x1df7u &&
+                 descriptor.idProduct == 0x3020u &&
+                 descriptor.iSerialNumber == 0u ? 1 : 0;
+        break;
+    }
+
+done:
+    if (list) libusb_free_device_list(list, 1);
+    if (ctx) libusb_exit(ctx);
+    return result;
+}
+
 /* vlastní implementace */
 int mirisdr_get_device_usb_strings (uint32_t index, char *manufact,
                                     char *product, char *serial) {

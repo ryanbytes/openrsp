@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -36,6 +37,7 @@ typedef struct {
     pthread_t stream_thread;
     pthread_mutex_t write_lock;
     atomic_bool control_write_pending;
+    atomic_bool client_write_error;
     bool logged_usb_iq;
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
@@ -156,6 +158,11 @@ static void stream_callback(unsigned char *buffer, uint32_t length, void *opaque
     uint32_t sequence = ++state->stream_sequence;
     if (write_frame(state, state->owner, OPENRSP_EVENT_IQ, sequence,
                     buffer, length) != 0) {
+        int write_error = errno;
+        if (!atomic_exchange(&state->client_write_error, true)) {
+            fprintf(stderr, "OPENRSPD_SOCKET_IQ_ERROR errno=%d\n", write_error);
+            (void)fflush(stderr);
+        }
         if (state->radio) (void)mirisdr_cancel_async(state->radio);
         return;
     }
@@ -516,6 +523,33 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
 static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
                                          size_t capacity)
 {
+    /* A physically replugged RSPduo first appears as the raw 1df7:3020
+     * firmware loader with no serial descriptor.  Stable-serial matching is
+     * impossible until the driver has loaded the locally installed firmware.
+     * Bootstrap only devices whose descriptor explicitly identifies that
+     * cold state; never guess from an index or from another receiver. */
+    for (uint32_t pass = 0u; pass < OPENRSPD_MAX_DEVICES; ++pass) {
+        uint32_t candidate_count = mirisdr_get_device_count();
+        bool bootstrapped = false;
+        for (uint32_t index = 0u; index < candidate_count; ++index) {
+            if (mirisdr_device_requires_firmware(index) != 1) continue;
+            fprintf(stderr, "OPENRSPD_COLD_BOOT index=%u status=starting\n", index);
+            (void)fflush(stderr);
+            mirisdr_dev_t *candidate = NULL;
+            int open_result = mirisdr_open(&candidate, index);
+            int close_result = candidate ? mirisdr_close(candidate) : 0;
+            fprintf(stderr,
+                    "OPENRSPD_COLD_BOOT index=%u status=%s open=%d close=%d\n",
+                    index, open_result == 0 ? "ready" : "failed",
+                    open_result, close_result);
+            (void)fflush(stderr);
+            if (open_result != 0) break;
+            bootstrapped = true;
+            break; /* Device indices can change after re-enumeration. */
+        }
+        if (!bootstrapped) break;
+    }
+
     uint32_t raw_count = mirisdr_get_device_count();
     uint32_t count = 0u;
     for (uint32_t raw_index = 0u; raw_index < raw_count; ++raw_index) {
@@ -741,6 +775,15 @@ static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
             (void)close(client);
             continue;
         }
+        /* A client can stop draining IQ after a device-removal callback while
+         * leaving its socket open.  Never let that wedge the USB callback and
+         * libusb event lock indefinitely. */
+        const struct timeval send_timeout = {.tv_sec = 2, .tv_usec = 0};
+        if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout,
+                       sizeof(send_timeout)) != 0) {
+            (void)close(client);
+            continue;
+        }
         bool stored = false;
         for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
             if (clients[index] >= 0) continue;
@@ -800,9 +843,22 @@ int main(void)
     atomic_init(&state.stream_result, 0);
     atomic_init(&state.first_iq_seen, false);
     atomic_init(&state.control_write_pending, false);
+    atomic_init(&state.client_write_error, false);
     int clients[OPENRSPD_MAX_CLIENTS];
     for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
     while (running) {
+        if (atomic_exchange(&state.client_write_error, false)) {
+            for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
+                if (clients[index] == state.owner) {
+                    fprintf(stderr, "OPENRSPD_CLIENT_EVICT fd=%d reason=iq-write-timeout\n",
+                            state.owner);
+                    (void)fflush(stderr);
+                    remove_client(&state, clients, index);
+                    break;
+                }
+            }
+            continue;
+        }
         recover_failed_stream(&state);
         finish_recovery_gain(&state);
         struct pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];

@@ -56,6 +56,7 @@ MIRISDR_API const char *mirisdr_get_device_name (uint32_t index);
 MIRISDR_API int mirisdr_get_device_info (uint32_t index, uint16_t *vendor_id,
                                          uint16_t *product_id, char *manufact,
                                          char *product, char *serial);
+MIRISDR_API int mirisdr_device_requires_firmware (uint32_t index);
 MIRISDR_API int mirisdr_get_device_usb_strings (uint32_t index, char *manufact, char *product, char *serial);
 
 /* main */
