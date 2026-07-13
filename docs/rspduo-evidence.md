@@ -435,8 +435,10 @@ programs ADC register 3 as `0x01ca07` and packet-format register 7 as
 was one bit higher at every sample-rate range. The same discrepancy was
 observed at 2.048 MS/s (`0x01081f` official versus `0x01181f` old OpenRSP).
 OpenRSP now uses the observed `0`, `4`, `8`, and `c` filter-mode nibbles and
-passes the hardware's complex I/Q pair directly. The single-lane Hilbert path
-and its synthetic image-rejection test were removed.
+passes the hardware's complex I/Q pair directly. The official service exports
+an `IQSumDiff` helper, but the installed reference binary has no call site for
+that helper in its receive pipeline. The single-lane Hilbert path and its
+synthetic image-rejection test were removed.
 
 The public-API rate probe now also reports I/Q RMS, I/Q correlation, and
 aggregate power at seven symmetric FFT bins in each spectral half; it retains
@@ -727,6 +729,17 @@ and LNA 5 accepted GR 20, 30, 40, 50, and 59. Software AGC moved GR from 20 to
 These measurements verify tuner B independently in single-tuner mode. They do
 not verify dual-tuner operation, B spectrum orientation against a known
 connected carrier, or other RSPduo frequency-band GPIO tables.
+
+A later offset-tuned FM check used 101.1 MHz as a known connected signal at
+10 MS/s. Equal-looking energy on the opposite side of the display was not
+sufficient evidence of an image: the official API's demodulated positive and
+negative channels had correlation `0.000097`, showing that they were separate
+stations. OpenRSP measured `0.000760` under the same center-frequency,
+bandwidth, gain, LNA, tuner-B, and demodulation procedure. Its native callback
+rate error was `0.0280%`, and the installed Release daemon's output had both I
+and Q populated. This verifies that tuner B receives the FM station without
+duplicating its audio at the image frequency; it does not measure calibrated
+laboratory image rejection.
 
 ## RSPduo live swap and dual-tuner mode (2026-07-13)
 

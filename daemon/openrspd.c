@@ -397,14 +397,39 @@ static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *c
             return OPENRSP_STATUS_IO_ERROR; \
         } \
     } while (0)
-    OPENRSPD_CONFIG_STEP(
-        "rspduo",
-        mirisdr_configure_rspduo(radio, config->sample_rate_hz,
-                                 config->center_frequency_hz,
-                                 (uint32_t)config->if_frequency_hz,
-                                 config->bandwidth_hz,
-                                 config->gain_reduction_db,
-                                 config->lna_state));
+    if (config->tuner == OPENRSP_TUNER_B) {
+        /* Tuner B needs the complete frontend gain route followed by the
+         * final hardware apply.  Omitting that real-driver-matched sequence
+         * leaves the B spectrum imaged around the center frequency. */
+        OPENRSPD_CONFIG_STEP(
+            "rspduo-b",
+            mirisdr_configure_rspduo(radio, config->sample_rate_hz,
+                                     config->center_frequency_hz,
+                                     (uint32_t)config->if_frequency_hz,
+                                     config->bandwidth_hz,
+                                     config->gain_reduction_db,
+                                     config->lna_state));
+        return OPENRSP_STATUS_OK;
+    }
+    /* Preserve the hardware-verified initialization order.  Applying the
+     * requested RSPduo gain plan before the first IQ frame leaves tuner A
+     * streaming bytes but unable to decode known P25 control channels. */
+    OPENRSPD_CONFIG_STEP("hw-flavour",
+                        mirisdr_set_hw_flavour(radio, MIRISDR_HW_SDRPLAY));
+    OPENRSPD_CONFIG_STEP("sample-rate",
+                        mirisdr_set_sample_rate(radio, config->sample_rate_hz));
+    OPENRSPD_CONFIG_STEP("center-frequency",
+                        mirisdr_set_center_freq(radio, config->center_frequency_hz));
+    OPENRSPD_CONFIG_STEP("sample-format", mirisdr_set_sample_format(radio, "AUTO"));
+    OPENRSPD_CONFIG_STEP("transfer", mirisdr_set_transfer(radio, "BULK"));
+    OPENRSPD_CONFIG_STEP("if-frequency",
+                        mirisdr_set_if_freq(radio, (uint32_t)config->if_frequency_hz));
+    OPENRSPD_CONFIG_STEP("bandwidth",
+                        mirisdr_set_bandwidth(radio, config->bandwidth_hz));
+    OPENRSPD_CONFIG_STEP("gain-mode", mirisdr_set_tuner_gain_mode(radio, 1));
+    /* Start from the proven neutral register state.  The API applies the
+     * caller's requested GR/LNA setting after the first IQ frame. */
+    OPENRSPD_CONFIG_STEP("initial-gain", mirisdr_set_tuner_gain(radio, 102));
 #undef OPENRSPD_CONFIG_STEP
     return OPENRSP_STATUS_OK;
 }
