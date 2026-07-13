@@ -24,6 +24,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
 | IQ loss indication | Daemon frame-sequence gaps set the API stream reset flag and advance sample numbering |
+| AGC gain events | Applied software-AGC changes emit API `GainChange` payloads |
 | Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |

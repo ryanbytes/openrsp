@@ -192,6 +192,14 @@ checks both values and repeats the combined gap/decimation case to catch
 ordering races. A sequence restart (such as daemon recovery) sets reset without
 inventing a forward sample count.
 
+Software AGC now keeps its applied mode and set point in atomic shadow state;
+the worker no longer races application writes to the public parameter block.
+After a successful gain update it emits an API `GainChange` event containing
+baseband reduction, LNA reduction, and calculated current gain. The mock test
+enables AGC from a disabled state, supplies IQ, and requires a matching event;
+reloading the applied mode after the worker sleep prevents the first new peak
+from being consumed under a stale disabled mode.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

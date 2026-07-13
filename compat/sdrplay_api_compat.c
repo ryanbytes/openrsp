@@ -39,6 +39,8 @@ typedef struct {
     atomic_uint callback_samples;
     atomic_uint agc_peak;
     atomic_int agc_stop;
+    atomic_int agc_mode;
+    atomic_int agc_setpoint;
     atomic_uint decimation_factor;
     unsigned int decimation_taps;
     unsigned int decimation_position;
@@ -280,18 +282,20 @@ static void *agc_thread_main(void *opaque)
 {
     compat_device_context *device = opaque;
     while (!atomic_load(&device->agc_stop)) {
-        sdrplay_api_AgcControlT mode = device->channel_a.ctrlParams.agc.enable;
+        sdrplay_api_AgcControlT mode =
+            (sdrplay_api_AgcControlT)atomic_load(&device->agc_mode);
         unsigned int period_ms = agc_period_ms(mode);
         const struct timespec delay = {
             .tv_sec = period_ms / 1000u,
             .tv_nsec = (long)(period_ms % 1000u) * 1000000L
         };
         nanosleep(&delay, NULL);
+        mode = (sdrplay_api_AgcControlT)atomic_load(&device->agc_mode);
         unsigned int peak = atomic_exchange(&device->agc_peak, 0u);
         if (mode == sdrplay_api_AGC_DISABLE || peak == 0u || !device->initialized) continue;
 
         double level_dbfs = 20.0 * log10((double)peak / 32767.0);
-        int target = clamp_int(device->channel_a.ctrlParams.agc.setPoint_dBfs, -60, -20);
+        int target = clamp_int(atomic_load(&device->agc_setpoint), -60, -20);
         double error = level_dbfs - (double)target;
         int step = 0;
         if (error > 6.0) step = 3;
@@ -301,17 +305,32 @@ static void *agc_thread_main(void *opaque)
         if (step == 0) continue;
 
         pthread_mutex_lock(&hardware_lock);
+        sdrplay_api_EventParamsT event_params;
+        int notify_gain = 0;
         int old_reduction = device->channel_a.tunerParams.gain.gRdB;
         int new_reduction = clamp_int(old_reduction + step, 20, 59);
         if (new_reduction != old_reduction) {
             device->channel_a.tunerParams.gain.gRdB = new_reduction;
             if (apply_rspduo_gain_locked(device) >= 0) {
                 atomic_fetch_add(&device->pending_gr_changed, 1u);
+                int lna_reduction = 0;
+                (void)rspduo_lna_gain_reduction(
+                    device->channel_a.tunerParams.rfFreq.rfHz,
+                    device->channel_a.tunerParams.gain.LNAstate, &lna_reduction);
+                memset(&event_params, 0, sizeof(event_params));
+                event_params.gainParams.gRdB = (unsigned int)new_reduction;
+                event_params.gainParams.lnaGRdB = (unsigned int)lna_reduction;
+                event_params.gainParams.currGain =
+                    device->channel_a.tunerParams.gain.gainVals.curr;
+                notify_gain = device->callbacks.EventCbFn != NULL;
             } else {
                 device->channel_a.tunerParams.gain.gRdB = old_reduction;
             }
         }
         pthread_mutex_unlock(&hardware_lock);
+        if (notify_gain)
+            device->callbacks.EventCbFn(sdrplay_api_GainChange, sdrplay_api_Tuner_A,
+                                        &event_params, device->callback_context);
     }
     return NULL;
 }
@@ -428,6 +447,8 @@ static void reset_parameters(void)
     atomic_init(&rspduo.stream_state, 0);
     atomic_init(&rspduo.agc_peak, 0u);
     atomic_init(&rspduo.agc_stop, 0);
+    atomic_init(&rspduo.agc_mode, sdrplay_api_AGC_CTRL_EN);
+    atomic_init(&rspduo.agc_setpoint, -60);
     atomic_init(&rspduo.decimation_factor, 1u);
     rspduo.params.devParams = &rspduo.dev_params;
     rspduo.params.rxChannelA = &rspduo.channel_a;
@@ -629,6 +650,9 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     atomic_store(&rspduo.stream_state, 0);
     atomic_store(&rspduo.agc_stop, 0);
     atomic_store(&rspduo.agc_peak, 0u);
+    atomic_store(&rspduo.agc_mode, rspduo.channel_a.ctrlParams.agc.enable);
+    atomic_store(&rspduo.agc_setpoint,
+                 rspduo.channel_a.ctrlParams.agc.setPoint_dBfs);
     atomic_store(&rspduo.callback_samples,
                  rspduo.dev_params.fsFreq.fsHz > 9216000.0 ? 2016u : 1344u);
     rspduo.first_callback = 1;
@@ -714,6 +738,8 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
     int rf_changed = (reason & sdrplay_api_Update_Tuner_Frf) != 0u;
     int gr_changed = (reason & sdrplay_api_Update_Tuner_Gr) != 0u || rf_changed;
     uint32_t change_flags = protocol_change_flags(reason);
+    int previous_agc_mode = atomic_load(&rspduo.agc_mode);
+    int previous_agc_setpoint = atomic_load(&rspduo.agc_setpoint);
     pthread_mutex_lock(&hardware_lock);
     if (fs_changed) {
         atomic_store(&rspduo.callback_samples,
@@ -731,6 +757,9 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
             result = -1;
         } else {
             atomic_store(&rspduo.agc_peak, 0u);
+            atomic_store(&rspduo.agc_mode, mode);
+            atomic_store(&rspduo.agc_setpoint,
+                         rspduo.channel_a.ctrlParams.agc.setPoint_dBfs);
         }
     }
     /* Install the software-only state before a daemon response can be followed
@@ -766,6 +795,10 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
             if (rf_changed) atomic_fetch_add(&rspduo.pending_rf_changed, 1u);
             if (gr_changed) atomic_fetch_add(&rspduo.pending_gr_changed, 1u);
         }
+    }
+    if (result < 0 && (reason & sdrplay_api_Update_Ctrl_Agc) != 0u) {
+        atomic_store(&rspduo.agc_mode, previous_agc_mode);
+        atomic_store(&rspduo.agc_setpoint, previous_agc_setpoint);
     }
     pthread_mutex_unlock(&hardware_lock);
     return result < 0 ? sdrplay_api_HwError : sdrplay_api_Success;

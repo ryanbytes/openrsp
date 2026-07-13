@@ -182,6 +182,9 @@ typedef struct {
     unsigned int filter_frames;
     unsigned int passband_peak;
     unsigned int stopband_peak;
+    unsigned int gain_events;
+    unsigned int event_gr_db;
+    double event_current_gain;
 } callback_metrics;
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
@@ -226,7 +229,13 @@ static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tu
     assert(tuner == sdrplay_api_Tuner_A);
     assert(params != NULL);
     (void)pthread_mutex_lock(&metrics->lock);
-    if (event == sdrplay_api_DeviceFailure) ++metrics->device_failures;
+    if (event == sdrplay_api_DeviceFailure) {
+        ++metrics->device_failures;
+    } else if (event == sdrplay_api_GainChange) {
+        ++metrics->gain_events;
+        metrics->event_gr_db = params->gainParams.gRdB;
+        metrics->event_current_gain = params->gainParams.currGain;
+    }
     (void)pthread_cond_signal(&metrics->ready);
     (void)pthread_mutex_unlock(&metrics->lock);
 }
@@ -270,6 +279,22 @@ static int wait_for_device_failure(callback_metrics *metrics)
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&metrics->lock);
     while (metrics->device_failures == 0u) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_gain_event(callback_metrics *metrics)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->gain_events == 0u) {
         if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&metrics->lock);
             return -1;
@@ -406,6 +431,17 @@ int main(void)
            sdrplay_api_InvalidMode);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A, 0u,
                               0x80u) == sdrplay_api_InvalidParam);
+
+    params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_CTRL_EN;
+    params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -60;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Ctrl_Agc, 0u) ==
+           sdrplay_api_Success);
+    assert(wait_for_gain_event(&metrics) == 0);
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.event_gr_db > 42u);
+    assert(metrics.event_current_gain < 63.0);
+    (void)pthread_mutex_unlock(&metrics.lock);
 
     params->devParams->ppm = 2.5;
     (void)pthread_mutex_lock(&metrics.lock);
