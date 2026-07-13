@@ -4,6 +4,14 @@ project(openrsp VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+include(CheckLanguage)
+check_language(CXX)
+if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 11)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
 
 # glibc hides POSIX/GNU declarations such as usleep, getopt, and sigaction
 # under strict C11 unless a feature profile is selected.  Apple exposes these
@@ -114,6 +122,7 @@ target_link_libraries(openrsp-miri-probe PRIVATE openrsp_miri)
 
 if(UNIX)
     add_library(sdrplay_api_compat SHARED compat/sdrplay_api_compat.c)
+    target_compile_definitions(sdrplay_api_compat PRIVATE OPENRSP_SDRPLAY_API_BUILD=1)
     target_include_directories(sdrplay_api_compat PUBLIC compat)
     target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend Threads::Threads m)
     target_compile_options(sdrplay_api_compat PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -134,6 +143,22 @@ if(UNIX)
     target_include_directories(sdrplay-abi-layout-test PRIVATE compat)
     target_compile_options(sdrplay-abi-layout-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME sdrplay-abi-layout COMMAND sdrplay-abi-layout-test)
+
+    add_executable(sdrplay-header-compat-test tests/sdrplay_header_compat_test.c)
+    target_include_directories(sdrplay-header-compat-test PRIVATE compat)
+    target_link_libraries(sdrplay-header-compat-test PRIVATE sdrplay_api_compat)
+    target_compile_options(sdrplay-header-compat-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME sdrplay-header-compat COMMAND sdrplay-header-compat-test)
+
+    if(CMAKE_CXX_COMPILER)
+        add_executable(sdrplay-header-cpp-test tests/sdrplay_header_cpp_test.cpp)
+        target_include_directories(sdrplay-header-cpp-test PRIVATE compat)
+        target_link_libraries(sdrplay-header-cpp-test PRIVATE sdrplay_api_compat)
+        target_compile_options(sdrplay-header-cpp-test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME sdrplay-header-cpp COMMAND sdrplay-header-cpp-test)
+    endif()
 
     add_executable(sdrplay-compat-stream-test tools/sdrplay_compat_stream_test.c)
     target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat Threads::Threads m)

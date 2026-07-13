@@ -41,11 +41,44 @@ int main(void)
     FIELD(sdrplay_api_DevParamsT, mode);
     FIELD(sdrplay_api_DevParamsT, samplesPerPkt);
     FIELD(sdrplay_api_DevParamsT, rspDuoParams);
+    FIELD(sdrplay_api_DevParamsT, rspDxParams);
+
+    TYPE(sdrplay_api_Rsp1aParamsT);
+    FIELD(sdrplay_api_Rsp1aParamsT, rfNotchEnable);
+    FIELD(sdrplay_api_Rsp1aParamsT, rfDabNotchEnable);
+    TYPE(sdrplay_api_Rsp2ParamsT);
+    FIELD(sdrplay_api_Rsp2ParamsT, extRefOutputEn);
+    TYPE(sdrplay_api_RspDuoParamsT);
+    FIELD(sdrplay_api_RspDuoParamsT, extRefOutputEn);
+    TYPE(sdrplay_api_RspDxParamsT);
+    FIELD(sdrplay_api_RspDxParamsT, hdrEnable);
+    FIELD(sdrplay_api_RspDxParamsT, biasTEnable);
+    FIELD(sdrplay_api_RspDxParamsT, antennaSel);
+    FIELD(sdrplay_api_RspDxParamsT, rfNotchEnable);
+    FIELD(sdrplay_api_RspDxParamsT, rfDabNotchEnable);
 
     TYPE(sdrplay_api_RxChannelParamsT);
     FIELD(sdrplay_api_RxChannelParamsT, tunerParams);
     FIELD(sdrplay_api_RxChannelParamsT, ctrlParams);
     FIELD(sdrplay_api_RxChannelParamsT, rspDuoTunerParams);
+    FIELD(sdrplay_api_RxChannelParamsT, rspDxTunerParams);
+
+    TYPE(sdrplay_api_Rsp1aTunerParamsT);
+    FIELD(sdrplay_api_Rsp1aTunerParamsT, biasTEnable);
+    TYPE(sdrplay_api_Rsp2TunerParamsT);
+    FIELD(sdrplay_api_Rsp2TunerParamsT, biasTEnable);
+    FIELD(sdrplay_api_Rsp2TunerParamsT, amPortSel);
+    FIELD(sdrplay_api_Rsp2TunerParamsT, antennaSel);
+    FIELD(sdrplay_api_Rsp2TunerParamsT, rfNotchEnable);
+    TYPE(sdrplay_api_RspDuoTunerParamsT);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, biasTEnable);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, tuner1AmPortSel);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, tuner1AmNotchEnable);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, rfNotchEnable);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, rfDabNotchEnable);
+    FIELD(sdrplay_api_RspDuoTunerParamsT, resetSlaveFlags);
+    TYPE(sdrplay_api_RspDxTunerParamsT);
+    FIELD(sdrplay_api_RspDxTunerParamsT, hdrBw);
 
     TYPE(sdrplay_api_TunerParamsT);
     FIELD(sdrplay_api_TunerParamsT, gain);

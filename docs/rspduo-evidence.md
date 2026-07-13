@@ -126,11 +126,20 @@ not a calibrated RF gain measurement.
 ## ABI evidence (2026-07-12)
 
 The compatibility library exports every documented public symbol in the
-SDRplay API 3.15 header used for the audit.  Structure layout checks include
-`sdrplay_api_EventParamsT`, corrected to the official 16-byte size and 8-byte
-alignment on the tested arm64 macOS ABI.  Unit tests and an ASan/UBSan build
-pass; Apple AddressSanitizer leak detection is unavailable, so the sanitizer
-run uses `detect_leaks=0` and must not be described as a leak check.
+SDRplay API 3.15 header used for the audit. The independently written public
+headers now expose the documented model IDs, constants, enums, named parameter
+fields, callback and API function typedefs, and all ten conventional header
+names instead of using opaque padding placeholders for non-RSPduo models. A C
+consumer and a C++ consumer both compile and link against those headers.
+
+The layout tool was separately compiled against the official 3.15.1 headers
+from the locally expanded installer and against OpenRSP. Its complete output
+for device, channel, tuner, control, callback, error, RSP1A, RSP2, RSPduo, and
+RSPdx structures and named field offsets is byte-for-byte identical on arm64
+macOS. CI retains independent size assertions without requiring or distributing
+the official package. Unit tests and an ASan/UBSan build pass; Apple
+AddressSanitizer leak detection is unavailable, so the sanitizer run uses
+`detect_leaks=0` and must not be described as a leak check.
 
 ## Live unplug/replug recovery (2026-07-12)
 

@@ -5,14 +5,48 @@
 #include <stdint.h>
 
 #if defined(_WIN32)
+#if defined(OPENRSP_SDRPLAY_API_BUILD)
 #define OPENRSP_API __declspec(dllexport)
+#else
+#define OPENRSP_API __declspec(dllimport)
+#endif
 #else
 #define OPENRSP_API __attribute__((visibility("default")))
 #endif
 
 #define SDRPLAY_API_VERSION 3.15f
 #define SDRPLAY_MAX_DEVICES 16u
+#define SDRPLAY_MAX_TUNERS_PER_DEVICE 2u
 #define SDRPLAY_MAX_SER_NO_LEN 64u
+#define SDRPLAY_MAX_ROOT_NM_LEN 32u
+
+#define SDRPLAY_RSP1_ID 1u
+#define SDRPLAY_RSP1A_ID 255u
+#define SDRPLAY_RSP2_ID 2u
+#define SDRPLAY_RSPduo_ID 3u
+#define SDRPLAY_RSPdx_ID 4u
+#define SDRPLAY_RSP1B_ID 6u
+#define SDRPLAY_RSPdxR2_ID 7u
+#define MAX_BB_GR 59
+
+#define RSPIA_NUM_LNA_STATES 10
+#define RSPIA_NUM_LNA_STATES_AM 7
+#define RSPIA_NUM_LNA_STATES_LBAND 9
+#define RSPII_NUM_LNA_STATES 9
+#define RSPII_NUM_LNA_STATES_AMPORT 5
+#define RSPII_NUM_LNA_STATES_420MHZ 6
+#define RSPDUO_NUM_LNA_STATES 10
+#define RSPDUO_NUM_LNA_STATES_AMPORT 5
+#define RSPDUO_NUM_LNA_STATES_AM 7
+#define RSPDUO_NUM_LNA_STATES_LBAND 9
+#define RSPDX_NUM_LNA_STATES 28
+#define RSPDX_NUM_LNA_STATES_AMPORT2_0_12 19
+#define RSPDX_NUM_LNA_STATES_AMPORT2_12_50 20
+#define RSPDX_NUM_LNA_STATES_AMPORT2_50_60 25
+#define RSPDX_NUM_LNA_STATES_VHF_BAND3 27
+#define RSPDX_NUM_LNA_STATES_420MHZ 21
+#define RSPDX_NUM_LNA_STATES_LBAND 19
+#define RSPDX_NUM_LNA_STATES_DX 22
 
 typedef void *HANDLE;
 
@@ -79,21 +113,50 @@ typedef enum {
     sdrplay_api_IF_Undefined = -1, sdrplay_api_IF_Zero = 0, sdrplay_api_IF_0_450 = 450,
     sdrplay_api_IF_1_620 = 1620, sdrplay_api_IF_2_048 = 2048
 } sdrplay_api_If_kHzT;
-typedef enum { sdrplay_api_LO_Undefined = 0, sdrplay_api_LO_Auto = 1 } sdrplay_api_LoModeT;
+typedef enum {
+    sdrplay_api_LO_Undefined = 0, sdrplay_api_LO_Auto = 1,
+    sdrplay_api_LO_120MHz = 2, sdrplay_api_LO_144MHz = 3,
+    sdrplay_api_LO_168MHz = 4
+} sdrplay_api_LoModeT;
 typedef enum { sdrplay_api_EXTENDED_MIN_GR = 0, sdrplay_api_NORMAL_MIN_GR = 20 } sdrplay_api_MinGainReductionT;
 typedef enum {
     sdrplay_api_AGC_DISABLE = 0, sdrplay_api_AGC_100HZ = 1, sdrplay_api_AGC_50HZ = 2,
     sdrplay_api_AGC_5HZ = 3, sdrplay_api_AGC_CTRL_EN = 4
 } sdrplay_api_AgcControlT;
-typedef enum { sdrplay_api_ADSB_DECIMATION = 0 } sdrplay_api_AdsbModeT;
+typedef enum {
+    sdrplay_api_ADSB_DECIMATION = 0,
+    sdrplay_api_ADSB_NO_DECIMATION_LOWPASS = 1,
+    sdrplay_api_ADSB_NO_DECIMATION_BANDPASS_2MHZ = 2,
+    sdrplay_api_ADSB_NO_DECIMATION_BANDPASS_3MHZ = 3
+} sdrplay_api_AdsbModeT;
 
 typedef struct { double fsHz; unsigned char syncUpdate; unsigned char reCal; } sdrplay_api_FsFreqT;
 typedef struct { unsigned int sampleNum; unsigned int period; } sdrplay_api_SyncUpdateT;
 typedef struct { unsigned char resetGainUpdate, resetRfUpdate, resetFsUpdate; } sdrplay_api_ResetFlagsT;
 typedef struct { int extRefOutputEn; } sdrplay_api_RspDuoParamsT;
-typedef struct { unsigned char bytes[2]; } sdrplay_api_Rsp1aParamsT;
-typedef struct { unsigned char bytes[1]; } sdrplay_api_Rsp2ParamsT;
-typedef struct { unsigned int words[3]; } sdrplay_api_RspDxParamsT;
+typedef struct {
+    unsigned char rfNotchEnable;
+    unsigned char rfDabNotchEnable;
+} sdrplay_api_Rsp1aParamsT;
+typedef struct { unsigned char extRefOutputEn; } sdrplay_api_Rsp2ParamsT;
+typedef enum {
+    sdrplay_api_RspDx_ANTENNA_A = 0,
+    sdrplay_api_RspDx_ANTENNA_B = 1,
+    sdrplay_api_RspDx_ANTENNA_C = 2
+} sdrplay_api_RspDx_AntennaSelectT;
+typedef enum {
+    sdrplay_api_RspDx_HDRMODE_BW_0_200 = 0,
+    sdrplay_api_RspDx_HDRMODE_BW_0_500 = 1,
+    sdrplay_api_RspDx_HDRMODE_BW_1_200 = 2,
+    sdrplay_api_RspDx_HDRMODE_BW_1_700 = 3
+} sdrplay_api_RspDx_HdrModeBwT;
+typedef struct {
+    unsigned char hdrEnable;
+    unsigned char biasTEnable;
+    sdrplay_api_RspDx_AntennaSelectT antennaSel;
+    unsigned char rfNotchEnable;
+    unsigned char rfDabNotchEnable;
+} sdrplay_api_RspDxParamsT;
 typedef struct {
     double ppm;
     sdrplay_api_FsFreqT fsFreq;
@@ -128,8 +191,21 @@ typedef struct {
     sdrplay_api_DcOffsetT dcOffset; sdrplay_api_DecimationT decimation;
     sdrplay_api_AgcT agc; sdrplay_api_AdsbModeT adsbMode;
 } sdrplay_api_ControlParamsT;
-typedef struct { unsigned char bytes[1]; } sdrplay_api_Rsp1aTunerParamsT;
-typedef struct { unsigned int words[4]; } sdrplay_api_Rsp2TunerParamsT;
+typedef struct { unsigned char biasTEnable; } sdrplay_api_Rsp1aTunerParamsT;
+typedef enum {
+    sdrplay_api_Rsp2_ANTENNA_A = 5,
+    sdrplay_api_Rsp2_ANTENNA_B = 6
+} sdrplay_api_Rsp2_AntennaSelectT;
+typedef enum {
+    sdrplay_api_Rsp2_AMPORT_1 = 1,
+    sdrplay_api_Rsp2_AMPORT_2 = 0
+} sdrplay_api_Rsp2_AmPortSelectT;
+typedef struct {
+    unsigned char biasTEnable;
+    sdrplay_api_Rsp2_AmPortSelectT amPortSel;
+    sdrplay_api_Rsp2_AntennaSelectT antennaSel;
+    unsigned char rfNotchEnable;
+} sdrplay_api_Rsp2TunerParamsT;
 typedef enum { sdrplay_api_RspDuo_AMPORT_2 = 0, sdrplay_api_RspDuo_AMPORT_1 = 1 } sdrplay_api_RspDuo_AmPortSelectT;
 typedef struct { unsigned char resetGainUpdate, resetRfUpdate; } sdrplay_api_RspDuo_ResetSlaveFlagsT;
 typedef struct {
@@ -137,7 +213,7 @@ typedef struct {
     unsigned char tuner1AmNotchEnable, rfNotchEnable, rfDabNotchEnable;
     sdrplay_api_RspDuo_ResetSlaveFlagsT resetSlaveFlags;
 } sdrplay_api_RspDuoTunerParamsT;
-typedef struct { unsigned int word; } sdrplay_api_RspDxTunerParamsT;
+typedef struct { sdrplay_api_RspDx_HdrModeBwT hdrBw; } sdrplay_api_RspDxTunerParamsT;
 typedef struct {
     sdrplay_api_TunerParamsT tunerParams; sdrplay_api_ControlParamsT ctrlParams;
     sdrplay_api_Rsp1aTunerParamsT rsp1aTunerParams; sdrplay_api_Rsp2TunerParamsT rsp2TunerParams;
@@ -240,6 +316,50 @@ typedef struct {
     char message[1024];
 } sdrplay_api_ErrorInfoT;
 
+typedef sdrplay_api_ErrT (*sdrplay_api_Open_t)(void);
+typedef sdrplay_api_ErrT (*sdrplay_api_Close_t)(void);
+typedef sdrplay_api_ErrT (*sdrplay_api_ApiVersion_t)(float *apiVer);
+typedef sdrplay_api_ErrT (*sdrplay_api_LockDeviceApi_t)(void);
+typedef sdrplay_api_ErrT (*sdrplay_api_UnlockDeviceApi_t)(void);
+typedef sdrplay_api_ErrT (*sdrplay_api_GetDevices_t)(sdrplay_api_DeviceT *devices,
+                                                     unsigned int *numDevs,
+                                                     unsigned int maxDevs);
+typedef sdrplay_api_ErrT (*sdrplay_api_SelectDevice_t)(sdrplay_api_DeviceT *device);
+typedef sdrplay_api_ErrT (*sdrplay_api_ReleaseDevice_t)(sdrplay_api_DeviceT *device);
+typedef const char *(*sdrplay_api_GetErrorString_t)(sdrplay_api_ErrT err);
+typedef sdrplay_api_ErrorInfoT *(*sdrplay_api_GetLastError_t)(sdrplay_api_DeviceT *device);
+typedef sdrplay_api_ErrorInfoT *(*sdrplay_api_GetLastErrorByType_t)(
+    sdrplay_api_DeviceT *device, int type, unsigned long long *time);
+typedef sdrplay_api_ErrT (*sdrplay_api_DisableHeartbeat_t)(void);
+typedef sdrplay_api_ErrT (*sdrplay_api_DebugEnable_t)(HANDLE dev,
+                                                      sdrplay_api_DbgLvl_t level);
+typedef sdrplay_api_ErrT (*sdrplay_api_GetDeviceParams_t)(
+    HANDLE dev, sdrplay_api_DeviceParamsT **params);
+typedef sdrplay_api_ErrT (*sdrplay_api_Init_t)(HANDLE dev,
+                                               sdrplay_api_CallbackFnsT *callbacks,
+                                               void *context);
+typedef sdrplay_api_ErrT (*sdrplay_api_Uninit_t)(HANDLE dev);
+typedef sdrplay_api_ErrT (*sdrplay_api_Update_t)(
+    HANDLE dev, sdrplay_api_TunerSelectT tuner,
+    sdrplay_api_ReasonForUpdateT reason,
+    sdrplay_api_ReasonForUpdateExtension1T extension);
+typedef sdrplay_api_ErrT (*sdrplay_api_SwapRspDuoActiveTuner_t)(
+    HANDLE dev, sdrplay_api_TunerSelectT *current_tuner,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port);
+/* Kept source-compatible with SDRplay's 3.15 public typedef, whose function
+ * pointer omits the HANDLE present in the exported function declaration. */
+typedef sdrplay_api_ErrT (*sdrplay_api_SwapRspDuoDualTunerModeSampleRate_t)(
+    double *current_sample_rate, double new_sample_rate);
+typedef sdrplay_api_ErrT (*sdrplay_api_SwapRspDuoMode_t)(
+    sdrplay_api_DeviceT *current_device, sdrplay_api_DeviceParamsT **device_params,
+    sdrplay_api_RspDuoModeT mode, double sample_rate, sdrplay_api_TunerSelectT tuner,
+    sdrplay_api_Bw_MHzT bandwidth, sdrplay_api_If_kHzT if_type,
+    sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_Open(void);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_Close(void);
 OPENRSP_API sdrplay_api_ErrT sdrplay_api_ApiVersion(float *apiVer);
@@ -272,5 +392,9 @@ OPENRSP_API sdrplay_api_ErrT sdrplay_api_SwapRspDuoMode(
     sdrplay_api_RspDuoModeT mode, double sample_rate, sdrplay_api_TunerSelectT tuner,
     sdrplay_api_Bw_MHzT bandwidth, sdrplay_api_If_kHzT if_type,
     sdrplay_api_RspDuo_AmPortSelectT tuner1_am_port);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
