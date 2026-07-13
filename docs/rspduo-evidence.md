@@ -213,6 +213,11 @@ owning thread releases both recursive levels, and `Close` refuses to invalidate
 the API while its caller holds that lock. `Open`, `Close`, and a newly acquiring
 thread serialize on the same mutex and recheck open state after acquisition.
 
+Injected daemon rejection now verifies that `Update` does not flatten every
+failure into generic `HwError`. RF, gain, and sample-rate/PPM requests map to
+their API-specific update errors, and the thread-safe `GetLastError` record
+identifies `sdrplay_api_Update`, the rejected reason mask, and backend result.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

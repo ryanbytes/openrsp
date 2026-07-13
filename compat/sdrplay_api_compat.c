@@ -5,6 +5,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 #include <stdlib.h>
@@ -54,6 +55,33 @@ typedef struct {
 
 static compat_device_context rspduo;
 static sdrplay_api_ErrorInfoT last_error;
+static _Thread_local sdrplay_api_ErrorInfoT last_error_view;
+static pthread_mutex_t last_error_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void record_last_error(const char *function, const char *format, ...)
+{
+    (void)pthread_mutex_lock(&last_error_lock);
+    (void)snprintf(last_error.file, sizeof(last_error.file), "%s",
+                   "compat/sdrplay_api_compat.c");
+    (void)snprintf(last_error.function, sizeof(last_error.function), "%s", function);
+    last_error.line = 0;
+    va_list arguments;
+    va_start(arguments, format);
+    (void)vsnprintf(last_error.message, sizeof(last_error.message), format, arguments);
+    va_end(arguments);
+    (void)pthread_mutex_unlock(&last_error_lock);
+}
+
+static sdrplay_api_ErrT update_failure_code(sdrplay_api_ReasonForUpdateT reason)
+{
+    if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u)
+        return sdrplay_api_GainUpdateError;
+    if ((reason & sdrplay_api_Update_Tuner_Frf) != 0u)
+        return sdrplay_api_RfUpdateError;
+    if ((reason & (sdrplay_api_Update_Dev_Fs | sdrplay_api_Update_Dev_Ppm)) != 0u)
+        return sdrplay_api_FsUpdateError;
+    return sdrplay_api_HwError;
+}
 
 static int consume_one(atomic_uint *pending)
 {
@@ -595,7 +623,10 @@ const char *sdrplay_api_GetErrorString(sdrplay_api_ErrT err)
 sdrplay_api_ErrorInfoT *sdrplay_api_GetLastError(sdrplay_api_DeviceT *device)
 {
     (void)device;
-    return &last_error;
+    (void)pthread_mutex_lock(&last_error_lock);
+    last_error_view = last_error;
+    (void)pthread_mutex_unlock(&last_error_lock);
+    return &last_error_view;
 }
 
 sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(sdrplay_api_DeviceT *device,
@@ -604,7 +635,7 @@ sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(sdrplay_api_DeviceT *devi
     (void)device;
     (void)type;
     if (time) *time = 0u;
-    return &last_error;
+    return sdrplay_api_GetLastError(device);
 }
 
 sdrplay_api_ErrT sdrplay_api_DisableHeartbeat(void)
@@ -825,7 +856,14 @@ sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
         atomic_store(&rspduo.agc_setpoint, previous_agc_setpoint);
     }
     pthread_mutex_unlock(&hardware_lock);
-    return result < 0 ? sdrplay_api_HwError : sdrplay_api_Success;
+    if (result < 0) {
+        sdrplay_api_ErrT error = update_failure_code(reason);
+        record_last_error("sdrplay_api_Update",
+                          "OpenRSP daemon rejected update reasons 0x%08x (backend %d)",
+                          reason, result);
+        return error;
+    }
+    return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_SwapRspDuoActiveTuner(

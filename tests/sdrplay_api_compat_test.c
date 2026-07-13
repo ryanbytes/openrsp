@@ -108,15 +108,24 @@ static int serve_client(int descriptor)
         } else if (request.type == OPENRSP_CMD_UPDATE && streaming) {
             const openrsp_update_request *update = (const openrsp_update_request *)payload;
             ++streaming_updates;
+            const int reject_update =
+                update->config.center_frequency_hz == 123456789u;
             const openrsp_response response = {
-                .status = OPENRSP_STATUS_OK,
+                .status = reject_update ? OPENRSP_STATUS_IO_ERROR : OPENRSP_STATUS_OK,
                 .sequence = request.sequence,
                 .changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED
             };
+            if (reject_update) {
+                if (send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
+                               &response, sizeof(response)) != 0) return -1;
+                continue;
+            }
             /* Put IQ before the response so each update has a deterministic
              * fixture boundary while also exercising response waiting with
              * an interleaved stream frame. */
-            if (update->changed_flags == OPENRSP_CHANGE_RF) iq_sequence += 2u;
+            if (update->changed_flags == OPENRSP_CHANGE_RF &&
+                update->config.center_frequency_hz != 101000000u)
+                iq_sequence += 2u;
             int iq_result = 0;
             if (streaming_updates == 4u) {
                 for (unsigned int frame = 0u; frame < 8u && iq_result == 0; ++frame)
@@ -490,6 +499,19 @@ int main(void)
     assert(metrics.event_gr_db > 42u);
     assert(metrics.event_current_gain < 63.0);
     (void)pthread_mutex_unlock(&metrics.lock);
+
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 123456789.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Frf, 0u) ==
+           sdrplay_api_RfUpdateError);
+    sdrplay_api_ErrorInfoT *update_error = sdrplay_api_GetLastError(&devices[0]);
+    assert(update_error != NULL);
+    assert(strstr(update_error->function, "sdrplay_api_Update") != NULL);
+    assert(strstr(update_error->message, "daemon rejected update") != NULL);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Frf, 0u) ==
+           sdrplay_api_Success);
 
     params->devParams->ppm = 2.5;
     (void)pthread_mutex_lock(&metrics.lock);
