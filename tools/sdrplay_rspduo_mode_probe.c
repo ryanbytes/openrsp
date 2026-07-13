@@ -348,9 +348,9 @@ static int run_dual_defaults(sdrplay_api_DeviceT *device)
             params == NULL ? NULL : (void *)params->rxChannelA,
             params == NULL ? NULL : (void *)params->rxChannelB,
             params == NULL || params->rxChannelA == NULL ? -1 :
-                params->rxChannelA->tunerParams.bwType,
+                (int)params->rxChannelA->tunerParams.bwType,
             params == NULL || params->rxChannelB == NULL ? -1 :
-                params->rxChannelB->tunerParams.bwType,
+                (int)params->rxChannelB->tunerParams.bwType,
             params == NULL || params->rxChannelA == NULL ? -1 :
                 params->rxChannelA->tunerParams.ifType,
             params == NULL || params->rxChannelB == NULL ? -1 :
