@@ -18,7 +18,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | IQ streaming | Direct and standalone API paths verified on hardware |
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
-| Linux build | Source-compatible; automated build/test verification pending |
+| Linux build | Source-compatible; automated build/test verification in progress |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
 
 ## Build and test

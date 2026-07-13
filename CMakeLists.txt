@@ -5,6 +5,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# glibc hides POSIX/GNU declarations such as usleep, getopt, and sigaction
+# under strict C11 unless a feature profile is selected.  Apple exposes these
+# declarations without this definition.
+if(UNIX AND NOT APPLE)
+    add_compile_definitions(_DEFAULT_SOURCE)
+endif()
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 find_package(Threads REQUIRED)
@@ -51,15 +58,18 @@ enable_testing()
 add_executable(device-db-test tests/device_db_test.c)
 target_link_libraries(device-db-test PRIVATE openrsp::openrsp)
 target_compile_options(device-db-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(device-db-test PRIVATE -UNDEBUG)
 add_test(NAME device-db COMMAND device-db-test)
 
 if(UNIX)
     add_executable(openrsp-client-test tests/client_test.c)
     target_link_libraries(openrsp-client-test PRIVATE openrsp_client)
     target_compile_options(openrsp-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(openrsp-client-test PRIVATE -UNDEBUG)
     add_executable(openrspd-multi-client-test tests/openrspd_multi_client_test.c)
     target_link_libraries(openrspd-multi-client-test PRIVATE openrsp_client)
     target_compile_options(openrspd-multi-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(openrspd-multi-client-test PRIVATE -UNDEBUG)
     add_test(NAME openrspd-multi-client
         COMMAND openrspd-multi-client-test $<TARGET_FILE:openrspd>)
 endif()
@@ -74,6 +84,7 @@ target_link_libraries(openrsp_miri PUBLIC PkgConfig::LIBUSB Threads::Threads m)
 add_executable(rspduo-pll-test tests/rspduo_pll_test.c)
 target_link_libraries(rspduo-pll-test PRIVATE openrsp_miri)
 target_compile_options(rspduo-pll-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(rspduo-pll-test PRIVATE -UNDEBUG)
 add_test(NAME rspduo-pll COMMAND rspduo-pll-test)
 
 add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
@@ -97,6 +108,7 @@ if(UNIX)
     target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
     target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads)
     target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(sdrplay-api-compat-test PRIVATE -UNDEBUG)
     add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
 
     add_executable(sdrplay-abi-layout-test tools/sdrplay_abi_layout.c)
