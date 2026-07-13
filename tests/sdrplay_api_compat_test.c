@@ -84,9 +84,12 @@ static int serve_client(int descriptor)
                 .sequence = request.sequence,
                 .changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED
             };
-            if (send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
-                           &response, sizeof(response)) != 0 ||
-                send_mock_iq(descriptor, request.sequence) != 0) return -1;
+            /* Put IQ before the response so each update has a deterministic
+             * fixture boundary while also exercising response waiting with
+             * an interleaved stream frame. */
+            if (send_mock_iq(descriptor, request.sequence) != 0 ||
+                send_frame(descriptor, OPENRSP_MSG_RESPONSE, request.sequence,
+                           &response, sizeof(response)) != 0) return -1;
         } else {
             uint32_t status = request.type == OPENRSP_CMD_UPDATE && !streaming ?
                               OPENRSP_STATUS_BAD_REQUEST : OPENRSP_STATUS_OK;
@@ -288,7 +291,6 @@ int main(void)
                               sdrplay_api_Update_Dev_ResetFlags |
                               sdrplay_api_Update_Ctrl_OverloadMsgAck,
                               sdrplay_api_Update_Ext1_None) == sdrplay_api_Success);
-
     /* The API decimator supports every documented power-of-two factor. */
     (void)pthread_mutex_lock(&metrics.lock);
     unsigned int undecimated_samples = metrics.samples;
@@ -303,7 +305,13 @@ int main(void)
                sdrplay_api_Success);
         assert(wait_for_samples_above(&metrics, undecimated_samples) == 0);
         (void)pthread_mutex_lock(&metrics.lock);
-        assert(metrics.samples - undecimated_samples == 1024u / factors[index]);
+        unsigned int produced = metrics.samples - undecimated_samples;
+        unsigned int expected = 1024u / factors[index];
+        if (produced != expected) {
+            fprintf(stderr, "decimation x%u produced %u samples, expected %u\n",
+                    factors[index], produced, expected);
+            abort();
+        }
         undecimated_samples = metrics.samples;
         (void)pthread_mutex_unlock(&metrics.lock);
     }
