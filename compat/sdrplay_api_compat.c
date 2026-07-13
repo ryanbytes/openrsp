@@ -873,15 +873,18 @@ sdrplay_api_ErrorInfoT *sdrplay_api_GetLastErrorByType(sdrplay_api_DeviceT *devi
 
 sdrplay_api_ErrT sdrplay_api_DisableHeartbeat(void)
 {
-    return api_open ? sdrplay_api_Success : sdrplay_api_NotInitialised;
+    if (!atomic_load(&api_open)) return sdrplay_api_NotInitialised;
+    if (device_api_lock_depth == 0u || rspduo.selected) return sdrplay_api_Fail;
+    return sdrplay_api_Success;
 }
 
 sdrplay_api_ErrT sdrplay_api_DebugEnable(HANDLE dev, sdrplay_api_DbgLvl_t level)
 {
     if (!api_open) return sdrplay_api_NotInitialised;
-    if (dev != &rspduo || !rspduo.selected) return sdrplay_api_InvalidParam;
     if (level < sdrplay_api_DbgLvl_Disable || level > sdrplay_api_DbgLvl_Message)
         return sdrplay_api_OutOfRange;
+    if (dev == NULL) return sdrplay_api_Success;
+    if (dev != &rspduo || !rspduo.selected) return sdrplay_api_InvalidParam;
     return sdrplay_api_Success;
 }
 

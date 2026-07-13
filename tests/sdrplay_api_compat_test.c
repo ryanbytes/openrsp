@@ -415,8 +415,14 @@ int main(void)
     float version = 0.0f;
     assert(sdrplay_api_ApiVersion(&version) == sdrplay_api_Success && version == 3.15f);
     assert(sdrplay_api_Open() == sdrplay_api_Success);
+    assert(sdrplay_api_DebugEnable(NULL, sdrplay_api_DbgLvl_Error) ==
+           sdrplay_api_Success);
+    assert(sdrplay_api_DebugEnable(NULL, (sdrplay_api_DbgLvl_t)5) ==
+           sdrplay_api_OutOfRange);
+    assert(sdrplay_api_DisableHeartbeat() == sdrplay_api_Fail);
     assert(sdrplay_api_LockDeviceApi() == sdrplay_api_Success);
     assert(sdrplay_api_LockDeviceApi() == sdrplay_api_Success);
+    assert(sdrplay_api_DisableHeartbeat() == sdrplay_api_Success);
     assert(sdrplay_api_Close() == sdrplay_api_Fail);
     api_lock_metrics lock_metrics;
     memset(&lock_metrics, 0, sizeof(lock_metrics));
@@ -438,6 +444,7 @@ int main(void)
     assert(sdrplay_api_GetDevices(devices, &count, SDRPLAY_MAX_DEVICES) == sdrplay_api_Success);
     assert(count == 1u && devices[0].hwVer == 3u && devices[0].valid == 1u);
     assert(sdrplay_api_SelectDevice(&devices[0]) == sdrplay_api_Success);
+    assert(sdrplay_api_DisableHeartbeat() == sdrplay_api_Fail);
     assert(sdrplay_api_DebugEnable(devices[0].dev, sdrplay_api_DbgLvl_Error) ==
            sdrplay_api_Success);
     assert(sdrplay_api_GetLastError(&devices[0]) != NULL);

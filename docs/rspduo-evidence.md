@@ -141,6 +141,10 @@ the official package. Unit tests and an ASan/UBSan build pass; Apple
 AddressSanitizer leak detection is unavailable, so the sanitizer run uses
 `detect_leaks=0` and must not be described as a leak check.
 
+The documented pre-selection lifecycle is also exercised: debug logging accepts
+a null device handle before selection, while heartbeat disabling fails unless
+the calling thread holds the device API lock and no device has been selected.
+
 ## Live unplug/replug recovery (2026-07-12)
 
 The first live replug attempt exposed a stale-handle failure: libusb ended the

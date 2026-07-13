@@ -40,6 +40,15 @@ int main(void)
     channel.rsp2TunerParams.amPortSel = sdrplay_api_Rsp2_AMPORT_1;
     channel.rsp2TunerParams.antennaSel = sdrplay_api_Rsp2_ANTENNA_B;
     channel.rspDxTunerParams.hdrBw = sdrplay_api_RspDx_HDRMODE_BW_1_700;
+    if (device.rsp1aParams.rfNotchEnable != 1u ||
+        device.rsp2Params.extRefOutputEn != 1u ||
+        device.rspDxParams.antennaSel != sdrplay_api_RspDx_ANTENNA_C ||
+        channel.tunerParams.loMode != sdrplay_api_LO_144MHz ||
+        channel.ctrlParams.adsbMode !=
+            sdrplay_api_ADSB_NO_DECIMATION_BANDPASS_3MHZ ||
+        channel.rsp2TunerParams.antennaSel != sdrplay_api_Rsp2_ANTENNA_B ||
+        channel.rspDxTunerParams.hdrBw != sdrplay_api_RspDx_HDRMODE_BW_1_700)
+        return 1;
     sdrplay_api_Open_t open_api = sdrplay_api_Open;
     sdrplay_api_Update_t update_api = sdrplay_api_Update;
     assert(open_api != NULL && update_api != NULL);
