@@ -426,6 +426,48 @@ int main(void)
     assert(metrics.gain_changed == 1);
     (void)pthread_mutex_unlock(&metrics.lock);
 
+    params->devParams->fsFreq.fsHz = 1000000.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Dev_Fs, 0u) == sdrplay_api_OutOfRange);
+    params->devParams->fsFreq.fsHz = 2000000.0;
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 500.0;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Frf, 0u) == sdrplay_api_OutOfRange);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
+    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_Undefined;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_BwType, 0u) ==
+           sdrplay_api_OutOfRange);
+    params->rxChannelA->tunerParams.bwType = sdrplay_api_BW_0_200;
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Undefined;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_IfType, 0u) ==
+           sdrplay_api_OutOfRange);
+    params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
+    params->rxChannelA->tunerParams.gain.gRdB = 60;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Gr, 0u) == sdrplay_api_OutOfRange);
+    params->rxChannelA->tunerParams.gain.gRdB = 42;
+    params->rxChannelA->tunerParams.gain.LNAstate = 10u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Tuner_Gr, 0u) == sdrplay_api_OutOfRange);
+    params->rxChannelA->tunerParams.gain.LNAstate = 0u;
+    params->rxChannelA->ctrlParams.decimation.enable = 2u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Ctrl_Decimation, 0u) ==
+           sdrplay_api_InvalidParam);
+    params->rxChannelA->ctrlParams.decimation.enable = 0u;
+    params->rxChannelA->ctrlParams.dcOffset.DCenable = 2u;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Ctrl_DCoffsetIQimbalance, 0u) ==
+           sdrplay_api_InvalidParam);
+    params->rxChannelA->ctrlParams.dcOffset.DCenable = 1u;
+    params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -61;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_Ctrl_Agc, 0u) ==
+           sdrplay_api_OutOfRange);
+    params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -60;
+
     /* Required application setup calls are accepted when their values are supported. */
     params->rxChannelA->tunerParams.loMode = sdrplay_api_LO_Auto;
     params->rxChannelA->ctrlParams.decimation.enable = 0u;

@@ -203,6 +203,24 @@ static int rspduo_lna_gain_reduction(double rf_hz, unsigned int state, int *redu
     return 0;
 }
 
+static int valid_bandwidth(sdrplay_api_Bw_MHzT bandwidth)
+{
+    return bandwidth == sdrplay_api_BW_0_200 ||
+           bandwidth == sdrplay_api_BW_0_300 ||
+           bandwidth == sdrplay_api_BW_0_600 ||
+           bandwidth == sdrplay_api_BW_1_536 ||
+           bandwidth == sdrplay_api_BW_5_000 ||
+           bandwidth == sdrplay_api_BW_6_000 ||
+           bandwidth == sdrplay_api_BW_7_000 ||
+           bandwidth == sdrplay_api_BW_8_000;
+}
+
+static int valid_if(sdrplay_api_If_kHzT if_type)
+{
+    return if_type == sdrplay_api_IF_Zero || if_type == sdrplay_api_IF_0_450 ||
+           if_type == sdrplay_api_IF_1_620 || if_type == sdrplay_api_IF_2_048;
+}
+
 static void fill_radio_config(const compat_device_context *device, openrsp_radio_config *config)
 {
     double correction = 1.0 + device->dev_params.ppm / 1000000.0;
@@ -261,18 +279,59 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
     if ((reason & (sdrplay_api_Update_Master_Spare_1 |
                    sdrplay_api_Update_Master_Spare_2)) != 0u)
         return sdrplay_api_InvalidParam;
+    if ((reason & sdrplay_api_Update_Dev_Fs) != 0u &&
+        (!isfinite(device->dev_params.fsFreq.fsHz) ||
+         device->dev_params.fsFreq.fsHz < 2000000.0 ||
+         device->dev_params.fsFreq.fsHz > 10660000.0))
+        return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Dev_Ppm) != 0u &&
         (!isfinite(device->dev_params.ppm) || device->dev_params.ppm < -300.0 ||
          device->dev_params.ppm > 300.0))
         return sdrplay_api_OutOfRange;
+    if ((reason & sdrplay_api_Update_Tuner_Frf) != 0u &&
+        (!isfinite(device->channel_a.tunerParams.rfFreq.rfHz) ||
+         device->channel_a.tunerParams.rfFreq.rfHz < 1000.0 ||
+         device->channel_a.tunerParams.rfFreq.rfHz > 2000000000.0))
+        return sdrplay_api_OutOfRange;
+    if ((reason & sdrplay_api_Update_Tuner_BwType) != 0u &&
+        !valid_bandwidth(device->channel_a.tunerParams.bwType))
+        return sdrplay_api_OutOfRange;
+    if ((reason & sdrplay_api_Update_Tuner_IfType) != 0u &&
+        !valid_if(device->channel_a.tunerParams.ifType))
+        return sdrplay_api_OutOfRange;
+    if ((reason & (sdrplay_api_Update_Tuner_BwType |
+                   sdrplay_api_Update_Tuner_IfType)) != 0u &&
+        device->channel_a.tunerParams.ifType != sdrplay_api_IF_Zero &&
+        device->channel_a.tunerParams.bwType > sdrplay_api_BW_1_536)
+        return sdrplay_api_InvalidMode;
+    if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u) {
+        const sdrplay_api_GainT *gain = &device->channel_a.tunerParams.gain;
+        int lna_reduction = 0;
+        if (gain->gRdB < 20 || gain->gRdB > 59 ||
+            rspduo_lna_gain_reduction(device->channel_a.tunerParams.rfFreq.rfHz,
+                                      gain->LNAstate, &lna_reduction) < 0)
+            return sdrplay_api_OutOfRange;
+    }
     if ((reason & sdrplay_api_Update_Tuner_LoMode) != 0u &&
         device->channel_a.tunerParams.loMode != sdrplay_api_LO_Auto)
         return sdrplay_api_InvalidMode;
     if ((reason & sdrplay_api_Update_Ctrl_Decimation) != 0u) {
         const sdrplay_api_DecimationT *decimation = &device->channel_a.ctrlParams.decimation;
+        if (decimation->enable > 1u || decimation->wideBandSignal > 1u)
+            return sdrplay_api_InvalidParam;
         unsigned int factor = decimation->enable != 0u ? decimation->decimationFactor : 1u;
         if (!valid_decimation_factor(factor)) return sdrplay_api_OutOfRange;
     }
+    if ((reason & sdrplay_api_Update_Ctrl_DCoffsetIQimbalance) != 0u &&
+        (device->channel_a.ctrlParams.dcOffset.DCenable > 1u ||
+         device->channel_a.ctrlParams.dcOffset.IQenable > 1u))
+        return sdrplay_api_InvalidParam;
+    if ((reason & sdrplay_api_Update_Ctrl_Agc) != 0u &&
+        (device->channel_a.ctrlParams.agc.enable < sdrplay_api_AGC_DISABLE ||
+         device->channel_a.ctrlParams.agc.enable > sdrplay_api_AGC_CTRL_EN ||
+         device->channel_a.ctrlParams.agc.setPoint_dBfs < -60 ||
+         device->channel_a.ctrlParams.agc.setPoint_dBfs > -20))
+        return sdrplay_api_OutOfRange;
     if ((reason & sdrplay_api_Update_Ctrl_AdsbMode) != 0u &&
         device->channel_a.ctrlParams.adsbMode != sdrplay_api_ADSB_DECIMATION)
         return sdrplay_api_InvalidMode;

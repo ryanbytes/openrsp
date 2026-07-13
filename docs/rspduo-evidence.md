@@ -218,6 +218,13 @@ failure into generic `HwError`. RF, gain, and sample-rate/PPM requests map to
 their API-specific update errors, and the thread-safe `GetLastError` record
 identifies `sdrplay_api_Update`, the rejected reason mask, and backend result.
 
+Update validation now rejects non-finite/out-of-range sample rate and RF,
+unknown bandwidth and IF values, invalid low-IF/bandwidth combinations, gain or
+band-specific LNA states outside their tables, malformed boolean controls, and
+AGC modes/set points outside the public API ranges before any daemon command is
+sent. RSPduo limits use SDRplay's published 1 kHz--2 GHz coverage and
+2--10.66 MSPS sample-frequency range.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket
