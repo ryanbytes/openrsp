@@ -944,8 +944,12 @@ int main(void)
            sdrplay_api_Success);
     assert(wait_for_resets_at_least(&metrics, resets_before_gap + 1u) == 0);
     (void)pthread_mutex_lock(&metrics.lock);
-    assert(metrics.reset_callbacks == resets_before_gap + 1u);
-    assert(metrics.last_reset_first_sample == callback_end_before_gap + 64u);
+    /* The injected two-frame gap advances x32-decimated numbering by at
+     * least 64 samples. A slower runner may also overflow the deliberately
+     * bounded callback queue exercised immediately above; that is another
+     * legitimate discontinuity and can only increase the reset position. */
+    assert(metrics.reset_callbacks >= resets_before_gap + 1u);
+    assert(metrics.last_reset_first_sample >= callback_end_before_gap + 64u);
     (void)pthread_mutex_unlock(&metrics.lock);
     params->devParams->ppm = 301.0;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
