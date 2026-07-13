@@ -133,7 +133,8 @@ int main(int argc, char **argv)
     return samples > 1000000u && atomic_load(&result.callbacks) > 0u &&
            atomic_load(&result.rf_changed) == update_count &&
            atomic_load(&result.gr_changed) == update_count &&
-           atomic_load(&result.fs_changed) == (updated_sample_rate_hz > 0.0 ? 1u : 0u) &&
+           atomic_load(&result.fs_changed) ==
+               (updated_sample_rate_hz > 0.0 ? update_count : 0u) &&
            update == sdrplay_api_Success &&
            uninit == sdrplay_api_Success
                ? EXIT_SUCCESS : EXIT_FAILURE;

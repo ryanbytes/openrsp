@@ -420,6 +420,15 @@ The API's upper boundary of 10.66 MS/s was then measured separately at
 SDRTrunk restart. This covers the accepted API sample-rate endpoints as well as
 the rate set advertised by the current Soapy adapter.
 
+A 20-second native API stress run then applied 100 consecutive combined sample-
+rate, RF, and gain updates on one active stream while the normal SDRTrunk/RTL
+workload remained running. The driver delivered 40,828,928 samples in 32,396
+callbacks, acknowledged all 100 changes for each field, reported one expected
+initial stream-reset indication, and uninitialized successfully. The
+first run exposed a verifier bug: it expected only one `fsChanged` callback no
+matter how many updates were requested. The verifier now requires one callback
+per requested update, and the identical 100-update run passes.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames
