@@ -18,6 +18,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPdx/RSP1B/RSPdxR2 identification | Awaiting hardware evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuner A |
 | IQ streaming | Direct and standalone API paths verified on hardware |
+| Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Implemented and loaded by SDRTrunk |
 | API 3.15 `Init`/IQ callbacks/`Update` | Hardware callback client and SDRTrunk verified |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |

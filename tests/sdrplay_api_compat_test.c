@@ -213,6 +213,9 @@ typedef struct {
     HANDLE device_handle;
     int auto_ack_overload;
     sdrplay_api_ErrT overload_ack_result;
+    int validate_pointer_reuse;
+    short *stream_i_pointer;
+    short *stream_q_pointer;
 } callback_metrics;
 
 typedef struct {
@@ -238,6 +241,15 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     callback_metrics *metrics = opaque;
     assert(samples == params->numSamples);
     (void)pthread_mutex_lock(&metrics->lock);
+    if (samples != 0u && metrics->validate_pointer_reuse) {
+        if (metrics->stream_i_pointer == NULL) {
+            metrics->stream_i_pointer = xi;
+            metrics->stream_q_pointer = xq;
+        } else {
+            assert(metrics->stream_i_pointer == xi);
+            assert(metrics->stream_q_pointer == xq);
+        }
+    }
     if (samples != 0u && metrics->validate_samples)
         assert(xi[0] == -1024 && xq[0] == -1023);
     ++metrics->callbacks;
@@ -468,6 +480,9 @@ int main(void)
     (void)pthread_mutex_lock(&metrics.lock);
     unsigned int callback_baseline = metrics.callbacks;
     unsigned int session_sample_baseline = metrics.samples;
+    metrics.validate_pointer_reuse = 1;
+    metrics.stream_i_pointer = NULL;
+    metrics.stream_q_pointer = NULL;
     (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) == sdrplay_api_Success);
     assert(wait_for_callbacks_above(&metrics, callback_baseline) == 0);

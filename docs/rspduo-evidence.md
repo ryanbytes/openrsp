@@ -233,6 +233,13 @@ finish that update. The overload fixture injects a saturated IQ frame, receives
 callback, then requires a hysteretic `Overload_Corrected` event from the next
 normal frame. Gain and device-failure events use the same dispatcher.
 
+The API compatibility callback path now allocates its deinterleaving buffers
+once per `Init` session at the protocol's bounded maximum frame size and frees
+them only after the backend reader has stopped. The mock fixture requires the
+same I/Q buffer addresses across successive non-empty callbacks. This removes
+two allocations and two frees from every steady-state IQ frame while retaining
+the existing ten-cycle `Init`/stream/`Uninit` allocation-and-cleanup exercise.
+
 The first live deployment exposed command-response starvation under continuous
 10 MS/s IQ output. The daemon had correctly applied the initial gain command,
 but its small response competed with the stream thread for the same socket

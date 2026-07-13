@@ -34,6 +34,9 @@ typedef struct {
     sdrplay_api_RxChannelParamsT channel_b;
     sdrplay_api_DeviceParamsT params;
     openrsp_daemon_backend *backend;
+    short *scratch_i;
+    short *scratch_q;
+    size_t scratch_capacity;
     pthread_t agc_thread;
     int thread_started;
     int agc_thread_started;
@@ -78,6 +81,31 @@ static compat_device_context rspduo;
 static sdrplay_api_ErrorInfoT last_error;
 static _Thread_local sdrplay_api_ErrorInfoT last_error_view;
 static pthread_mutex_t last_error_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int allocate_stream_buffers(compat_device_context *device)
+{
+    device->scratch_i = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->scratch_i));
+    device->scratch_q = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->scratch_q));
+    if (device->scratch_i == NULL || device->scratch_q == NULL) {
+        free(device->scratch_i);
+        free(device->scratch_q);
+        device->scratch_i = NULL;
+        device->scratch_q = NULL;
+        device->scratch_capacity = 0u;
+        return -1;
+    }
+    device->scratch_capacity = OPENRSP_MAX_IQ_SAMPLES;
+    return 0;
+}
+
+static void free_stream_buffers(compat_device_context *device)
+{
+    free(device->scratch_i);
+    free(device->scratch_q);
+    device->scratch_i = NULL;
+    device->scratch_q = NULL;
+    device->scratch_capacity = 0u;
+}
 
 static void *event_thread_main(void *opaque)
 {
@@ -573,14 +601,13 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
     }
     device->last_iq_sequence = sequence;
     device->iq_sequence_seen = 1;
-    short *xi = malloc((size_t)samples * sizeof(*xi));
-    short *xq = malloc((size_t)samples * sizeof(*xq));
-    if (xi == NULL || xq == NULL) {
-        free(xi);
-        free(xq);
+    if (samples > device->scratch_capacity || device->scratch_i == NULL ||
+        device->scratch_q == NULL) {
         atomic_store(&device->stream_state, -1);
         return;
     }
+    short *xi = device->scratch_i;
+    short *xq = device->scratch_q;
     unsigned int peak = 0u;
     for (size_t index = 0; index < samples; ++index) {
         xi[index] = interleaved[index * 2u];
@@ -625,8 +652,6 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
         device->sample_number += chunk;
         offset += chunk;
     }
-    free(xi);
-    free(xq);
 }
 
 static void daemon_failure_callback(void *opaque)
@@ -895,14 +920,19 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     if (dev != &rspduo || !rspduo.selected) return sdrplay_api_InvalidParam;
     if (callbacks == NULL || callbacks->StreamACbFn == NULL) return sdrplay_api_InvalidParam;
     if (rspduo.initialized) return sdrplay_api_AlreadyInitialised;
+    if (allocate_stream_buffers(&rspduo) != 0) return sdrplay_api_HwError;
     int result = openrsp_daemon_backend_open(&rspduo.backend, 0u);
-    if (result < 0 || rspduo.backend == NULL) return sdrplay_api_HwError;
+    if (result < 0 || rspduo.backend == NULL) {
+        free_stream_buffers(&rspduo);
+        return sdrplay_api_HwError;
+    }
     openrsp_radio_config config;
     fill_radio_config(&rspduo, &config);
     result = openrsp_daemon_backend_configure(rspduo.backend, &config);
     if (result < 0) {
         openrsp_daemon_backend_close(rspduo.backend);
         rspduo.backend = NULL;
+        free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;
     }
     rspduo.callbacks = *callbacks;
@@ -925,6 +955,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.initialized = 0;
         openrsp_daemon_backend_close(rspduo.backend);
         rspduo.backend = NULL;
+        free_stream_buffers(&rspduo);
         return sdrplay_api_StartPending;
     }
     rspduo.thread_started = 1;
@@ -934,6 +965,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.backend = NULL;
         rspduo.thread_started = 0;
         rspduo.initialized = 0;
+        free_stream_buffers(&rspduo);
         return sdrplay_api_StartPending;
     }
     rspduo.agc_thread_started = 1;
@@ -950,6 +982,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.thread_started = 0;
         rspduo.agc_thread_started = 0;
         rspduo.initialized = 0;
+        free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;
     }
     /* The tested RSPduo only starts its bulk endpoint reliably in automatic
@@ -966,6 +999,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.thread_started = 0;
         rspduo.agc_thread_started = 0;
         rspduo.initialized = 0;
+        free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;
     }
     return sdrplay_api_Success;
@@ -982,6 +1016,7 @@ sdrplay_api_ErrT sdrplay_api_Uninit(HANDLE dev)
     rspduo.thread_started = 0;
     rspduo.agc_thread_started = 0;
     rspduo.initialized = 0;
+    free_stream_buffers(&rspduo);
     wait_for_event_idle(&rspduo);
     memset(&rspduo.callbacks, 0, sizeof(rspduo.callbacks));
     rspduo.callback_context = NULL;
