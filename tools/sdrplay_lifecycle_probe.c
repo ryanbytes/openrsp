@@ -56,7 +56,10 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     if (num_samples != 0u && metrics->ready_fd >= 0 && !metrics->ready_sent) {
         const unsigned char ready = 1u;
         metrics->ready_sent = 1;
-        (void)write(metrics->ready_fd, &ready, sizeof(ready));
+        ssize_t written;
+        do {
+            written = write(metrics->ready_fd, &ready, sizeof(ready));
+        } while (written < 0 && errno == EINTR);
     }
 }
 

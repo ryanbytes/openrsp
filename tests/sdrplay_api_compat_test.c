@@ -55,6 +55,15 @@ static int send_mock_iq(int descriptor, uint32_t sequence)
     return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
 }
 
+static void delay_milliseconds(long milliseconds)
+{
+    struct timespec delay = {
+        .tv_sec = milliseconds / 1000,
+        .tv_nsec = (milliseconds % 1000) * 1000000L
+    };
+    while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {}
+}
+
 static int send_overload_iq(int descriptor, uint32_t sequence)
 {
     int16_t iq[2048];
@@ -91,6 +100,7 @@ static int send_passband_iq(int descriptor, uint32_t sequence)
 
 static int serve_client(int descriptor)
 {
+    static int delayed_first_start;
     int streaming = 0;
     unsigned int streaming_updates = 0u;
     uint32_t iq_sequence = 0u;
@@ -178,6 +188,11 @@ static int serve_client(int descriptor)
             if (send_response(descriptor, request.sequence, status) != 0) return -1;
             if (request.type == OPENRSP_CMD_START) {
                 streaming = 1;
+                if (!delayed_first_start) {
+                    const char *delay_text = getenv("OPENRSP_TEST_FIRST_IQ_DELAY_MS");
+                    delayed_first_start = 1;
+                    if (delay_text != NULL) delay_milliseconds(strtol(delay_text, NULL, 10));
+                }
                 if (send_mock_iq(descriptor, ++iq_sequence) != 0)
                     return -1;
             } else if (request.type == OPENRSP_CMD_STOP ||
@@ -527,6 +542,9 @@ static int wait_for_overload_events(callback_metrics *metrics, unsigned int coun
 
 int main(void)
 {
+    /* A replacement daemon may need longer than the old two-second window to
+     * clear and reopen an endpoint after abrupt termination. */
+    assert(setenv("OPENRSP_TEST_FIRST_IQ_DELAY_MS", "2200", 1) == 0);
     char socket_path[104];
     (void)snprintf(socket_path, sizeof(socket_path), "/tmp/openrsp-compat-mock-%ld.sock",
                    (long)getpid());

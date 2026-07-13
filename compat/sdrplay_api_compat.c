@@ -1245,7 +1245,13 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     }
     rspduo.agc_thread_started = 1;
     const struct timespec startup_poll = {.tv_sec = 0, .tv_nsec = 10000000L};
-    for (int attempt = 0; attempt < 200 && atomic_load(&rspduo.stream_state) == 0; ++attempt) {
+    /* Normal startup reaches first IQ almost immediately. After the daemon is
+     * killed during an active RSPduo bulk stream, however, the replacement
+     * daemon may need repeated endpoint-stop/clear/reopen attempts while the
+     * device FIFO quiesces. Retain ownership for a bounded 30 seconds instead
+     * of aborting recovery after the former two-second window. */
+    for (int attempt = 0; attempt < 3000 && atomic_load(&rspduo.stream_state) == 0;
+         ++attempt) {
         nanosleep(&startup_poll, NULL);
     }
     if (atomic_load(&rspduo.stream_state) != 1) {

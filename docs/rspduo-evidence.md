@@ -469,6 +469,24 @@ update acknowledgement. The daemon retained its PID and returned to 12,128 KB
 RSS; SDRTrunk also remained running. This proves bounded recovery from abrupt
 client death, not recovery from a daemon crash or host power loss.
 
+Daemon death exposed a different failure. Killing `openrspd` during an active
+bulk stream caused the launchd replacement's submissions to fail with
+`LIBUSB_ERROR_PIPE`; the old API client's expected `DeviceFailure` was followed
+by a new client's `Init` timing out after two seconds. OpenRSP now clears the
+halt on the claimed RSPduo bulk endpoint before submitting transfers, and a new
+API session retains its lease for up to 30 seconds while the replacement daemon
+performs bounded stop, clear, and reopen attempts. A hardware-free regression
+delays first IQ for 2.2 seconds so the former timeout would fail in CI.
+
+Three consecutive physical tests then killed the daemon while a disposable API
+client was receiving IQ. Launchd supplied a different daemon PID each time; the
+old client failed as expected, and a new complete lifecycle acquired and
+streamed from the same RSPduo without a USB reset, physical replug, or host
+reboot. Each replacement lifecycle reported one initial reset, zero sample
+discontinuities, exact sample-rate/RF/gain acknowledgements, and zero device
+failures. This is recovery by a replacement daemon and new API session, not
+transparent continuation of the client connection that died with the daemon.
+
 The API backend now also has a hardware-free recovery-silence regression test.
 Its mock daemon sends IQ, remains silent across three socket receive deadlines,
 then resumes IQ on the same connection. The backend must deliver both frames

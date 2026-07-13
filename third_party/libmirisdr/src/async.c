@@ -486,6 +486,16 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
     if (p->usb_pid == 0x3020u) {
         if (mirisdr_streaming_stop(p) < 0) goto failed_free;
         usleep(110000);
+        /* A process killed during an active bulk stream can leave endpoint
+         * 0x81 halted even after the next process claims and reconfigures the
+         * interface. Submitting into that state fails with LIBUSB_ERROR_PIPE
+         * and previously required a physical reconnect. Clear only this
+         * receiver's claimed IQ endpoint before allocating new transfers. */
+        r = libusb_clear_halt(p->dh, 0x81u);
+        if (r < 0) {
+            fprintf(stderr, "failed to clear RSPduo bulk endpoint halt: %d\n", r);
+            goto failed_free;
+        }
     }
 
     /* spustíme přenosy */
