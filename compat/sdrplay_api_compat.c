@@ -29,12 +29,24 @@ static compat_discovery_handle discovery_handles[SDRPLAY_MAX_DEVICES];
 static unsigned int discovery_handle_count;
 
 #define OPENRSP_EVENT_QUEUE_CAPACITY 32u
+#define OPENRSP_STREAM_QUEUE_CAPACITY 8u
 
 typedef struct {
     sdrplay_api_EventT event;
     sdrplay_api_TunerSelectT tuner;
     sdrplay_api_EventParamsT params;
 } compat_api_event;
+
+typedef struct {
+    size_t samples;
+    unsigned int first_sample;
+    unsigned int reset;
+    int gr_changed;
+    int rf_changed;
+    int fs_changed;
+    short xi[OPENRSP_MAX_IQ_SAMPLES];
+    short xq[OPENRSP_MAX_IQ_SAMPLES];
+} compat_stream_frame;
 
 typedef struct {
     int selected;
@@ -49,13 +61,26 @@ typedef struct {
     openrsp_daemon_backend *backend;
     short *scratch_i;
     short *scratch_q;
+    short *callback_i;
+    short *callback_q;
     size_t scratch_capacity;
+    compat_stream_frame *stream_queue;
+    pthread_t stream_callback_thread;
+    int stream_callback_thread_started;
+    pthread_mutex_t stream_callback_lock;
+    pthread_cond_t stream_callback_ready;
+    int stream_callback_stop;
+    unsigned int stream_callback_head;
+    unsigned int stream_callback_count;
+    unsigned int stream_callback_drop_count;
+    unsigned int stream_callback_next_sample;
+    int stream_callback_seen;
     pthread_t agc_thread;
     int thread_started;
     int agc_thread_started;
     sdrplay_api_CallbackFnsT callbacks;
     void *callback_context;
-    unsigned int sample_number;
+    atomic_uint sample_number;
     uint32_t last_iq_sequence;
     int iq_sequence_seen;
     unsigned int first_callback;
@@ -100,11 +125,23 @@ static int allocate_stream_buffers(compat_device_context *device)
 {
     device->scratch_i = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->scratch_i));
     device->scratch_q = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->scratch_q));
-    if (device->scratch_i == NULL || device->scratch_q == NULL) {
+    device->callback_i = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->callback_i));
+    device->callback_q = malloc(OPENRSP_MAX_IQ_SAMPLES * sizeof(*device->callback_q));
+    device->stream_queue = calloc(OPENRSP_STREAM_QUEUE_CAPACITY,
+                                  sizeof(*device->stream_queue));
+    if (device->scratch_i == NULL || device->scratch_q == NULL ||
+        device->callback_i == NULL || device->callback_q == NULL ||
+        device->stream_queue == NULL) {
         free(device->scratch_i);
         free(device->scratch_q);
+        free(device->callback_i);
+        free(device->callback_q);
+        free(device->stream_queue);
         device->scratch_i = NULL;
         device->scratch_q = NULL;
+        device->callback_i = NULL;
+        device->callback_q = NULL;
+        device->stream_queue = NULL;
         device->scratch_capacity = 0u;
         return -1;
     }
@@ -116,8 +153,14 @@ static void free_stream_buffers(compat_device_context *device)
 {
     free(device->scratch_i);
     free(device->scratch_q);
+    free(device->callback_i);
+    free(device->callback_q);
+    free(device->stream_queue);
     device->scratch_i = NULL;
     device->scratch_q = NULL;
+    device->callback_i = NULL;
+    device->callback_q = NULL;
+    device->stream_queue = NULL;
     device->scratch_capacity = 0u;
 }
 
@@ -602,6 +645,146 @@ static void emit_overload_event(compat_device_context *device, int overloaded)
     }
 }
 
+static void *stream_callback_thread_main(void *opaque)
+{
+    compat_device_context *device = opaque;
+    for (;;) {
+        (void)pthread_mutex_lock(&device->stream_callback_lock);
+        while (device->stream_callback_count == 0u && !device->stream_callback_stop)
+            (void)pthread_cond_wait(&device->stream_callback_ready,
+                                    &device->stream_callback_lock);
+        if (device->stream_callback_stop) {
+            (void)pthread_mutex_unlock(&device->stream_callback_lock);
+            break;
+        }
+        compat_stream_frame *frame =
+            &device->stream_queue[device->stream_callback_head];
+        size_t samples = frame->samples;
+        unsigned int first_sample = frame->first_sample;
+        unsigned int reset = frame->reset || !device->stream_callback_seen ||
+                             first_sample != device->stream_callback_next_sample;
+        int gr_changed = frame->gr_changed;
+        int rf_changed = frame->rf_changed;
+        int fs_changed = frame->fs_changed;
+        memcpy(device->callback_i, frame->xi, samples * sizeof(*device->callback_i));
+        memcpy(device->callback_q, frame->xq, samples * sizeof(*device->callback_q));
+        device->stream_callback_head =
+            (device->stream_callback_head + 1u) % OPENRSP_STREAM_QUEUE_CAPACITY;
+        --device->stream_callback_count;
+        device->stream_callback_seen = 1;
+        device->stream_callback_next_sample = first_sample + (unsigned int)samples;
+        (void)pthread_mutex_unlock(&device->stream_callback_lock);
+
+        if (samples == 0u) {
+            sdrplay_api_StreamCbParamsT params = {
+                .firstSampleNum = first_sample,
+                .grChanged = gr_changed,
+                .rfChanged = rf_changed,
+                .fsChanged = fs_changed,
+                .numSamples = 0u
+            };
+            device->callbacks.StreamACbFn(device->callback_i, device->callback_q,
+                                          &params, 0u, reset,
+                                          device->callback_context);
+            continue;
+        }
+        for (size_t offset = 0u; offset < samples;) {
+            unsigned int chunk = (unsigned int)(samples - offset);
+            unsigned int callback_samples = atomic_load(&device->callback_samples);
+            if (chunk > callback_samples) chunk = callback_samples;
+            sdrplay_api_StreamCbParamsT params = {
+                .firstSampleNum = first_sample + (unsigned int)offset,
+                .grChanged = offset == 0u ? gr_changed : 0,
+                .rfChanged = offset == 0u ? rf_changed : 0,
+                .fsChanged = offset == 0u ? fs_changed : 0,
+                .numSamples = chunk
+            };
+            device->callbacks.StreamACbFn(device->callback_i + offset,
+                                          device->callback_q + offset, &params,
+                                          chunk, offset == 0u ? reset : 0u,
+                                          device->callback_context);
+            offset += chunk;
+        }
+    }
+    return NULL;
+}
+
+static int start_stream_callback_thread(compat_device_context *device)
+{
+    if (pthread_mutex_init(&device->stream_callback_lock, NULL) != 0) return -1;
+    if (pthread_cond_init(&device->stream_callback_ready, NULL) != 0) {
+        (void)pthread_mutex_destroy(&device->stream_callback_lock);
+        return -1;
+    }
+    device->stream_callback_stop = 0;
+    device->stream_callback_head = 0u;
+    device->stream_callback_count = 0u;
+    device->stream_callback_drop_count = 0u;
+    device->stream_callback_seen = 0;
+    if (pthread_create(&device->stream_callback_thread, NULL,
+                       stream_callback_thread_main, device) != 0) {
+        (void)pthread_cond_destroy(&device->stream_callback_ready);
+        (void)pthread_mutex_destroy(&device->stream_callback_lock);
+        return -1;
+    }
+    device->stream_callback_thread_started = 1;
+    return 0;
+}
+
+static void stop_stream_callback_thread(compat_device_context *device)
+{
+    if (!device->stream_callback_thread_started) return;
+    (void)pthread_mutex_lock(&device->stream_callback_lock);
+    device->stream_callback_stop = 1;
+    device->stream_callback_count = 0u;
+    (void)pthread_cond_signal(&device->stream_callback_ready);
+    (void)pthread_mutex_unlock(&device->stream_callback_lock);
+    (void)pthread_join(device->stream_callback_thread, NULL);
+    device->stream_callback_thread_started = 0;
+    (void)pthread_cond_destroy(&device->stream_callback_ready);
+    (void)pthread_mutex_destroy(&device->stream_callback_lock);
+}
+
+static void queue_stream_callback(compat_device_context *device, size_t samples,
+                                  unsigned int first_sample, unsigned int reset,
+                                  int gr_changed, int rf_changed, int fs_changed)
+{
+    (void)pthread_mutex_lock(&device->stream_callback_lock);
+    unsigned int carried_reset = 0u;
+    int carried_gr_changed = 0;
+    int carried_rf_changed = 0;
+    int carried_fs_changed = 0;
+    if (device->stream_callback_count == OPENRSP_STREAM_QUEUE_CAPACITY) {
+        compat_stream_frame *dropped =
+            &device->stream_queue[device->stream_callback_head];
+        carried_reset = dropped->reset;
+        carried_gr_changed = dropped->gr_changed;
+        carried_rf_changed = dropped->rf_changed;
+        carried_fs_changed = dropped->fs_changed;
+        device->stream_callback_head =
+            (device->stream_callback_head + 1u) % OPENRSP_STREAM_QUEUE_CAPACITY;
+        --device->stream_callback_count;
+        ++device->stream_callback_drop_count;
+        unsigned int drops = device->stream_callback_drop_count;
+        if ((drops & (drops - 1u)) == 0u)
+            fprintf(stderr, "OPENRSP_API_CALLBACK_DROP count=%u\n", drops);
+    }
+    unsigned int tail = (device->stream_callback_head +
+                         device->stream_callback_count) % OPENRSP_STREAM_QUEUE_CAPACITY;
+    compat_stream_frame *frame = &device->stream_queue[tail];
+    frame->samples = samples;
+    frame->first_sample = first_sample;
+    frame->reset = reset || carried_reset;
+    frame->gr_changed = gr_changed || carried_gr_changed;
+    frame->rf_changed = rf_changed || carried_rf_changed;
+    frame->fs_changed = fs_changed || carried_fs_changed;
+    memcpy(frame->xi, device->scratch_i, samples * sizeof(*frame->xi));
+    memcpy(frame->xq, device->scratch_q, samples * sizeof(*frame->xq));
+    ++device->stream_callback_count;
+    (void)pthread_cond_signal(&device->stream_callback_ready);
+    (void)pthread_mutex_unlock(&device->stream_callback_lock);
+}
+
 static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
                                    uint32_t sequence, void *opaque)
 {
@@ -648,31 +831,21 @@ static void daemon_stream_callback(const int16_t *interleaved, size_t samples,
             emit_overload_event(device, next_overload);
     }
     samples = decimate_iq(device, xi, xq, samples);
-    device->sample_number += missing_frames * (unsigned int)samples;
+    if (missing_frames != 0u)
+        (void)atomic_fetch_add(&device->sample_number,
+                               missing_frames * (unsigned int)samples);
     unsigned int observed = atomic_load(&device->agc_peak);
     while (peak > observed &&
            !atomic_compare_exchange_weak(&device->agc_peak, &observed, peak)) {}
     int gr_changed = consume_one(&device->pending_gr_changed);
     int rf_changed = consume_one(&device->pending_rf_changed);
     int fs_changed = consume_one(&device->pending_fs_changed);
-    for (size_t offset = 0; offset < samples;) {
-        unsigned int chunk = (unsigned int)(samples - offset);
-        unsigned int callback_samples = atomic_load(&device->callback_samples);
-        if (chunk > callback_samples) chunk = callback_samples;
-        sdrplay_api_StreamCbParamsT params = {
-            .firstSampleNum = device->sample_number,
-            .grChanged = offset == 0u ? gr_changed : 0,
-            .rfChanged = offset == 0u ? rf_changed : 0,
-            .fsChanged = offset == 0u ? fs_changed : 0,
-            .numSamples = chunk
-        };
-        unsigned int reset = offset == 0u && (device->first_callback || discontinuity);
-        device->callbacks.StreamACbFn(xi + offset, xq + offset, &params, chunk,
-                                      reset, device->callback_context);
-        device->first_callback = 0;
-        device->sample_number += chunk;
-        offset += chunk;
-    }
+    unsigned int first_sample = atomic_fetch_add(&device->sample_number,
+                                                  (unsigned int)samples);
+    unsigned int reset = device->first_callback || discontinuity;
+    queue_stream_callback(device, samples, first_sample, reset,
+                          gr_changed, rf_changed, fs_changed);
+    device->first_callback = 0;
 }
 
 static void daemon_failure_callback(void *opaque)
@@ -688,16 +861,8 @@ static void daemon_failure_callback(void *opaque)
 static void emit_update_ack(compat_device_context *device, int fs_changed,
                             int rf_changed, int gr_changed)
 {
-    short empty_sample = 0;
-    sdrplay_api_StreamCbParamsT params = {
-        .firstSampleNum = device->sample_number,
-        .grChanged = gr_changed,
-        .rfChanged = rf_changed,
-        .fsChanged = fs_changed,
-        .numSamples = 0u
-    };
-    device->callbacks.StreamACbFn(&empty_sample, &empty_sample, &params, 0u, 0u,
-                                  device->callback_context);
+    queue_stream_callback(device, 0u, atomic_load(&device->sample_number), 0u,
+                          gr_changed, rf_changed, fs_changed);
 }
 
 _Static_assert(sizeof(sdrplay_api_DeviceT) == 96, "DeviceT ABI mismatch");
@@ -714,6 +879,7 @@ static void reset_parameters(void)
     memset(&last_error, 0, sizeof(last_error));
     last_error_time = 0u;
     atomic_init(&rspduo.pending_gr_changed, 0u);
+    atomic_init(&rspduo.sample_number, 0u);
     atomic_init(&rspduo.pending_rf_changed, 0u);
     atomic_init(&rspduo.pending_fs_changed, 0u);
     atomic_init(&rspduo.stream_state, 0);
@@ -1019,7 +1185,15 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
     }
     rspduo.callbacks = *callbacks;
     rspduo.callback_context = context;
-    rspduo.sample_number = 0;
+    if (start_stream_callback_thread(&rspduo) != 0) {
+        openrsp_daemon_backend_close(rspduo.backend);
+        rspduo.backend = NULL;
+        free_stream_buffers(&rspduo);
+        memset(&rspduo.callbacks, 0, sizeof(rspduo.callbacks));
+        rspduo.callback_context = NULL;
+        return sdrplay_api_OutOfMemError;
+    }
+    atomic_store(&rspduo.sample_number, 0u);
     rspduo.last_iq_sequence = 0u;
     rspduo.iq_sequence_seen = 0;
     atomic_store(&rspduo.stream_state, 0);
@@ -1037,6 +1211,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.initialized = 0;
         openrsp_daemon_backend_close(rspduo.backend);
         rspduo.backend = NULL;
+        stop_stream_callback_thread(&rspduo);
         free_stream_buffers(&rspduo);
         return sdrplay_api_StartPending;
     }
@@ -1047,6 +1222,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.backend = NULL;
         rspduo.thread_started = 0;
         rspduo.initialized = 0;
+        stop_stream_callback_thread(&rspduo);
         free_stream_buffers(&rspduo);
         return sdrplay_api_StartPending;
     }
@@ -1064,6 +1240,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.thread_started = 0;
         rspduo.agc_thread_started = 0;
         rspduo.initialized = 0;
+        stop_stream_callback_thread(&rspduo);
         free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;
     }
@@ -1081,6 +1258,7 @@ sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callback
         rspduo.thread_started = 0;
         rspduo.agc_thread_started = 0;
         rspduo.initialized = 0;
+        stop_stream_callback_thread(&rspduo);
         free_stream_buffers(&rspduo);
         return sdrplay_api_HwError;
     }
@@ -1098,6 +1276,7 @@ sdrplay_api_ErrT sdrplay_api_Uninit(HANDLE dev)
     rspduo.thread_started = 0;
     rspduo.agc_thread_started = 0;
     rspduo.initialized = 0;
+    stop_stream_callback_thread(&rspduo);
     free_stream_buffers(&rspduo);
     wait_for_event_idle(&rspduo);
     memset(&rspduo.callbacks, 0, sizeof(rspduo.callbacks));

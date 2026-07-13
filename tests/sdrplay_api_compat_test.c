@@ -4,6 +4,7 @@
 #include "sdrplay_api_compat.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -219,6 +220,7 @@ typedef struct {
     unsigned int device_failures;
     unsigned int reset_callbacks;
     unsigned int last_reset_first_sample;
+    unsigned int last_callback_end_sample;
     unsigned int last_peak;
     int measure_filter;
     unsigned int filter_frames;
@@ -235,6 +237,8 @@ typedef struct {
     int validate_pointer_reuse;
     short *stream_i_pointer;
     short *stream_q_pointer;
+    int block_stream_callback;
+    int stream_callback_blocked;
 } callback_metrics;
 
 typedef struct {
@@ -242,6 +246,12 @@ typedef struct {
     sdrplay_api_ErrT lock_result;
     sdrplay_api_ErrT unlock_result;
 } api_lock_metrics;
+
+typedef struct {
+    HANDLE device;
+    atomic_int completed;
+    sdrplay_api_ErrT result;
+} update_thread_metrics;
 
 static void *api_lock_thread(void *opaque)
 {
@@ -254,12 +264,27 @@ static void *api_lock_thread(void *opaque)
     return NULL;
 }
 
+static void *update_thread(void *opaque)
+{
+    update_thread_metrics *metrics = opaque;
+    metrics->result = sdrplay_api_Update(metrics->device, sdrplay_api_Tuner_A,
+                                         sdrplay_api_Update_Tuner_Frf, 0u);
+    atomic_store(&metrics->completed, 1);
+    return NULL;
+}
+
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int samples, unsigned int reset, void *opaque)
 {
     callback_metrics *metrics = opaque;
     assert(samples == params->numSamples);
     (void)pthread_mutex_lock(&metrics->lock);
+    if (metrics->block_stream_callback) {
+        metrics->stream_callback_blocked = 1;
+        (void)pthread_cond_broadcast(&metrics->ready);
+        while (metrics->block_stream_callback)
+            (void)pthread_cond_wait(&metrics->ready, &metrics->lock);
+    }
     if (samples != 0u && metrics->validate_pointer_reuse) {
         if (metrics->stream_i_pointer == NULL) {
             metrics->stream_i_pointer = xi;
@@ -269,10 +294,15 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
             assert(metrics->stream_q_pointer == xq);
         }
     }
-    if (samples != 0u && metrics->validate_samples)
-        assert(xi[0] == -1024 && xq[0] == -1023);
+    if (samples != 0u && metrics->validate_samples &&
+        (xi[0] != -1024 || xq[0] != -1023)) {
+        fprintf(stderr, "unexpected first IQ sample i=%d q=%d samples=%u\n",
+                xi[0], xq[0], samples);
+        abort();
+    }
     ++metrics->callbacks;
     metrics->samples += samples;
+    metrics->last_callback_end_sample = params->firstSampleNum + samples;
     metrics->rf_changed += params->rfChanged;
     metrics->gain_changed += params->grChanged;
     if (reset != 0u) {
@@ -352,13 +382,90 @@ static int wait_for_callbacks_above(callback_metrics *metrics, unsigned int base
     return 0;
 }
 
-static int wait_for_samples_above(callback_metrics *metrics, unsigned int baseline)
+static int wait_for_callbacks_at_least(callback_metrics *metrics, unsigned int target)
 {
     struct timespec deadline;
     if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&metrics->lock);
-    while (metrics->samples <= baseline) {
+    while (metrics->callbacks < target) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_resets_at_least(callback_metrics *metrics, unsigned int target)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->reset_callbacks < target) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_callback_quiet(callback_metrics *metrics)
+{
+    (void)pthread_mutex_lock(&metrics->lock);
+    unsigned int observed = metrics->callbacks;
+    for (;;) {
+        struct timespec deadline;
+        if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+        deadline.tv_nsec += 100000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            ++deadline.tv_sec;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        int result = pthread_cond_timedwait(&metrics->ready, &metrics->lock,
+                                            &deadline);
+        if (result == ETIMEDOUT) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return 0;
+        }
+        if (result != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+        if (metrics->callbacks != observed) observed = metrics->callbacks;
+    }
+}
+
+static int wait_for_samples_at_least(callback_metrics *metrics, unsigned int target)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->samples < target) {
+        if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
+            (void)pthread_mutex_unlock(&metrics->lock);
+            return -1;
+        }
+    }
+    (void)pthread_mutex_unlock(&metrics->lock);
+    return 0;
+}
+
+static int wait_for_update_flags(callback_metrics *metrics, int rf, int gain)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
+    deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics->lock);
+    while (metrics->rf_changed < rf || metrics->gain_changed < gain) {
         if (pthread_cond_timedwait(&metrics->ready, &metrics->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&metrics->lock);
             return -1;
@@ -523,7 +630,6 @@ int main(void)
     }
     (void)pthread_mutex_lock(&metrics.lock);
     unsigned int callback_baseline = metrics.callbacks;
-    unsigned int session_sample_baseline = metrics.samples;
     metrics.validate_pointer_reuse = 1;
     metrics.stream_i_pointer = NULL;
     metrics.stream_q_pointer = NULL;
@@ -535,9 +641,14 @@ int main(void)
     (void)pthread_mutex_unlock(&metrics.lock);
     params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
     params->rxChannelA->tunerParams.gain.gRdB = 42;
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int initial_update_callback_baseline = metrics.callbacks;
+    (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_Frf | sdrplay_api_Update_Tuner_Gr,
                               0u) == sdrplay_api_Success);
+    assert(wait_for_callbacks_above(&metrics, initial_update_callback_baseline) == 0);
+    assert(wait_for_update_flags(&metrics, 1, 1) == 0);
     (void)pthread_mutex_lock(&metrics.lock);
     assert(metrics.rf_changed == 1);
     assert(metrics.gain_changed == 1);
@@ -589,6 +700,9 @@ int main(void)
     params->rxChannelA->tunerParams.loMode = sdrplay_api_LO_Auto;
     params->rxChannelA->ctrlParams.decimation.enable = 0u;
     params->rxChannelA->ctrlParams.decimation.decimationFactor = 1u;
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int setup_callback_baseline = metrics.callbacks;
+    (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_LoMode |
                               sdrplay_api_Update_Ctrl_Decimation |
@@ -596,6 +710,7 @@ int main(void)
                               sdrplay_api_Update_Dev_ResetFlags |
                               sdrplay_api_Update_Ctrl_OverloadMsgAck,
                               sdrplay_api_Update_Ext1_None) == sdrplay_api_Success);
+    assert(wait_for_callbacks_above(&metrics, setup_callback_baseline) == 0);
     /* The API decimator supports every documented power-of-two factor. */
     (void)pthread_mutex_lock(&metrics.lock);
     unsigned int undecimated_samples = metrics.samples;
@@ -614,11 +729,12 @@ int main(void)
         assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                                   sdrplay_api_Update_Ctrl_Decimation, 0u) ==
                sdrplay_api_Success);
-        assert(wait_for_samples_above(&metrics, undecimated_samples) == 0);
-        (void)pthread_mutex_lock(&metrics.lock);
-        unsigned int produced = metrics.samples - undecimated_samples;
         unsigned int frames = factors[index] == 2u ? 16u : 1u;
         unsigned int expected = frames * 1024u / factors[index];
+        assert(wait_for_samples_at_least(&metrics,
+                                         undecimated_samples + expected) == 0);
+        (void)pthread_mutex_lock(&metrics.lock);
+        unsigned int produced = metrics.samples - undecimated_samples;
         if (produced != expected) {
             fprintf(stderr, "decimation x%u produced %u samples, expected %u\n",
                     factors[index], produced, expected);
@@ -703,18 +819,65 @@ int main(void)
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_Frf, 0u) ==
            sdrplay_api_Success);
+    assert(wait_for_callback_quiet(&metrics) == 0);
+
+    (void)pthread_mutex_lock(&metrics.lock);
+    unsigned int blocked_callback_baseline = metrics.callbacks;
+    unsigned int blocked_reset_baseline = metrics.reset_callbacks;
+    metrics.block_stream_callback = 1;
+    metrics.stream_callback_blocked = 0;
+    (void)pthread_mutex_unlock(&metrics.lock);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101200000.0;
+    update_thread_metrics blocked_update = {.device = devices[0].dev};
+    atomic_init(&blocked_update.completed, 0);
+    pthread_t blocked_update_thread;
+    assert(pthread_create(&blocked_update_thread, NULL, update_thread,
+                          &blocked_update) == 0);
+    struct timespec blocked_deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &blocked_deadline) == 0);
+    blocked_deadline.tv_sec += 2;
+    (void)pthread_mutex_lock(&metrics.lock);
+    while (!metrics.stream_callback_blocked) {
+        assert(pthread_cond_timedwait(&metrics.ready, &metrics.lock,
+                                      &blocked_deadline) == 0);
+    }
+    (void)pthread_mutex_unlock(&metrics.lock);
+    const struct timespec response_window = {.tv_sec = 0, .tv_nsec = 100000000L};
+    (void)nanosleep(&response_window, NULL);
+    assert(atomic_load(&blocked_update.completed) == 1);
+    for (unsigned int queued_update = 0u; queued_update < 12u; ++queued_update) {
+        params->rxChannelA->tunerParams.rfFreq.rfHz =
+            101210000.0 + (double)queued_update * 10000.0;
+        assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                                  sdrplay_api_Update_Tuner_Frf, 0u) ==
+               sdrplay_api_Success);
+    }
+    (void)pthread_mutex_lock(&metrics.lock);
+    metrics.block_stream_callback = 0;
+    (void)pthread_cond_broadcast(&metrics.ready);
+    (void)pthread_mutex_unlock(&metrics.lock);
+    assert(pthread_join(blocked_update_thread, NULL) == 0);
+    assert(blocked_update.result == sdrplay_api_Success);
+    assert(wait_for_callbacks_at_least(&metrics,
+                                       blocked_callback_baseline + 2u) == 0);
+    assert(wait_for_callback_quiet(&metrics) == 0);
+    (void)pthread_mutex_lock(&metrics.lock);
+    assert(metrics.reset_callbacks > blocked_reset_baseline);
+    (void)pthread_mutex_unlock(&metrics.lock);
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
 
     params->devParams->ppm = 2.5;
     (void)pthread_mutex_lock(&metrics.lock);
-    unsigned int samples_before_gap = metrics.samples - session_sample_baseline;
+    unsigned int callback_end_before_gap = metrics.last_callback_end_sample;
     unsigned int resets_before_gap = metrics.reset_callbacks;
     (void)pthread_mutex_unlock(&metrics.lock);
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Dev_Ppm, 0u) ==
            sdrplay_api_Success);
+    assert(wait_for_resets_at_least(&metrics, resets_before_gap + 1u) == 0);
     (void)pthread_mutex_lock(&metrics.lock);
     assert(metrics.reset_callbacks == resets_before_gap + 1u);
-    assert(metrics.last_reset_first_sample == samples_before_gap + 64u);
+    assert(metrics.last_reset_first_sample == callback_end_before_gap + 64u);
     (void)pthread_mutex_unlock(&metrics.lock);
     params->devParams->ppm = 301.0;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,

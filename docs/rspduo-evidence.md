@@ -249,6 +249,24 @@ build removed and quarantined the logical tuner during the outage and did not
 reattach it until restart. Repeated same-process replug cycles and application
 reattachment remain open gates.
 
+The next failure trace showed why the API client stopped draining the daemon
+socket after recovery: its socket-reader thread invoked the application's IQ
+callback inline. A callback paused by application lifecycle handling therefore
+blocked both incoming IQ and control responses. The compatibility layer now
+does deinterleaving, sequence accounting, overload detection, AGC measurement,
+and decimation in socket order, then places the processed frame on a bounded
+application-callback queue. A slow callback can no longer stop socket reads or
+RF/gain responses. If the queue fills, it drops the oldest processed frame and
+the callback dispatcher derives a reset from the resulting sample-number gap.
+
+The regression fixture deliberately blocks an application IQ callback, sends
+an RF update from another thread, and requires the update to complete while the
+callback remains blocked. Exact decimation accounting and filter measurements
+still pass, proving that the queue was not incorrectly placed ahead of ordered
+IQ processing. Debug, Release, and ASan/UBSan tests pass. This change has not
+yet passed a new physical replug cycle, so transparent SDRTrunk survival is
+still unverified.
+
 ## API update-reason audit (2026-07-12)
 
 The public API 3.15 update-reason surface was compared with SDRplay's published
