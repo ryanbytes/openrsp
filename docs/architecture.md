@@ -37,6 +37,14 @@ arbitrary radio. If no serial or physical-port identity is available, the raw
 index is retained as a limited fallback and stable replug recovery is not
 claimed.
 
+An RSPduo physically reappears first as a cold `1df7:3020` firmware-loader
+device with `iSerialNumber == 0`. The daemon recognizes only that explicit
+descriptor state, loads firmware from the configured local file, waits for USB
+re-enumeration, and then performs normal factory-serial matching. It does not
+select the first device with the same product ID. This ordering avoids the
+circular requirement that a cold device already expose the serial produced by
+its firmware.
+
 Application-facing serial overrides are deliberately excluded from hardware
 selection. A caller-controlled display name must not be able to redirect a
 session to another attached receiver.

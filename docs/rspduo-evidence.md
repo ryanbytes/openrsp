@@ -213,8 +213,41 @@ live signal and frequency-error measurements. The session also accumulated
 successful SAFE-T, Wabash, Somerset, and Howard County upload counts. The only
 other active tuner was an RTL receiver at 155 MHz, so the displayed 800 MHz P25
 chains were specifically allocated to the RSPduo. This proves post-deployment
-streaming, tuning, gain application, and live P25 use; stable-identity recovery
-after a new physical replug remains unverified.
+streaming, tuning, gain application, and live P25 use. At that stage,
+stable-identity recovery after a new physical replug remained unverified; the
+later replug evidence below supersedes that limitation in part.
+
+### Cold replug, client backpressure, and bounded cleanup
+
+A physical replug on 2026-07-13 exposed two distinct failures. The receiver
+first enumerated as `1df7:3020` with no serial descriptor, so factory-serial
+resolution correctly failed closed but could not reopen the radio. After the
+firmware bootstrap path ran, the same physical receiver re-enumerated with
+factory serial `1806000E32`, and the existing daemon resolved and reopened it.
+
+That reopen produced USB IQ, but SDRTrunk had stopped draining the stream
+socket after quarantining the removed tuner. A process stack sample showed the
+IQ callback blocked indefinitely in `write()`, holding libusb's event lock,
+while the daemon main thread waited inside a synchronous gain control transfer.
+Commit `72940c4` bounds each accepted client's socket writes to two seconds and
+evicts a client after an IQ write timeout. It also bootstraps only an RSPduo
+whose USB descriptor explicitly reports the cold no-serial state before doing
+stable identity resolution.
+
+The exact Release daemon from that commit was deployed at SHA-256
+`42f41982b06ff6af77637952e2dcf109238dffd4fc6a893c45c8abffa9deedb7`.
+On startup it encountered two real bulk-transfer start failures, reopened the
+same receiver without a physical replug, delivered 65,536-byte USB and socket
+IQ frames, and restored GR 50/LNA 0. A post-deployment process sample showed
+the main thread idle in `poll()` and the stream thread servicing libusb rather
+than the previous cross-thread deadlock.
+
+This is evidence for cold firmware preparation, stable identity resolution,
+bounded client backpressure, and driver-side stream/gain recovery. It is not a
+claim of transparent end-to-end recovery in every application: this SDRTrunk
+build removed and quarantined the logical tuner during the outage and did not
+reattach it until restart. Repeated same-process replug cycles and application
+reattachment remain open gates.
 
 ## API update-reason audit (2026-07-12)
 

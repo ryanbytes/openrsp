@@ -32,7 +32,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | Device API locking | Recursive in-process lock plus daemon-owned cross-process lease with crash release |
 | Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
-| Unplug/replug recovery | Verified once on RSPduo without restarting OpenRSP or SDRTrunk |
+| Unplug/replug recovery | Driver transport recovery verified; SDRTrunk can still quarantine the tuner and require application reattachment |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
 | Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
