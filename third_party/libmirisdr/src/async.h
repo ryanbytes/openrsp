@@ -24,3 +24,8 @@
 #define DEFAULT_BULK_TIMEOUT    1000
 
 #define DEFAULT_BUF_NUMBER      32
+
+/* Only endpoint stalls are safe to clear and resubmit.  An overflow means the
+ * device sent more data than the host requested; retrying it can escalate a
+ * USB babble fault into a reset of the whole upstream hub on macOS. */
+int mirisdr_rspduo_bulk_status_is_retryable(int status);

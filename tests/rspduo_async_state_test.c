@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "mirisdr.h"
+#include "async.h"
 #include "libusb.h"
 #include "structs.h"
 
@@ -27,6 +28,10 @@ static void *complete_cancellation(void *opaque)
 
 int main(void)
 {
+    assert(mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_STALL));
+    assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_OVERFLOW));
+    assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_ERROR));
+
     mirisdr_dev_t device;
     memset(&device, 0, sizeof(device));
     atomic_init(&device.async_status, MIRISDR_ASYNC_INACTIVE);

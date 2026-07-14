@@ -90,6 +90,11 @@ static void mirisdr_dual_noop(unsigned char *samples, uint32_t bytes, void *cont
     (void)context;
 }
 
+int mirisdr_rspduo_bulk_status_is_retryable(int status)
+{
+    return status == LIBUSB_TRANSFER_STALL;
+}
+
 static uint8_t *samples_realloc(mirisdr_dev_t *p, int size)
 {
     if(p->samples_size < size)
@@ -273,13 +278,10 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             goto failed;
         }
     } else if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
-               (xfer->status == LIBUSB_TRANSFER_OVERFLOW ||
-                xfer->status == LIBUSB_TRANSFER_STALL) &&
+               mirisdr_rspduo_bulk_status_is_retryable(xfer->status) &&
                p->bulk_recovery_attempts < 3u) {
         ++p->bulk_recovery_attempts;
-        int recovery = 0;
-        if (xfer->status == LIBUSB_TRANSFER_STALL)
-            recovery = libusb_clear_halt(p->dh, 0x81u);
+        int recovery = libusb_clear_halt(p->dh, 0x81u);
         if (recovery == 0) recovery = libusb_submit_transfer(xfer);
         if (recovery == 0) {
             fprintf(stderr,
@@ -292,6 +294,11 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
                 xfer->status, p->bulk_recovery_attempts, recovery, p->index);
         goto failed;
     } else if (xfer->status != LIBUSB_TRANSFER_CANCELLED) {
+        if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
+            xfer->status == LIBUSB_TRANSFER_OVERFLOW)
+            fprintf(stderr,
+                    "fatal RSPduo bulk overflow on device %u - stopping stream to protect USB bus\n",
+                    p->index);
         fprintf( stderr, "error async transfer status %d on device %u\n", xfer->status, p->index);
         goto failed;
     }
