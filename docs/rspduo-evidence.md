@@ -886,7 +886,8 @@ continuity, cleanup, and recovery, not AM-port sensitivity or notch attenuation.
 
 A timestamped public-API sweep captured every valid LNA state on tuners A and B
 at 10 MHz, 100 MHz, and 1.5 GHz. Together with the previously verified
-853.8625 MHz sweep, these frequencies exercise all four RSPduo LNA bands:
+853.8625 MHz sweep, these frequencies exercise all four published LNA
+state-count groups:
 below 60 MHz, 60--420 MHz, 420--1000 MHz, and 1--2 GHz. The official API
 accepted states 0--6, 0--9, 0--9, and 0--8 respectively. All six new reference
 sessions streamed between 8.9 and 11.1 million samples, reported one initial
@@ -909,7 +910,7 @@ no longer falls back to a generic total-gain approximation outside the
 420--1000 MHz band. Gain planning is allocation-free and merges the persistent
 notch and external-reference bits so a gain update cannot silently undo a
 control update. A deterministic fixture checks the exact reconstructed words
-for every A/B state, all four band boundaries, invalid next states, and the
+for every A/B state in those groups, invalid next states, and the
 active-low control-bit merge.
 
 The installed Release build then swept every valid state at 10 MHz, 100 MHz,
@@ -923,7 +924,26 @@ matching the single-mode callback contract. Finally, a forced daemon death
 recovered through a new streaming lifecycle without a USB reset or physical
 replug.
 
-Debug, Release, and ASan/UBSan builds each passed all 14 hardware-free tests.
+### Exact routing boundaries and optional controls (2026-07-14)
+
+An exhaustive follow-up placed official-API probes immediately below, at, and
+above every observed selector transition. The front end has ten routing ranges:
+1 kHz--12 MHz, 12--30 MHz, 30--60 MHz, 60--120 MHz, 120--250 MHz,
+250--300 MHz, 300--380 MHz, 380--420 MHz, 420 MHz--1 GHz, and 1--2 GHz.
+The lower bound is inclusive, each internal upper bound belongs to the next
+range, and exactly 2 GHz is accepted.
+
+Independent sweeps reconstructed every valid LNA row in each range on both
+tuners. Combined RF-notch, DAB-notch, and external-reference tests showed that
+the active-low masks compose. On tuner B the DAB mask applies to both GPIO-4B
+writes, not only the final write. Tuner-A AM port 1 below 60 MHz uses five LNA
+states with distinct register-9 bases; port 2 uses seven. The AM notch clears
+GPIO bit 0x0008 in subsequent gain plans. The deterministic fixture now checks
+all ten exact lower boundaries, both physical selector banks, last valid and
+first invalid states, the inclusive 2 GHz limit, combined control masks, and
+the AM-port-specific rows.
+
+Debug, Release, and ASan/UBSan builds each passed all 13 hardware-free tests.
 No calibrated RF source or spectrum analyzer was attached for the new band
 sweeps, so this evidence proves accepted state coverage, reconstructed command
 parity, stream continuity, cleanup, and recovery--not the absolute gain or

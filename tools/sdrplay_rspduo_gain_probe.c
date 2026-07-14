@@ -47,8 +47,19 @@ static long environment_delay_ms(const char *name, long fallback)
            milliseconds <= 30000 ? milliseconds : fallback;
 }
 
-static unsigned int maximum_lna_state(uint64_t frequency)
+static unsigned int environment_flag(const char *name)
 {
+    const char *value = getenv(name);
+    if (value == NULL || strcmp(value, "0") == 0) return 0u;
+    if (strcmp(value, "1") == 0) return 1u;
+    fprintf(stderr, "GAIN_PROBE_INVALID_FLAG name=%s value=%s\n", name, value);
+    exit(EXIT_FAILURE);
+}
+
+static unsigned int maximum_lna_state(uint64_t frequency,
+                                      unsigned int am_port_1)
+{
+    if (frequency < 60000000u && am_port_1 != 0u) return 4u;
     if (frequency < 60000000u) return 6u;
     if (frequency < 420000000u) return 9u;
     if (frequency < 1000000000u) return 9u;
@@ -130,6 +141,20 @@ int main(int argc, char **argv)
     channel->tunerParams.gain.gRdB = 45;
     channel->tunerParams.gain.LNAstate = 0u;
     channel->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+    unsigned int rf_notch = environment_flag("OPENRSP_GAIN_PROBE_RF_NOTCH");
+    unsigned int dab_notch = environment_flag("OPENRSP_GAIN_PROBE_DAB_NOTCH");
+    unsigned int external_reference =
+        environment_flag("OPENRSP_GAIN_PROBE_EXTERNAL_REFERENCE");
+    unsigned int bias_tee = environment_flag("OPENRSP_GAIN_PROBE_BIAS_TEE");
+    unsigned int am_port_1 = environment_flag("OPENRSP_GAIN_PROBE_AM_PORT_1");
+    unsigned int am_notch = environment_flag("OPENRSP_GAIN_PROBE_AM_NOTCH");
+    channel->rspDuoTunerParams.rfNotchEnable = (unsigned char)rf_notch;
+    channel->rspDuoTunerParams.rfDabNotchEnable = (unsigned char)dab_notch;
+    channel->rspDuoTunerParams.biasTEnable = (unsigned char)bias_tee;
+    channel->rspDuoTunerParams.tuner1AmPortSel = am_port_1 != 0u ?
+        sdrplay_api_RspDuo_AMPORT_1 : sdrplay_api_RspDuo_AMPORT_2;
+    channel->rspDuoTunerParams.tuner1AmNotchEnable = (unsigned char)am_notch;
+    params->devParams->rspDuoParams.extRefOutputEn = (int)external_reference;
 
     gain_metrics metrics = {0};
     sdrplay_api_CallbackFnsT callbacks = {.StreamACbFn = stream_a};
@@ -140,7 +165,7 @@ int main(int argc, char **argv)
             realtime_microseconds());
     fflush(stderr);
     unsigned int first_state = sweep ? 0u : (unsigned int)state;
-    unsigned int last_state = sweep ? maximum_lna_state(frequency) :
+    unsigned int last_state = sweep ? maximum_lna_state(frequency, am_port_1) :
                                       (unsigned int)state;
     sdrplay_api_ErrT update = sdrplay_api_Success;
     for (unsigned int current = first_state; current <= last_state; current++) {
@@ -159,8 +184,12 @@ int main(int argc, char **argv)
     }
     fprintf(stderr,
             "GAIN_PROBE_RESULT tuner=%s frequency=%llu lna=%lu update=%d "
+            "rf_notch=%u dab_notch=%u external_reference=%u "
+            "bias_tee=%u am_port_1=%u am_notch=%u "
             "samples=%llu callbacks=%u resets=%u\n",
             argv[1], frequency, sweep ? last_state : state, update,
+            rf_notch, dab_notch, external_reference,
+            bias_tee, am_port_1, am_notch,
             atomic_load(&metrics.samples), atomic_load(&metrics.callbacks),
             atomic_load(&metrics.resets));
     if (update != sdrplay_api_Success || atomic_load(&metrics.samples) == 0u)

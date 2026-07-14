@@ -37,22 +37,22 @@ static void assert_gain_band(uint32_t frequency,
 static void assert_gain_plans(void)
 {
     static const mirisdr_rspduo_gain_plan_t low_a[] = {
-        PLAN(0xc2d1, 0x12ff, 0x12a3, 0x13ff),
-        PLAN(0xc2d1, 0x12ff, 0x12a3, 0x13fb),
-        PLAN(0xc2d1, 0x12ff, 0x12a3, 0x13f7),
-        PLAN(0xc2d1, 0x12ff, 0x12a3, 0x13ef),
-        PLAN(0xd2d1, 0x12ff, 0x12a3, 0x13ef),
-        PLAN(0xced1, 0x12ff, 0x12a3, 0x13ef),
-        PLAN(0xded1, 0x12ff, 0x12a3, 0x13ef),
+        PLAN(0xc2d1, 0x12ff, 0x12a2, 0x13ff),
+        PLAN(0xc2d1, 0x12ff, 0x12a2, 0x13fb),
+        PLAN(0xc2d1, 0x12ff, 0x12a2, 0x13f7),
+        PLAN(0xc2d1, 0x12ff, 0x12a2, 0x13ef),
+        PLAN(0xd2d1, 0x12ff, 0x12a2, 0x13ef),
+        PLAN(0xced1, 0x12ff, 0x12a2, 0x13ef),
+        PLAN(0xded1, 0x12ff, 0x12a2, 0x13ef),
     };
     static const mirisdr_rspduo_gain_plan_t low_b[] = {
-        PLAN(0xc2d1, 0x13ff, 0x13c6, 0x13ff),
-        PLAN(0xc2d1, 0x13ff, 0x13c6, 0x13df),
-        PLAN(0xc2d1, 0x13df, 0x13c6, 0x13bf),
-        PLAN(0xc2d1, 0x13bf, 0x13c6, 0x137f),
-        PLAN(0xd2d1, 0x137f, 0x13c6, 0x137f),
-        PLAN(0xced1, 0x137f, 0x13c6, 0x137f),
-        PLAN(0xded1, 0x137f, 0x13c6, 0x137f),
+        PLAN(0xc2d1, 0x13ff, 0x13c4, 0x13ff),
+        PLAN(0xc2d1, 0x13ff, 0x13c4, 0x13df),
+        PLAN(0xc2d1, 0x13df, 0x13c4, 0x13bf),
+        PLAN(0xc2d1, 0x13bf, 0x13c4, 0x137f),
+        PLAN(0xd2d1, 0x137f, 0x13c4, 0x137f),
+        PLAN(0xced1, 0x137f, 0x13c4, 0x137f),
+        PLAN(0xded1, 0x137f, 0x13c4, 0x137f),
     };
     static const mirisdr_rspduo_gain_plan_t mid_a[] = {
         PLAN(0xc2d1, 0x12df, 0x12a4, 0x13ff),
@@ -133,6 +133,44 @@ static void assert_gain_plans(void)
     assert_gain_band(1500000000u, high_a, high_b,
                      sizeof(high_a) / sizeof(high_a[0]));
 
+    static const struct {
+        uint32_t frequency;
+        size_t count;
+        uint16_t tuner_a_4a;
+        uint16_t tuner_b_4a;
+        uint32_t last_reg9;
+    } routes[] = {
+        {1000u, 7u, 0x12a2u, 0x13c4u, 0xded1u},
+        {12000000u, 7u, 0x12a1u, 0x13c2u, 0xded1u},
+        {30000000u, 7u, 0x12a3u, 0x13c6u, 0xded1u},
+        {60000000u, 10u, 0x12a4u, 0x13c8u, 0xe2d1u},
+        {120000000u, 10u, 0x12b4u, 0x13e8u, 0xe2d1u},
+        {250000000u, 10u, 0x12b0u, 0x13e0u, 0xced1u},
+        {300000000u, 10u, 0x12a8u, 0x13d0u, 0xced1u},
+        {380000000u, 10u, 0x12b8u, 0x13f0u, 0xced1u},
+        {420000000u, 10u, 0x12a4u, 0x13c8u, 0xf2d1u},
+        {1000000000u, 9u, 0x12b4u, 0x13e8u, 0xf2d1u},
+        {2000000000u, 9u, 0x12b4u, 0x13e8u, 0xf2d1u},
+    };
+    for (size_t i = 0u; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+        mirisdr_rspduo_gain_plan_t route = {0};
+        assert(mirisdr_rspduo_gain_plan(routes[i].frequency, 1u, 45, 0u,
+                                        0u, 0u, 0u, 0u, &route) == 0);
+        assert(route.gpio_4a == routes[i].tuner_a_4a);
+        assert(mirisdr_rspduo_gain_plan(routes[i].frequency, 2u, 45, 0u,
+                                        0u, 0u, 0u, 0u, &route) == 0);
+        assert(route.gpio_4a == routes[i].tuner_b_4a);
+        assert(mirisdr_rspduo_gain_plan(
+                   routes[i].frequency, 1u, 45,
+                   (unsigned int)(routes[i].count - 1u),
+                   0u, 0u, 0u, 0u, &route) == 0);
+        assert(route.reg9 == routes[i].last_reg9);
+        assert(mirisdr_rspduo_gain_plan(
+                   routes[i].frequency, 1u, 45,
+                   (unsigned int)routes[i].count,
+                   0u, 0u, 0u, 0u, &route) < 0);
+    }
+
     mirisdr_rspduo_gain_plan_t controls = {0};
     assert(mirisdr_rspduo_gain_plan(100000000u, 1u, 45, 0u, 0u,
                                     1u, 1u, 1u, &controls) == 0);
@@ -140,10 +178,25 @@ static void assert_gain_plans(void)
     assert(controls.gpio_4a == 0x1284u);
     assert(mirisdr_rspduo_gain_plan(100000000u, 2u, 45, 0u, 0u,
                                     0u, 1u, 0u, &controls) == 0);
+    assert(controls.first_gpio_4b == 0x13fcu);
     assert(controls.final_gpio_4b == 0x13fcu);
+    assert(mirisdr_rspduo_gain_plan_with_controls(
+               10000000u, 1u, 45, 4u, 0u, 0u, 0u, 0u, 1u, 0u,
+               &controls) == 0);
+    assert(controls.reg9 == 0xded1u);
+    assert(controls.gpio_4a == 0x12a2u);
+    assert(controls.final_gpio_4b == 0x13ffu);
+    assert(mirisdr_rspduo_gain_plan_with_controls(
+               10000000u, 1u, 45, 2u, 0u, 0u, 0u, 0u, 1u, 1u,
+               &controls) == 0);
+    assert(controls.reg9 == 0xcad1u);
+    assert(controls.first_gpio_4b == 0x12f7u);
+    assert(mirisdr_rspduo_gain_plan_with_controls(
+               10000000u, 1u, 45, 5u, 0u, 0u, 0u, 0u, 1u, 0u,
+               &controls) < 0);
     assert(mirisdr_rspduo_gain_plan(999u, 1u, 45, 0u, 0u,
                                     0u, 0u, 0u, &controls) < 0);
-    assert(mirisdr_rspduo_gain_plan(2000000000u, 1u, 45, 0u, 0u,
+    assert(mirisdr_rspduo_gain_plan(2000000001u, 1u, 45, 0u, 0u,
                                     0u, 0u, 0u, &controls) < 0);
 }
 

@@ -158,6 +158,18 @@ MIRISDR_API int mirisdr_rspduo_gain_plan(uint32_t frequency,
                                           unsigned int dab_notch,
                                           unsigned int external_reference,
                                           mirisdr_rspduo_gain_plan_t *plan);
+MIRISDR_API int mirisdr_rspduo_gain_plan_with_controls(
+                                          uint32_t frequency,
+                                          unsigned int tuner,
+                                          int gain_reduction,
+                                          unsigned int lna_state,
+                                          uint16_t previous_gpio_4b,
+                                          unsigned int rf_notch,
+                                          unsigned int dab_notch,
+                                          unsigned int external_reference,
+                                          unsigned int am_port,
+                                          unsigned int am_notch,
+                                          mirisdr_rspduo_gain_plan_t *plan);
 MIRISDR_API int mirisdr_set_rspduo_gain(mirisdr_dev_t *p, int gain_reduction,
                                          unsigned int lna_state);
 #define MIRISDR_RSPDUO_CHANGE_BIAS_TEE (1u << 0)

@@ -18,7 +18,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual low-IF A/B mode verified at 2 MS/s per tuner |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuners A and B independently |
-| RSPduo LNA routing | All valid A/B states use independently observed register/GPIO plans in the below-60 MHz, 60--420 MHz, 420--1000 MHz, and 1--2 GHz bands |
+| RSPduo LNA routing | All valid A/B states use independently observed register/GPIO plans across the ten hardware routing ranges from 1 kHz through 2 GHz |
 | IQ streaming | Direct/API paths verified; RSPduo single-tuner complex output uses the official ADC filter-mode words and occupies both negative and positive spectral halves at 10 MS/s |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |

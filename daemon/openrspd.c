@@ -294,13 +294,15 @@ static void log_config(const char *operation, int descriptor, uint32_t flags,
 static int stop_stream(daemon_state *state)
 {
     if (!state->stream_thread_started) return 0;
-    if (state->radio) {
-        (void)mirisdr_streaming_stop(state->radio);
-        (void)mirisdr_cancel_async(state->radio);
-    }
+    if (state->radio) (void)mirisdr_cancel_async(state->radio);
     int result = pthread_join(state->stream_thread, NULL);
     state->stream_thread_started = false;
     state->streaming = false;
+    /* Darwin delivers bulk completions on libusb's CFRunLoop thread.  Stop the
+     * endpoint only after read_async has handled every cancellation and freed
+     * its transfers; stopping it first can queue a late callback against
+     * transfer storage that the joined stream thread is about to release. */
+    if (state->radio) (void)mirisdr_streaming_stop(state->radio);
     return result;
 }
 

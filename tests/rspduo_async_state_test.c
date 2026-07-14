@@ -32,6 +32,11 @@ int main(void)
     assert(mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_STALL));
     assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_OVERFLOW));
     assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_ERROR));
+    assert(mirisdr_async_status_allows_resubmit(MIRISDR_ASYNC_INACTIVE));
+    assert(mirisdr_async_status_allows_resubmit(MIRISDR_ASYNC_RUNNING));
+    assert(mirisdr_async_status_allows_resubmit(MIRISDR_ASYNC_PAUSED));
+    assert(!mirisdr_async_status_allows_resubmit(MIRISDR_ASYNC_CANCELING));
+    assert(!mirisdr_async_status_allows_resubmit(MIRISDR_ASYNC_FAILED));
 
     mirisdr_dev_t device;
     memset(&device, 0, sizeof(device));
