@@ -15,6 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdint.h>
+
 #define DEFAULT_ISO_BUFFER      1024
 #define DEFAULT_ISO_BUFFERS     3
 #define DEFAULT_ISO_PACKETS     8
@@ -24,3 +26,11 @@
 #define DEFAULT_BULK_TIMEOUT    1000
 
 #define DEFAULT_BUF_NUMBER      32
+
+/* Only endpoint stalls are safe to clear and resubmit.  An overflow means the
+ * device sent more data than the host requested; retrying it can escalate a
+ * USB babble fault into a reset of the whole upstream hub on macOS. */
+int mirisdr_rspduo_bulk_status_is_retryable(int status);
+
+/* Wall-clock time for correlating transfer failures with daemon recovery. */
+uint64_t mirisdr_wall_clock_milliseconds(void);

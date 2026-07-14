@@ -25,6 +25,7 @@
 #define OPENRSPD_MAX_CLIENTS 32
 #define OPENRSPD_MAX_DEVICES 32u
 #define OPENRSPD_STREAM_SLOT_BYTES (OPENRSP_MAX_IQ_SAMPLES * 4u)
+#define OPENRSPD_DEVICE_SNAPSHOT_CACHE_NANOSECONDS 1000000000L
 
 typedef struct {
     mirisdr_dev_t *radio;
@@ -52,11 +53,24 @@ typedef struct {
     openrsp_dual_config dual_config;
     bool bootstrap_configured;
     openrsp_radio_config bootstrap_config;
+    bool device_snapshot_valid;
+    struct timespec device_snapshot_time;
+    uint32_t device_snapshot_count;
+    openrsp_device_record device_snapshot[OPENRSPD_MAX_DEVICES];
 } daemon_state;
 
 static volatile sig_atomic_t running = 1;
 
-static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
+static unsigned long long wall_clock_milliseconds(void)
+{
+    struct timeval now;
+    if (gettimeofday(&now, NULL) != 0) return 0u;
+    return (unsigned long long)now.tv_sec * 1000u +
+           (unsigned long long)now.tv_usec / 1000u;
+}
+
+static uint32_t snapshot_sdrplay_devices(daemon_state *state,
+                                         openrsp_device_record *records,
                                          size_t capacity);
 static int resolve_acquired_device(daemon_state *state, uint32_t *device_index);
 
@@ -208,7 +222,8 @@ static void *stream_main(void *opaque)
     state->stream_result = result;
     state->stream_error = result != 0;
     if (result != 0) {
-        fprintf(stderr, "RSP stream stopped with error %d\n", result);
+        fprintf(stderr, "RSP stream stopped with error %d time_unix_ms=%llu\n",
+                result, wall_clock_milliseconds());
         (void)fflush(stderr);
     }
     return NULL;
@@ -540,9 +555,10 @@ static void recover_failed_stream(daemon_state *state)
     int identity_result = resolve_acquired_device(state, &resolved_index);
     if (identity_result != 0) {
         if (state->recovery_identity_status != identity_result) {
-            fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=%s\n",
+            fprintf(stderr,
+                    "OPENRSPD_RECOVERY_IDENTITY status=%s time_unix_ms=%llu\n",
                     identity_result == OPENRSP_IDENTITY_AMBIGUOUS ?
-                    "ambiguous" : "not-found");
+                    "ambiguous" : "not-found", wall_clock_milliseconds());
             (void)fflush(stderr);
             state->recovery_identity_status = identity_result;
         }
@@ -550,14 +566,16 @@ static void recover_failed_stream(daemon_state *state)
     }
 
     if (state->recovery_identity_status != 0) {
-        fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=resolved index=%u\n",
-                resolved_index);
+        fprintf(stderr,
+                "OPENRSPD_RECOVERY_IDENTITY status=resolved index=%u time_unix_ms=%llu\n",
+                resolved_index, wall_clock_milliseconds());
         (void)fflush(stderr);
         state->recovery_identity_status = 0;
     }
 
-    fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u\n",
-            previous_index, resolved_index);
+    fprintf(stderr,
+            "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u time_unix_ms=%llu\n",
+            previous_index, resolved_index, wall_clock_milliseconds());
     (void)fflush(stderr);
     state->acquired_identity.device_index = resolved_index;
     /* A fresh application session starts the endpoint with its initial
@@ -633,11 +651,11 @@ static void finish_recovery_config(daemon_state *state)
     result |= set_rspduo_controls(state->radio, target,
                                   OPENRSP_CHANGE_RSPDUO_CONTROLS);
     fprintf(stderr,
-            "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u\n",
+            "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u time_unix_ms=%llu\n",
             result, bootstrap->center_frequency_hz, target->sample_rate_hz,
             target->center_frequency_hz, target->bandwidth_hz,
             target->if_frequency_hz, target->gain_reduction_db,
-            target->lna_state);
+            target->lna_state, wall_clock_milliseconds());
     (void)fflush(stderr);
     state->recovery_config_pending = false;
     if (result != 0) {
@@ -701,9 +719,30 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
     return OPENRSP_STATUS_OK;
 }
 
-static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
+static uint32_t snapshot_sdrplay_devices(daemon_state *state,
+                                         openrsp_device_record *records,
                                          size_t capacity)
 {
+    struct timespec now = {0};
+    if (state->device_snapshot_valid &&
+        clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+        time_t seconds = now.tv_sec - state->device_snapshot_time.tv_sec;
+        long nanoseconds = now.tv_nsec - state->device_snapshot_time.tv_nsec;
+        if (nanoseconds < 0) {
+            --seconds;
+            nanoseconds += 1000000000L;
+        }
+        if (seconds == 0 &&
+            nanoseconds < OPENRSPD_DEVICE_SNAPSHOT_CACHE_NANOSECONDS) {
+            uint32_t copied = state->device_snapshot_count;
+            if (copied > capacity) copied = (uint32_t)capacity;
+            if (records && copied != 0u)
+                memcpy(records, state->device_snapshot,
+                       copied * sizeof(*records));
+            return state->device_snapshot_count;
+        }
+    }
+
     /* A physically replugged RSPduo first appears as the raw 1df7:3020
      * firmware loader with no serial descriptor.  Stable-serial matching is
      * impossible until the driver has loaded the locally installed firmware.
@@ -755,13 +794,22 @@ static uint32_t snapshot_sdrplay_devices(openrsp_device_record *records,
         }
         ++count;
     }
+    uint32_t cached = count;
+    if (cached > capacity) cached = (uint32_t)capacity;
+    if (cached > OPENRSPD_MAX_DEVICES) cached = OPENRSPD_MAX_DEVICES;
+    if (records && cached != 0u)
+        memcpy(state->device_snapshot, records,
+               cached * sizeof(*records));
+    state->device_snapshot_count = cached;
+    if (clock_gettime(CLOCK_MONOTONIC, &state->device_snapshot_time) == 0)
+        state->device_snapshot_valid = true;
     return count;
 }
 
 static int resolve_acquired_device(daemon_state *state, uint32_t *device_index)
 {
     openrsp_device_record devices[OPENRSPD_MAX_DEVICES];
-    uint32_t count = snapshot_sdrplay_devices(devices, OPENRSPD_MAX_DEVICES);
+    uint32_t count = snapshot_sdrplay_devices(state, devices, OPENRSPD_MAX_DEVICES);
     int result = openrsp_identity_resolve(&state->acquired_identity, devices,
                                           count, device_index);
     if (result == 0) state->acquired_identity.device_index = *device_index;
@@ -790,7 +838,7 @@ static int serve_request(int descriptor, daemon_state *state)
         response.status = OPENRSP_STATUS_OK;
     } else if (request.type == OPENRSP_CMD_LIST && request.payload_bytes == 0u) {
         response.status = OPENRSP_STATUS_OK;
-        listed_count = snapshot_sdrplay_devices(listed_devices,
+        listed_count = snapshot_sdrplay_devices(state, listed_devices,
                                                 OPENRSPD_MAX_DEVICES);
         response.changed_flags = listed_count;
     } else if (request.type == OPENRSP_CMD_LOCK_API && request.payload_bytes == 0u) {
@@ -815,7 +863,8 @@ static int serve_request(int descriptor, daemon_state *state)
             response.status = OPENRSP_STATUS_OK;
         } else {
             openrsp_device_record devices[OPENRSPD_MAX_DEVICES];
-            uint32_t count = snapshot_sdrplay_devices(devices, OPENRSPD_MAX_DEVICES);
+            uint32_t count = snapshot_sdrplay_devices(state, devices,
+                                                      OPENRSPD_MAX_DEVICES);
             uint32_t resolved_index = 0u;
             int identity_result = openrsp_identity_resolve(acquire, devices, count,
                                                            &resolved_index);
