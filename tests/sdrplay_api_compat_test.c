@@ -1120,6 +1120,17 @@ int main(void)
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Tuner_Gr, 0u) == sdrplay_api_OutOfRange);
     params->rxChannelA->tunerParams.gain.LNAstate = 0u;
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 10000000.0;
+    params->rxChannelA->tunerParams.gain.LNAstate = 5u;
+    params->rxChannelA->rspDuoTunerParams.tuner1AmPortSel =
+        sdrplay_api_RspDuo_AMPORT_1;
+    assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
+                              sdrplay_api_Update_RspDuo_AmPortSelect, 0u) ==
+           sdrplay_api_OutOfRange);
+    params->rxChannelA->rspDuoTunerParams.tuner1AmPortSel =
+        sdrplay_api_RspDuo_AMPORT_2;
+    params->rxChannelA->tunerParams.rfFreq.rfHz = 101000000.0;
+    params->rxChannelA->tunerParams.gain.LNAstate = 0u;
     params->rxChannelA->ctrlParams.decimation.enable = 2u;
     assert(sdrplay_api_Update(devices[0].dev, sdrplay_api_Tuner_A,
                               sdrplay_api_Update_Ctrl_Decimation, 0u) ==

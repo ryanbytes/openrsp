@@ -97,6 +97,11 @@ int mirisdr_rspduo_bulk_status_is_retryable(int status)
     return status == LIBUSB_TRANSFER_STALL;
 }
 
+int mirisdr_async_status_allows_resubmit(int status)
+{
+    return status != MIRISDR_ASYNC_CANCELING && status != MIRISDR_ASYNC_FAILED;
+}
+
 uint64_t mirisdr_wall_clock_milliseconds(void)
 {
     struct timespec now;
@@ -144,6 +149,8 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             if (owned_buffer == NULL) goto failed;
             memcpy(owned_buffer, xfer->buffer, (size_t)transfer_length);
             transfer_buffer = owned_buffer;
+            if (!mirisdr_async_status_allows_resubmit(
+                    atomic_load(&p->async_status))) return;
             if (libusb_submit_transfer(xfer) < 0) goto failed;
             resubmitted = 1;
         }
@@ -282,12 +289,16 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
             }
         }
         /* pokračujeme dalším přenosem */
-        if (!resubmitted && libusb_submit_transfer(xfer) < 0) {
+        if (!resubmitted && mirisdr_async_status_allows_resubmit(
+                                atomic_load(&p->async_status)) &&
+            libusb_submit_transfer(xfer) < 0) {
             fprintf( stderr, "error re-submitting URB on device %u\n", p->index);
             goto failed;
         }
     } else if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
                mirisdr_rspduo_bulk_status_is_retryable(xfer->status) &&
+               mirisdr_async_status_allows_resubmit(
+                   atomic_load(&p->async_status)) &&
                p->bulk_recovery_attempts < 3u) {
         ++p->bulk_recovery_attempts;
         int recovery = libusb_clear_halt(p->dh, 0x81u);

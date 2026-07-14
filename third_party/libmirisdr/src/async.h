@@ -32,5 +32,9 @@
  * USB babble fault into a reset of the whole upstream hub on macOS. */
 int mirisdr_rspduo_bulk_status_is_retryable(int status);
 
+/* Completed transfers may be resubmitted during startup and normal streaming,
+ * but never after cancellation or failure has started. */
+int mirisdr_async_status_allows_resubmit(int status);
+
 /* Wall-clock time for correlating transfer failures with daemon recovery. */
 uint64_t mirisdr_wall_clock_milliseconds(void);

@@ -464,6 +464,17 @@ static int rspduo_lna_gain_reduction(double rf_hz, unsigned int state, int *redu
     return 0;
 }
 
+static int rspduo_am_port_lna_state_valid(
+    const sdrplay_api_RxChannelParamsT *channel,
+    sdrplay_api_TunerSelectT tuner)
+{
+    return tuner != sdrplay_api_Tuner_A ||
+           channel->rspDuoTunerParams.tuner1AmPortSel !=
+               sdrplay_api_RspDuo_AMPORT_1 ||
+           channel->tunerParams.rfFreq.rfHz >= 60000000.0 ||
+           channel->tunerParams.gain.LNAstate < 5u;
+}
+
 static int valid_bandwidth(sdrplay_api_Bw_MHzT bandwidth)
 {
     return bandwidth == sdrplay_api_BW_0_200 ||
@@ -618,12 +629,14 @@ static sdrplay_api_ErrT validate_update(const compat_device_context *device,
         channel->tunerParams.ifType != sdrplay_api_IF_Zero &&
         channel->tunerParams.bwType > sdrplay_api_BW_1_536)
         return sdrplay_api_InvalidMode;
-    if ((reason & sdrplay_api_Update_Tuner_Gr) != 0u) {
+    if ((reason & (sdrplay_api_Update_Tuner_Gr |
+                   sdrplay_api_Update_RspDuo_AmPortSelect)) != 0u) {
         const sdrplay_api_GainT *gain = &channel->tunerParams.gain;
         int lna_reduction = 0;
         if (gain->gRdB < 20 || gain->gRdB > 59 ||
             rspduo_lna_gain_reduction(channel->tunerParams.rfFreq.rfHz,
-                                      gain->LNAstate, &lna_reduction) < 0)
+                                      gain->LNAstate, &lna_reduction) < 0 ||
+            !rspduo_am_port_lna_state_valid(channel, tuner))
             return sdrplay_api_OutOfRange;
     }
     if ((reason & sdrplay_api_Update_Tuner_LoMode) != 0u &&
@@ -660,7 +673,8 @@ static int apply_rspduo_gain_locked(compat_device_context *device,
     int lna_reduction;
     if (gain->gRdB < 20 || gain->gRdB > 59 ||
         rspduo_lna_gain_reduction(channel->tunerParams.rfFreq.rfHz,
-                                  gain->LNAstate, &lna_reduction) < 0) return -1;
+                                  gain->LNAstate, &lna_reduction) < 0 ||
+        !rspduo_am_port_lna_state_valid(channel, tuner)) return -1;
 
     int total_reduction = gain->gRdB + lna_reduction;
     int current_gain = clamp_int(105 - total_reduction, -20, 105);
