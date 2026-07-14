@@ -17,6 +17,8 @@
 
 #include "async.h"
 
+#include <time.h>
+
 /* uložení dat */
 static int mirisdr_feed_async (mirisdr_dev_t *p, unsigned char *samples, uint32_t bytes) {
     uint32_t i;
@@ -93,6 +95,13 @@ static void mirisdr_dual_noop(unsigned char *samples, uint32_t bytes, void *cont
 int mirisdr_rspduo_bulk_status_is_retryable(int status)
 {
     return status == LIBUSB_TRANSFER_STALL;
+}
+
+uint64_t mirisdr_wall_clock_milliseconds(void)
+{
+    struct timespec now;
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC) return 0u;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
 }
 
 static uint8_t *samples_realloc(mirisdr_dev_t *p, int size)
@@ -285,21 +294,26 @@ static void LIBUSB_CALL _libusb_callback (struct libusb_transfer *xfer) {
         if (recovery == 0) recovery = libusb_submit_transfer(xfer);
         if (recovery == 0) {
             fprintf(stderr,
-                    "recovering RSPduo bulk transfer status %d attempt %u on device %u\n",
-                    xfer->status, p->bulk_recovery_attempts, p->index);
+                    "recovering RSPduo bulk transfer status %d attempt %u on device %u time_unix_ms=%llu\n",
+                    xfer->status, p->bulk_recovery_attempts, p->index,
+                    (unsigned long long)mirisdr_wall_clock_milliseconds());
             return;
         }
         fprintf(stderr,
-                "RSPduo bulk recovery failed status %d attempt %u result %d on device %u\n",
-                xfer->status, p->bulk_recovery_attempts, recovery, p->index);
+                "RSPduo bulk recovery failed status %d attempt %u result %d on device %u time_unix_ms=%llu\n",
+                xfer->status, p->bulk_recovery_attempts, recovery, p->index,
+                (unsigned long long)mirisdr_wall_clock_milliseconds());
         goto failed;
     } else if (xfer->status != LIBUSB_TRANSFER_CANCELLED) {
         if (p->usb_pid == 0x3020u && xfer->type == LIBUSB_TRANSFER_TYPE_BULK &&
             xfer->status == LIBUSB_TRANSFER_OVERFLOW)
             fprintf(stderr,
-                    "fatal RSPduo bulk overflow on device %u - stopping stream to protect USB bus\n",
-                    p->index);
-        fprintf( stderr, "error async transfer status %d on device %u\n", xfer->status, p->index);
+                    "fatal RSPduo bulk overflow on device %u - stopping stream to protect USB bus time_unix_ms=%llu\n",
+                    p->index, (unsigned long long)mirisdr_wall_clock_milliseconds());
+        fprintf(stderr,
+                "error async transfer status %d on device %u time_unix_ms=%llu\n",
+                xfer->status, p->index,
+                (unsigned long long)mirisdr_wall_clock_milliseconds());
         goto failed;
     }
 

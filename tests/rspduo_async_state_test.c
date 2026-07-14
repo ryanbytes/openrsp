@@ -28,6 +28,7 @@ static void *complete_cancellation(void *opaque)
 
 int main(void)
 {
+    assert(mirisdr_wall_clock_milliseconds() != 0u);
     assert(mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_STALL));
     assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_OVERFLOW));
     assert(!mirisdr_rspduo_bulk_status_is_retryable(LIBUSB_TRANSFER_ERROR));

@@ -61,6 +61,14 @@ typedef struct {
 
 static volatile sig_atomic_t running = 1;
 
+static unsigned long long wall_clock_milliseconds(void)
+{
+    struct timeval now;
+    if (gettimeofday(&now, NULL) != 0) return 0u;
+    return (unsigned long long)now.tv_sec * 1000u +
+           (unsigned long long)now.tv_usec / 1000u;
+}
+
 static uint32_t snapshot_sdrplay_devices(daemon_state *state,
                                          openrsp_device_record *records,
                                          size_t capacity);
@@ -214,7 +222,8 @@ static void *stream_main(void *opaque)
     state->stream_result = result;
     state->stream_error = result != 0;
     if (result != 0) {
-        fprintf(stderr, "RSP stream stopped with error %d\n", result);
+        fprintf(stderr, "RSP stream stopped with error %d time_unix_ms=%llu\n",
+                result, wall_clock_milliseconds());
         (void)fflush(stderr);
     }
     return NULL;
@@ -546,9 +555,10 @@ static void recover_failed_stream(daemon_state *state)
     int identity_result = resolve_acquired_device(state, &resolved_index);
     if (identity_result != 0) {
         if (state->recovery_identity_status != identity_result) {
-            fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=%s\n",
+            fprintf(stderr,
+                    "OPENRSPD_RECOVERY_IDENTITY status=%s time_unix_ms=%llu\n",
                     identity_result == OPENRSP_IDENTITY_AMBIGUOUS ?
-                    "ambiguous" : "not-found");
+                    "ambiguous" : "not-found", wall_clock_milliseconds());
             (void)fflush(stderr);
             state->recovery_identity_status = identity_result;
         }
@@ -556,14 +566,16 @@ static void recover_failed_stream(daemon_state *state)
     }
 
     if (state->recovery_identity_status != 0) {
-        fprintf(stderr, "OPENRSPD_RECOVERY_IDENTITY status=resolved index=%u\n",
-                resolved_index);
+        fprintf(stderr,
+                "OPENRSPD_RECOVERY_IDENTITY status=resolved index=%u time_unix_ms=%llu\n",
+                resolved_index, wall_clock_milliseconds());
         (void)fflush(stderr);
         state->recovery_identity_status = 0;
     }
 
-    fprintf(stderr, "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u\n",
-            previous_index, resolved_index);
+    fprintf(stderr,
+            "OPENRSPD_RECOVERY_REOPEN previous_index=%u index=%u time_unix_ms=%llu\n",
+            previous_index, resolved_index, wall_clock_milliseconds());
     (void)fflush(stderr);
     state->acquired_identity.device_index = resolved_index;
     /* A fresh application session starts the endpoint with its initial
@@ -639,11 +651,11 @@ static void finish_recovery_config(daemon_state *state)
     result |= set_rspduo_controls(state->radio, target,
                                   OPENRSP_CHANGE_RSPDUO_CONTROLS);
     fprintf(stderr,
-            "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u\n",
+            "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u time_unix_ms=%llu\n",
             result, bootstrap->center_frequency_hz, target->sample_rate_hz,
             target->center_frequency_hz, target->bandwidth_hz,
             target->if_frequency_hz, target->gain_reduction_db,
-            target->lna_state);
+            target->lna_state, wall_clock_milliseconds());
     (void)fflush(stderr);
     state->recovery_config_pending = false;
     if (result != 0) {
