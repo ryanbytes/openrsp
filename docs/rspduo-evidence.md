@@ -142,8 +142,10 @@ AddressSanitizer leak detection is unavailable, so the sanitizer run uses
 `detect_leaks=0` and must not be described as a leak check.
 
 The documented pre-selection lifecycle is also exercised: debug logging accepts
-a null device handle before selection, while heartbeat disabling fails unless
-the calling thread holds the device API lock and no device has been selected.
+a null device handle before selection, while heartbeat disabling succeeds after
+`Open` and before device selection, matching the reference library.
+Debug logging now stores the selected level and gates compatibility-layer
+message, warning, and error diagnostics; it is no longer validation-only.
 The device API lock is a daemon-owned, cross-process lease rather than only an
 in-process mutex. Contending clients receive a busy response, and disconnecting
 the owner releases the lease so an application crash cannot strand discovery.
@@ -155,6 +157,37 @@ RSP1/RSP1A/RSP2/RSPduo hardware identifiers. SDRplay's published PID list also
 identifies RSPdx as `0x3030`; OpenRSP
 recognizes that identity in direct discovery but does not claim streaming
 support for it. See the [SDRplay VirtualHere guide](https://www.sdrplay.com/docs/VirtualHere.pdf).
+
+## Software processing and synchronized-update coverage (2026-07-14)
+
+The compatibility stream now applies independent per-tuner DC removal and IQ
+imbalance correction before ADS-B filtering and normal decimation. Correction
+coefficients and periodic calibration schedules are retained independently of
+callback frame boundaries. Synthetic
+fixtures exercise correction enable/disable state, convergence, retained frame
+state, calibration windows, and all four documented ADS-B modes with pass-band
+and stop-band signals. The no-decimation ADS-B path uses a 17-tap fixed-point
+FIR with duplicated circular history so its inner loop has no modulo or
+floating-point division. These tests establish deterministic software behavior;
+they are not calibrated RF measurements against the proprietary implementation.
+
+Gain, RF, sample-rate, and AGC updates can be scheduled at wrap-safe one-shot or
+periodic sample boundaries. Reset flags cancel only their selected pending
+categories. The compatibility layer enforces the documented sample-rate and
+gain-limit-dependent AGC setpoint bounds, including extended gain-reduction
+setpoints through 0 dBFS. The internal daemon protocol accepts the complete
+`-72..0` envelope because configuration messages do not carry the API's
+`minGr` policy and unchanged AGC fields accompany unrelated updates. Unit and
+mock-daemon tests cover the boundary and reset behavior; live RSPduo timing and
+RF-output validation remain outstanding.
+
+Protocol version 8 adds a typed device-status frame. A transport/socket loss
+still maps to `DeviceFailure`. When fresh USB inventories cannot resolve the
+selected stable identity for five seconds, the daemon emits one removal status
+and the compatibility layer maps it to `DeviceRemoved`; shorter absences retain
+the previously verified transparent replug recovery path. Hardware-free tests
+cover grace timing, one-shot notification, backend propagation, and separation
+from `DeviceFailure`. A new long-unplug live test has not yet been run.
 
 ## Live unplug/replug recovery (2026-07-12)
 
@@ -210,7 +243,7 @@ SDRTrunk's live tuner view then showed the RSPduo as the control tuner centered
 at 855.01250 MHz with eight locked P25 channels. The eight listed RSPduo-backed
 channels included six control channels and two active traffic channels, with
 live signal and frequency-error measurements. The session also accumulated
-successful SAFE-T, Wabash, Somerset, and Howard County upload counts. The only
+successful upload counts across multiple P25 sites. The only
 other active tuner was an RTL receiver at 155 MHz, so the displayed 800 MHz P25
 chains were specifically allocated to the RSPduo. This proves post-deployment
 streaming, tuning, gain application, and live P25 use. At that stage,
@@ -359,7 +392,7 @@ drop, IQ-gap, device-failure, or stream-stop error was observed. This verifies
 single-tuner RSPduo receive streaming at that one rate and mode; it does not
 verify every advertised Soapy rate, antennas, dual-tuner operation, or the
 currently unsupported bias-tee/notch/external-reference controls. SDRTrunk was
-restarted afterward, rediscovered the RSPduo, restored the Wabash channel, and
+restarted afterward, rediscovered the RSPduo, restored its assigned channel, and
 loaded JMBE normally.
 
 Ubuntu CI now checks out that pinned upstream commit, builds it against the
@@ -378,7 +411,7 @@ repeated the physical receive test against the installed service and converged
 to 1.98897 MS/s. The installed daemon logged 6 MS/s, 1.620 MHz IF, first IQ,
 and continuing AGC gain updates without a callback drop, IQ gap, device
 failure, or stream-stop error. SDRTrunk subsequently rediscovered the RSPduo
-and restored the Wabash channel and JMBE on the same installed artifacts.
+and restored its assigned channel and JMBE on the same installed artifacts.
 
 The installed artifacts then passed an independent Soapy control probe at
 101.1 MHz. The probe disabled AGC through `setGainMode`, applied IFGR/RFGR
@@ -624,7 +657,9 @@ Update validation now rejects non-finite/out-of-range sample rate and RF,
 unknown bandwidth and IF values, invalid low-IF/bandwidth combinations, gain or
 band-specific LNA states outside their tables, malformed boolean controls, and
 AGC modes/set points outside the public API ranges before any daemon command is
-sent. RSPduo limits use SDRplay's published 1 kHz--2 GHz coverage and
+sent. The documented RSPduo RF coverage is 1 kHz--2 GHz, but differential API
+3.15.1 probes show that the reference implementation accepts 0--999 Hz too;
+OpenRSP matches that observable boundary and its measured gain calibration.
 2--10.66 MSPS sample-frequency range.
 
 API events now use a bounded dispatcher queue instead of invoking application
@@ -637,20 +672,23 @@ normal frame. Gain and device-failure events use the same dispatcher.
 
 ## Typed last-error behavior (2026-07-13)
 
-The official 3.15.1 library was behavior-probed with its service absent and no
-receiver attached. `GetLastErrorByType` returned null for types -1 and 4 and
-left the caller's timestamp unchanged. Type 0 returned the recorded DLL error
-with a nonzero microsecond timestamp; types 1, 2, and 3 returned null and also
-left the timestamp unchanged because no error existed in those categories.
+The official 3.15.1 library was behavior-probed both without its service and in
+an initialized RSPduo session. `GetLastErrorByType` returns null for types -1
+and 4 and leaves the caller's timestamp unchanged. Valid empty categories 0--3
+return null and zero the timestamp in an initialized session. Device-side RF or
+gain validation failures populate category 3 with a nonzero microsecond
+timestamp, and `GetLastError` returns that newest record.
 
-OpenRSP previously ignored the requested type, returned its one record for all
-integers, and always overwrote the timestamp with zero. The compatibility layer
-now returns its in-process error only for DLL category 0, records its UTC time
-in microseconds, and leaves the caller's timestamp untouched for unsupported or
-currently empty categories. The compatibility fixture covers -1 through 4,
-then injects a rejected RF update and requires the typed DLL record, message,
-and nonzero timestamp. Separate DLL-device and daemon-side error histories are
-not implemented yet; those categories return null instead of fabricating data.
+OpenRSP previously retained only one category-0 record. The compatibility layer
+now keeps independent histories for DLL, DLL-device, service, and
+service-device categories, returns null for an empty category, and leaves
+unsupported-type timestamps untouched. Validation, synchronized-update, and
+daemon rejection failures tied to the selected receiver populate the
+service-device history. The fixture covers -1 through 4, empty timestamps,
+latest-record selection, and injected validation/backend failures.
+With the service absent, the reference library fails `Open` and retains a
+category-0 DLL record; OpenRSP now verifies daemon reachability at `Open` and
+does the same instead of exposing a lazily broken API session.
 
 The API compatibility callback path now allocates its deinterleaving buffers
 once per `Init` session at the protocol's bounded maximum frame size and frees
@@ -1014,9 +1052,8 @@ calling `GetDeviceParams` before modifying any settings returned a 6 MHz device
 rate, 1.620 MHz IF on both channels, 0.200 MHz default bandwidth on both
 channels, and disabled x1 decimation. No receiver identity was retained.
 
-OpenRSP discovery now reports tuner mask `Both` and capability mask `3`, which
-contains the implemented single and direct-dual modes but deliberately omits
-unimplemented master/slave operation. Dual selection installs the observed 6
+OpenRSP discovery reports tuner mask `Both` and capability mask `7`, containing
+single, direct-dual, and master operation. Dual selection installs the observed 6
 or 8 MHz shared clock and matching 1.620 or 2.048 MHz IF defaults on both
 channels before the application receives its parameter pointers. The
 hardware-free compatibility fixture verifies the capability mask, rejects a
@@ -1070,3 +1107,35 @@ the same three-second interval (1.978 MS/s measured), with nonzero RMS, and
 closed cleanly. This verifies the complete Soapy-to-API-to-daemon live control
 path for independent A/B frequency and gain settings; it does not imply that
 unpatched upstream SoapySDRPlay3 has corrected its channel-selection bug.
+
+## Master/slave and final public-API differential audit (2026-07-16)
+
+Protocol version 9 gives master and slave clients separate ownership records
+over one RSPduo direct-dual hardware session. Tuner A is the master lane, tuner
+B is the discoverable slave lane, and the daemon routes stream and lifecycle
+events to the owning sockets. Live 6 MHz and 8 MHz sessions attached and
+initialized the slave, streamed both tuners, delivered attach/init and
+uninit/detach events, and cleaned up. Reciprocal RF captures moved a strong
+101.1 MHz broadcast signature from B to A when the requested frequencies were
+swapped; the signature did not remain in both lanes. This disproves mirrored
+A/B RF routing on the tested unit. Three consecutive 6 MHz master sessions also
+completed without a USB disappearance after stop-before-cancel teardown was
+restored.
+
+The 20 documented API 3.15 exports are present. The vendor library has three
+additional undocumented symbols (`GetInternalDeviceParams`, `InternalUpdate`,
+and `SelectDeviceCB`) whose opaque parameter types and private update enum are
+absent from the installed public headers. OpenRSP deliberately does not export
+guessed signatures for those private hooks. Official and OpenRSP default dumps
+otherwise match exactly for single A, single B, direct dual at 6 MHz, and
+master at 6 MHz.
+
+A final initialized differential probe established the observable RF edge
+semantics. API 3.15.1 accepts 0, 1, 500, 999, 1000, and 2,000,000,000 Hz; it
+rejects negative, over-2-GHz, infinite, and NaN requests. The 50-ohm gain
+outputs vary linearly from the measured 0 Hz knot through 999 Hz, then use the
+previously measured nearest-kHz behavior. Tuner-A AM Port 1 has its own measured
+0 Hz knot. The current OpenRSP library and daemon matched those return codes and
+gain values to floating-point tolerance on the physical RSPduo while streaming,
+then uninitialized, released, and closed normally. The same probe confirmed
+independent typed last-error histories and category-3 device validation errors.

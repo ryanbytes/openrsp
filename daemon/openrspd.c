@@ -63,6 +63,7 @@ typedef struct {
     bool bootstrap_configured;
     openrsp_radio_config bootstrap_config;
     bool device_snapshot_valid;
+    bool pnp_restart_system_restart_required;
     struct timespec device_snapshot_time;
     uint32_t device_snapshot_count;
     openrsp_device_record device_snapshot[OPENRSPD_MAX_DEVICES];
@@ -992,15 +993,27 @@ static uint32_t snapshot_sdrplay_devices(daemon_state *state,
 #endif
             if (!cold_boot && !transient_recovery) continue;
             if (transient_recovery) {
+                if (state->pnp_restart_system_restart_required) continue;
                 int restart_result = openrsp_windows_restart_usb_device(
                     0x1df7u, 0x3020u,
                     state->acquired_identity.serial[0] != '\0' ?
                         state->acquired_identity.serial : NULL);
+                const char *restart_status = restart_result == 0 ? "requested" :
+                    restart_result == OPENRSP_WINDOWS_DEVICE_RESTART_REBOOT_REQUIRED ?
+                    "reboot-required" :
+                    restart_result ==
+                        OPENRSP_WINDOWS_DEVICE_RESTART_SYSTEM_RESTART_REQUIRED ?
+                    "system-restart-required" : "failed";
                 fprintf(stderr,
                         "OPENRSPD_PNP_RESTART index=%u status=%s result=%d\n",
-                        index, restart_result == 0 ? "requested" : "failed",
+                        index, restart_status,
                         restart_result);
                 (void)fflush(stderr);
+                if (openrsp_windows_device_restart_requires_system_restart(
+                        restart_result)) {
+                    state->pnp_restart_system_restart_required = true;
+                    continue;
+                }
                 if (restart_result == 0) {
                     const struct timespec restart_delay = {.tv_sec = 1};
                     (void)nanosleep(&restart_delay, NULL);

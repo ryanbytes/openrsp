@@ -46,6 +46,12 @@ int openrsp_windows_usb_instance_matches(const char *instance_id,
            ascii_equal(instance_id + prefix_length, serial);
 }
 
+int openrsp_windows_device_restart_requires_system_restart(int result)
+{
+    return result == OPENRSP_WINDOWS_DEVICE_RESTART_REBOOT_REQUIRED ||
+           result == OPENRSP_WINDOWS_DEVICE_RESTART_SYSTEM_RESTART_REQUIRED;
+}
+
 int openrsp_windows_restart_usb_device(uint16_t vendor_id,
                                        uint16_t product_id,
                                        const char *serial)
@@ -79,7 +85,8 @@ int openrsp_windows_restart_usb_device(uint16_t vendor_id,
     }
     if (matches != 1u) {
         SetupDiDestroyDeviceInfoList(devices);
-        return matches == 0u ? -1 : -2;
+        return matches == 0u ? OPENRSP_WINDOWS_DEVICE_RESTART_NOT_FOUND :
+                              OPENRSP_WINDOWS_DEVICE_RESTART_AMBIGUOUS;
     }
     SP_PROPCHANGE_PARAMS change;
     memset(&change, 0, sizeof(change));
@@ -90,14 +97,26 @@ int openrsp_windows_restart_usb_device(uint16_t vendor_id,
     int result = 0;
     if (!SetupDiSetClassInstallParamsA(
             devices, &match, &change.ClassInstallHeader, sizeof(change)) ||
-        !SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devices, &match))
+        !SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devices, &match)) {
         result = (int)GetLastError();
+    } else {
+        SP_DEVINSTALL_PARAMS_A install_params = {
+            .cbSize = sizeof(SP_DEVINSTALL_PARAMS_A)
+        };
+        if (!SetupDiGetDeviceInstallParamsA(devices, &match, &install_params)) {
+            result = (int)GetLastError();
+        } else if ((install_params.Flags & DI_NEEDREBOOT) != 0u) {
+            result = OPENRSP_WINDOWS_DEVICE_RESTART_REBOOT_REQUIRED;
+        } else if ((install_params.Flags & DI_NEEDRESTART) != 0u) {
+            result = OPENRSP_WINDOWS_DEVICE_RESTART_SYSTEM_RESTART_REQUIRED;
+        }
+    }
     SetupDiDestroyDeviceInfoList(devices);
     return result;
 #else
     (void)vendor_id;
     (void)product_id;
     (void)serial;
-    return -1;
+    return OPENRSP_WINDOWS_DEVICE_RESTART_NOT_FOUND;
 #endif
 }
