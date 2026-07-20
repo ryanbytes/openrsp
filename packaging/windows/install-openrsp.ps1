@@ -167,8 +167,8 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install OpenRSP Windows runtime")) {
     ) | Out-Null
     Invoke-ServiceControl -ArgumentList @(
         "failure", "OpenRSP",
-        "reset=", "86400",
-        "actions=", "restart/5000/restart/15000/restart/30000"
+        "reset=", "60",
+        "actions=", "restart/5000/restart/15000/restart/30000/restart/30000/restart/30000"
     ) | Out-Null
     Invoke-ServiceControl -ArgumentList @(
         "failureflag", "OpenRSP", "1"

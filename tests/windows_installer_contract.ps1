@@ -24,7 +24,7 @@ $requirements = [ordered]@{
     "OpenRSP automatic startup" =
         'New-Service[\s\S]+-Name\s+OpenRSP[\s\S]+-StartupType\s+Automatic'
     "OpenRSP restart recovery" =
-        '"failure"\s*,\s*"OpenRSP"[\s\S]+restart/5000/restart/15000/restart/30000'
+        '"failure"\s*,\s*"OpenRSP"[\s\S]+"reset="\s*,\s*"60"[\s\S]+restart/5000/restart/15000/restart/30000/restart/30000/restart/30000'
     "non-crash failure recovery" =
         '"failureflag"\s*,\s*"OpenRSP"\s*,\s*"1"'
     "daemon port service environment" =

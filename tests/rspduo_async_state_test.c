@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "mirisdr.h"
 #include "async.h"
+#include "device_state.h"
 #include "libusb.h"
 #include "structs.h"
 
@@ -29,6 +30,17 @@ static void *complete_cancellation(void *opaque)
 
 int main(void)
 {
+    assert(mirisdr_rspduo_descriptor_identity_state(
+               0x1df7u, 0x3020u, 0u, 0) == MIRISDR_RSPDUO_IDENTITY_COLD);
+    assert(mirisdr_rspduo_descriptor_identity_state(
+               0x1df7u, 0x3020u, 3u, 18) == MIRISDR_RSPDUO_IDENTITY_READY);
+    assert(mirisdr_rspduo_descriptor_identity_state(
+               0x1df7u, 0x3020u, 3u, LIBUSB_ERROR_TIMEOUT) ==
+           MIRISDR_RSPDUO_IDENTITY_UNREADABLE);
+    assert(mirisdr_rspduo_descriptor_identity_state(
+               0x1df7u, 0x3011u, 0u, 0) == MIRISDR_RSPDUO_IDENTITY_READY);
+    assert(mirisdr_rspduo_descriptor_identity_state(
+               0x0bda, 0x2838u, 0u, 0) == MIRISDR_RSPDUO_IDENTITY_READY);
     assert(mirisdr_wall_clock_milliseconds() != 0u);
     assert(mirisdr_rspduo_bulk_status_requires_restart(LIBUSB_TRANSFER_STALL));
     assert(!mirisdr_rspduo_bulk_status_requires_restart(LIBUSB_TRANSFER_OVERFLOW));
