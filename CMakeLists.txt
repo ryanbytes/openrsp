@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(openrsp VERSION 0.1.0 LANGUAGES C)
+if(POLICY CMP0207)
+    cmake_policy(SET CMP0207 NEW)
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -28,6 +31,13 @@ if(CMAKE_CXX_COMPILER)
 endif()
 find_package(Threads REQUIRED)
 
+set(OPENRSP_MATH_LIBRARIES m)
+set(OPENRSP_SOCKET_LIBRARIES)
+if(WIN32)
+    set(OPENRSP_MATH_LIBRARIES)
+    set(OPENRSP_SOCKET_LIBRARIES ws2_32)
+endif()
+
 add_library(openrsp_identity src/identity.c)
 target_include_directories(openrsp_identity PUBLIC include)
 target_compile_options(openrsp_identity PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -38,17 +48,21 @@ target_include_directories(openrsp PUBLIC include)
 target_link_libraries(openrsp PUBLIC PkgConfig::LIBUSB)
 target_compile_options(openrsp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-if(UNIX)
+if(UNIX OR WIN32)
+    if(UNIX)
     configure_file(packaging/sdrplay_api.pc.in
         "${CMAKE_CURRENT_BINARY_DIR}/sdrplay_api.pc" @ONLY)
+    endif()
     add_library(openrsp_client src/client_posix.c)
     set_target_properties(openrsp_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(openrsp_client PUBLIC include)
+    target_link_libraries(openrsp_client PUBLIC ${OPENRSP_SOCKET_LIBRARIES})
     target_compile_options(openrsp_client PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_library(openrsp_daemon_backend STATIC compat/daemon_backend.c)
     set_target_properties(openrsp_daemon_backend PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(openrsp_daemon_backend PUBLIC compat include)
-    target_link_libraries(openrsp_daemon_backend PUBLIC openrsp_client Threads::Threads)
+    target_link_libraries(openrsp_daemon_backend PUBLIC openrsp_client
+        Threads::Threads)
     target_compile_options(openrsp_daemon_backend PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
@@ -67,10 +81,12 @@ target_compile_options(openrsp-reset PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_executable(openrsp-extract-firmware tools/openrsp_extract_firmware.c)
 target_compile_options(openrsp-extract-firmware PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-if(UNIX)
-    add_executable(openrspd daemon/openrspd.c)
-    target_include_directories(openrspd PRIVATE include)
-    target_link_libraries(openrspd PRIVATE openrsp_miri openrsp_identity Threads::Threads m)
+if(UNIX OR WIN32)
+    add_executable(openrspd daemon/openrspd.c daemon/config_validation.c
+        daemon/removal_tracker.c daemon/duo_session.c)
+    target_include_directories(openrspd PRIVATE include daemon)
+    target_link_libraries(openrspd PRIVATE openrsp_miri openrsp_identity
+        Threads::Threads ${OPENRSP_MATH_LIBRARIES} ${OPENRSP_SOCKET_LIBRARIES})
     target_compile_options(openrspd PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
@@ -86,11 +102,47 @@ target_link_libraries(device-identity-test PRIVATE openrsp_identity)
 target_compile_options(device-identity-test PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
 add_test(NAME device-identity COMMAND device-identity-test)
 
-if(UNIX)
+add_executable(sync-update-test tests/sync_update_test.c compat/sync_update.c)
+target_include_directories(sync-update-test PRIVATE compat)
+target_compile_options(sync-update-test PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+add_test(NAME sync-update COMMAND sync-update-test)
+
+add_executable(daemon-config-validation-test
+    tests/daemon_config_validation_test.c daemon/config_validation.c)
+target_include_directories(daemon-config-validation-test PRIVATE include daemon)
+target_compile_options(daemon-config-validation-test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+add_test(NAME daemon-config-validation COMMAND daemon-config-validation-test)
+
+    add_executable(removal-tracker-test
+    tests/removal_tracker_test.c daemon/removal_tracker.c)
+target_include_directories(removal-tracker-test PRIVATE daemon)
+target_compile_options(removal-tracker-test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME removal-tracker COMMAND removal-tracker-test)
+
+    add_executable(duo-session-test tests/duo_session_test.c daemon/duo_session.c)
+    target_include_directories(duo-session-test PRIVATE daemon)
+    target_compile_options(duo-session-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME duo-session COMMAND duo-session-test)
+
+if(UNIX OR WIN32)
     add_executable(openrsp-client-test tests/client_test.c)
     target_link_libraries(openrsp-client-test PRIVATE openrsp_client)
     target_compile_options(openrsp-client-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(openrsp-client-test PRIVATE -UNDEBUG)
+    if(WIN32)
+        set(OPENRSP_POWERSHELL
+            "$ENV{WINDIR}/System32/WindowsPowerShell/v1.0/powershell.exe")
+        add_test(NAME openrsp-windows-client-ping
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_client_ping.ps1"
+                -Daemon $<TARGET_FILE:openrspd>
+                -Client $<TARGET_FILE:openrsp-client-test>)
+    endif()
+endif()
+if(UNIX)
     add_executable(openrsp-client-timeout-test
         tests/client_timeout_test.c src/client_posix.c)
     target_include_directories(openrsp-client-timeout-test PRIVATE include)
@@ -135,7 +187,8 @@ else()
 endif()
 target_compile_definitions(openrsp_miri PRIVATE
     OPENRSP_DEFAULT_FIRMWARE_PATH="${OPENRSP_DEFAULT_FIRMWARE_PATH}")
-target_link_libraries(openrsp_miri PUBLIC PkgConfig::LIBUSB Threads::Threads m)
+target_link_libraries(openrsp_miri PUBLIC PkgConfig::LIBUSB Threads::Threads
+    ${OPENRSP_MATH_LIBRARIES})
 
 add_executable(rspduo-pll-test tests/rspduo_pll_test.c)
 target_link_libraries(rspduo-pll-test PRIVATE openrsp_miri)
@@ -151,23 +204,34 @@ target_compile_options(rspduo-async-state-test PRIVATE
     -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
 add_test(NAME rspduo-async-state COMMAND rspduo-async-state-test)
 
-add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
-target_link_libraries(openrsp-iq PRIVATE openrsp_miri)
+if(UNIX)
+    add_executable(openrsp-iq third_party/libmirisdr/src/miri_sdr.c)
+    target_link_libraries(openrsp-iq PRIVATE openrsp_miri)
+endif()
 
 add_executable(openrsp-miri-probe tools/openrsp_miri_probe.c)
 target_link_libraries(openrsp-miri-probe PRIVATE openrsp_miri)
 
-if(UNIX)
+if(UNIX OR WIN32)
     add_library(sdrplay_api_compat SHARED
-        compat/sdrplay_api_compat.c compat/low_if_dsp.c)
+        compat/sdrplay_api_compat.c compat/low_if_dsp.c compat/iq_correction.c
+        compat/adsb_filter.c compat/sync_update.c compat/debug_log.c
+        compat/gain_values.c)
     target_compile_definitions(sdrplay_api_compat PRIVATE OPENRSP_SDRPLAY_API_BUILD=1)
     target_include_directories(sdrplay_api_compat PUBLIC compat)
-    target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend Threads::Threads m)
+    target_link_libraries(sdrplay_api_compat PRIVATE openrsp_daemon_backend
+        Threads::Threads ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay_api_compat PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    set_target_properties(sdrplay_api_compat PROPERTIES
-        OUTPUT_NAME sdrplay_api
-        PREFIX "lib")
-    if(APPLE)
+    set_target_properties(sdrplay_api_compat PROPERTIES OUTPUT_NAME sdrplay_api)
+    if(WIN32)
+        set_target_properties(sdrplay_api_compat PROPERTIES PREFIX "")
+        if(MINGW)
+            # SDRTrunk loads this compatibility DLL by absolute path.  Windows
+            # does not search that DLL's directory for secondary MinGW
+            # runtimes, so leave the plugin with system-DLL dependencies only.
+            target_link_options(sdrplay_api_compat PRIVATE -static)
+        endif()
+    elseif(APPLE)
         # SDRTrunk's macOS loader uses a .dylib symlink to this API-compatible
         # filename; retain it for compatibility with the existing installer.
         set_target_properties(sdrplay_api_compat PROPERTIES SUFFIX ".so.3.15")
@@ -177,19 +241,48 @@ if(UNIX)
         set_target_properties(sdrplay_api_compat PROPERTIES VERSION 3.15 SOVERSION 3)
     endif()
 
+    if(UNIX)
     add_executable(sdrplay-api-compat-test tests/sdrplay_api_compat_test.c)
     target_include_directories(sdrplay-api-compat-test PRIVATE include compat)
     target_link_libraries(sdrplay-api-compat-test PRIVATE sdrplay_api_compat Threads::Threads m)
     target_compile_options(sdrplay-api-compat-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(sdrplay-api-compat-test PRIVATE -UNDEBUG)
     add_test(NAME sdrplay-api-compat COMMAND sdrplay-api-compat-test)
+    endif()
     add_executable(low-if-dsp-test tests/low_if_dsp_test.c compat/low_if_dsp.c)
     target_include_directories(low-if-dsp-test PRIVATE compat)
-    target_link_libraries(low-if-dsp-test PRIVATE m)
+    target_link_libraries(low-if-dsp-test PRIVATE ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(low-if-dsp-test PRIVATE
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME low-if-dsp COMMAND low-if-dsp-test)
+    add_executable(iq-correction-test tests/iq_correction_test.c
+        compat/iq_correction.c)
+    target_include_directories(iq-correction-test PRIVATE compat)
+    target_link_libraries(iq-correction-test PRIVATE ${OPENRSP_MATH_LIBRARIES})
+    target_compile_options(iq-correction-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME iq-correction COMMAND iq-correction-test)
+    add_executable(adsb-filter-test tests/adsb_filter_test.c compat/adsb_filter.c)
+    target_include_directories(adsb-filter-test PRIVATE compat)
+    target_link_libraries(adsb-filter-test PRIVATE ${OPENRSP_MATH_LIBRARIES})
+    target_compile_options(adsb-filter-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME adsb-filter COMMAND adsb-filter-test)
+    add_executable(debug-log-test tests/debug_log_test.c compat/debug_log.c)
+    target_include_directories(debug-log-test PRIVATE compat)
+    target_compile_options(debug-log-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME debug-log COMMAND debug-log-test)
 
+    add_executable(gain-values-test tests/gain_values_test.c
+        compat/gain_values.c)
+    target_include_directories(gain-values-test PRIVATE compat)
+    target_link_libraries(gain-values-test PRIVATE ${OPENRSP_MATH_LIBRARIES})
+    target_compile_options(gain-values-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME gain-values COMMAND gain-values-test)
+
+    if(UNIX)
     add_executable(sdrplay-api-cross-process-lock-test
         tests/sdrplay_api_cross_process_lock_test.c)
     target_include_directories(sdrplay-api-cross-process-lock-test PRIVATE include compat)
@@ -199,6 +292,7 @@ if(UNIX)
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME sdrplay-api-cross-process-lock
         COMMAND sdrplay-api-cross-process-lock-test $<TARGET_FILE:openrspd>)
+    endif()
 
     add_executable(sdrplay-abi-layout-test tools/sdrplay_abi_layout.c)
     target_include_directories(sdrplay-abi-layout-test PRIVATE compat)
@@ -207,19 +301,22 @@ if(UNIX)
 
     add_executable(sdrplay-rspduo-mode-probe tools/sdrplay_rspduo_mode_probe.c)
     target_include_directories(sdrplay-rspduo-mode-probe PRIVATE compat)
-    target_link_libraries(sdrplay-rspduo-mode-probe PRIVATE sdrplay_api_compat m)
+    target_link_libraries(sdrplay-rspduo-mode-probe PRIVATE sdrplay_api_compat
+        ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay-rspduo-mode-probe PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
 
     add_executable(sdrplay-rspduo-control-probe tools/sdrplay_rspduo_control_probe.c)
     target_include_directories(sdrplay-rspduo-control-probe PRIVATE compat)
-    target_link_libraries(sdrplay-rspduo-control-probe PRIVATE sdrplay_api_compat m)
+    target_link_libraries(sdrplay-rspduo-control-probe PRIVATE sdrplay_api_compat
+        ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay-rspduo-control-probe PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
 
     add_executable(sdrplay-rspduo-gain-probe tools/sdrplay_rspduo_gain_probe.c)
     target_include_directories(sdrplay-rspduo-gain-probe PRIVATE compat)
-    target_link_libraries(sdrplay-rspduo-gain-probe PRIVATE sdrplay_api_compat m)
+    target_link_libraries(sdrplay-rspduo-gain-probe PRIVATE sdrplay_api_compat
+        ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay-rspduo-gain-probe PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
 
@@ -249,22 +346,24 @@ if(UNIX)
     endif()
 
     add_executable(sdrplay-compat-stream-test tools/sdrplay_compat_stream_test.c)
-    target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat Threads::Threads m)
+    target_link_libraries(sdrplay-compat-stream-test PRIVATE sdrplay_api_compat
+        Threads::Threads ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay-compat-stream-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
     add_executable(sdrplay-rate-probe tools/sdrplay_rate_probe.c)
-    target_link_libraries(sdrplay-rate-probe PRIVATE sdrplay_api_compat Threads::Threads m)
+    target_link_libraries(sdrplay-rate-probe PRIVATE sdrplay_api_compat
+        Threads::Threads ${OPENRSP_MATH_LIBRARIES})
     target_compile_options(sdrplay-rate-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+    if(UNIX OR WIN32)
     add_executable(sdrplay-lifecycle-probe tools/sdrplay_lifecycle_probe.c)
     target_link_libraries(sdrplay-lifecycle-probe PRIVATE sdrplay_api_compat Threads::Threads)
     target_compile_options(sdrplay-lifecycle-probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
 
     add_executable(sdrplay-gain-sweep-test tools/sdrplay_gain_sweep_test.c)
     target_link_libraries(sdrplay-gain-sweep-test PRIVATE sdrplay_api_compat Threads::Threads)
     target_compile_options(sdrplay-gain-sweep-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
-else()
-    message(STATUS "OpenRSP direct driver builds on this platform; the local API-compatibility daemon is currently Unix-only")
 endif()
 
 # A deadlock in a cancellation or recovery path must fail CI instead of
@@ -275,11 +374,23 @@ if(openrsp_registered_tests)
     set_tests_properties(${openrsp_registered_tests} PROPERTIES TIMEOUT 30)
 endif()
 
-if(UNIX)
-    install(TARGETS sdrplay_api_compat
-        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    install(TARGETS openrspd
-        RUNTIME DESTINATION "${CMAKE_INSTALL_SBINDIR}")
+if(UNIX OR WIN32)
+    if(WIN32)
+        get_filename_component(OPENRSP_COMPILER_RUNTIME_DIRECTORY
+            "${CMAKE_C_COMPILER}" DIRECTORY)
+        install(TARGETS sdrplay_api_compat openrspd
+            RUNTIME_DEPENDENCIES
+                DIRECTORIES ${LIBUSB_LIBRARY_DIRS}
+                    "${OPENRSP_COMPILER_RUNTIME_DIRECTORY}"
+                PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-"
+                POST_EXCLUDE_REGEXES ".*[Ww]indows[/\\\\][Ss]ystem32[/\\\\].*"
+            RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    else()
+        install(TARGETS sdrplay_api_compat
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+        install(TARGETS openrspd
+            RUNTIME DESTINATION "${CMAKE_INSTALL_SBINDIR}")
+    endif()
     install(TARGETS openrsp-probe openrsp-reset openrsp-extract-firmware
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES
@@ -297,8 +408,10 @@ if(UNIX)
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
     install(FILES packaging/firmware/README
         DESTINATION "${CMAKE_INSTALL_DATADIR}/openrsp/firmware")
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sdrplay_api.pc"
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+    if(UNIX)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sdrplay_api.pc"
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+    endif()
 endif()
 
 if(UNIX AND NOT APPLE)

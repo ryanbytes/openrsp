@@ -21,6 +21,8 @@ typedef struct {
     pthread_cond_t ready;
     unsigned int iq_callbacks;
     unsigned int failures;
+    unsigned int removals;
+    unsigned int removal_seen_during_iq_callback;
     uint32_t last_sequence;
 } callback_state;
 
@@ -68,6 +70,16 @@ static int send_iq(int descriptor, uint32_t sequence)
     return send_frame(descriptor, OPENRSP_EVENT_IQ, sequence, iq, sizeof(iq));
 }
 
+static int send_removed(int descriptor)
+{
+    const openrsp_device_status status = {
+        .reason = OPENRSP_DEVICE_STATUS_REMOVED,
+        .tuner = OPENRSP_TUNER_A
+    };
+    return send_frame(descriptor, OPENRSP_EVENT_STATUS, 0u,
+                      &status, sizeof(status));
+}
+
 static int run_server(const char *socket_path)
 {
     int server = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -101,6 +113,7 @@ static int run_server(const char *socket_path)
             const struct timespec recovery_gap = {.tv_sec = 0, .tv_nsec = 350000000L};
             (void)nanosleep(&recovery_gap, NULL);
             if (send_iq(client, 2u) != 0) return 8;
+            if (send_removed(client) != 0) return 9;
         }
     }
 
@@ -120,6 +133,17 @@ static void iq_callback(const int16_t *iq, size_t samples, uint32_t sequence,
     (void)pthread_mutex_lock(&state->lock);
     ++state->iq_callbacks;
     state->last_sequence = sequence;
+    if (sequence == 1u) {
+        struct timespec deadline;
+        assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+        ++deadline.tv_sec;
+        while (state->removals == 0u) {
+            int wait_result = pthread_cond_timedwait(&state->ready, &state->lock,
+                                                     &deadline);
+            if (wait_result != 0) break;
+        }
+        state->removal_seen_during_iq_callback = state->removals != 0u;
+    }
     (void)pthread_cond_broadcast(&state->ready);
     (void)pthread_mutex_unlock(&state->lock);
 }
@@ -133,20 +157,32 @@ static void failure_callback(void *opaque)
     (void)pthread_mutex_unlock(&state->lock);
 }
 
+static void status_callback(uint32_t reason, uint32_t tuner, void *opaque)
+{
+    callback_state *state = opaque;
+    assert(reason == OPENRSP_DEVICE_STATUS_REMOVED);
+    assert(tuner == OPENRSP_TUNER_A);
+    (void)pthread_mutex_lock(&state->lock);
+    ++state->removals;
+    (void)pthread_cond_broadcast(&state->ready);
+    (void)pthread_mutex_unlock(&state->lock);
+}
+
 static int wait_for_resumed_iq(callback_state *state)
 {
     struct timespec deadline;
     if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return -1;
     deadline.tv_sec += 2;
     (void)pthread_mutex_lock(&state->lock);
-    while (state->iq_callbacks < 2u && state->failures == 0u) {
+    while ((state->iq_callbacks < 2u || state->removals < 1u) &&
+           state->failures == 0u) {
         if (pthread_cond_timedwait(&state->ready, &state->lock, &deadline) != 0) {
             (void)pthread_mutex_unlock(&state->lock);
             return -1;
         }
     }
     int result = state->iq_callbacks == 2u && state->last_sequence == 2u &&
-                 state->failures == 0u ? 0 : -1;
+                 state->removals == 1u && state->failures == 0u ? 0 : -1;
     (void)pthread_mutex_unlock(&state->lock);
     return result;
 }
@@ -186,8 +222,9 @@ int main(void)
         .lock = PTHREAD_MUTEX_INITIALIZER,
         .ready = PTHREAD_COND_INITIALIZER
     };
-    assert(openrsp_daemon_backend_start(backend, iq_callback, failure_callback,
-                                        &state) == 0);
+    assert(openrsp_daemon_backend_start(
+               backend, iq_callback, status_callback, failure_callback,
+               &state) == 0);
     assert(wait_for_resumed_iq(&state) == 0);
     assert(openrsp_daemon_backend_stop(backend) == 0);
     openrsp_daemon_backend_close(backend);
@@ -196,6 +233,8 @@ int main(void)
     assert(waitpid(server, &status, 0) == server);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     assert(state.failures == 0u);
+    assert(state.removals == 1u);
+    assert(state.removal_seen_during_iq_callback == 1u);
     (void)pthread_cond_destroy(&state.ready);
     (void)pthread_mutex_destroy(&state.lock);
     (void)unlink(socket_path);

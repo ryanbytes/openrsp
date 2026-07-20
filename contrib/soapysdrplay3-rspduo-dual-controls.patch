@@ -111,6 +111,15 @@ index 4df5b52..9f48b71 100644
  
      if (name == "RF")
      {
+@@ -1968,7 +2001,7 @@ void SoapySDRPlay::selectDevice(const std::string &serial,
+     }
+     else if (mode == "SL")
+     {
+-        tuner = sdrplay_api_Tuner_Neither;
++        tuner = sdrplay_api_Tuner_B;
+         rspDuoMode = sdrplay_api_RspDuoMode_Slave;
+     }
+     else
 diff --git a/SoapySDRPlay.hpp b/SoapySDRPlay.hpp
 index f1e3f1a..dc4622a 100644
 --- a/SoapySDRPlay.hpp

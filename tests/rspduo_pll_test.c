@@ -172,6 +172,11 @@ static void assert_gain_plans(void)
     }
 
     mirisdr_rspduo_gain_plan_t controls = {0};
+    assert(mirisdr_rspduo_gain_plan(100000000u, 1u, 0, 0u, 0u,
+                                    0u, 0u, 0u, &controls) == 0);
+    assert((controls.reg9 & 0x3f0u) == 0u);
+    assert(mirisdr_rspduo_gain_plan(100000000u, 1u, -1, 0u, 0u,
+                                    0u, 0u, 0u, &controls) < 0);
     assert(mirisdr_rspduo_gain_plan(100000000u, 1u, 45, 0u, 0u,
                                     1u, 1u, 1u, &controls) == 0);
     assert(controls.first_gpio_4b == 0x128fu);

@@ -1,17 +1,24 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "sdrplay_api_compat.h"
 
 #include <errno.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <poll.h>
 #include <signal.h>
-#include <stdatomic.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#endif
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     atomic_ullong samples;
@@ -26,9 +33,27 @@ typedef struct {
     atomic_int update_ack_seen;
     unsigned int expected_sample;
     int sample_seen;
+#if defined(_WIN32)
+    HANDLE ready_handle;
+#else
     int ready_fd;
+#endif
     int ready_sent;
 } lifecycle_metrics;
+
+static void send_ready(lifecycle_metrics *metrics)
+{
+    const unsigned char ready = 1u;
+#if defined(_WIN32)
+    DWORD written = 0u;
+    (void)WriteFile(metrics->ready_handle, &ready, sizeof(ready), &written, NULL);
+#else
+    ssize_t written;
+    do {
+        written = write(metrics->ready_fd, &ready, sizeof(ready));
+    } while (written < 0 && errno == EINTR);
+#endif
+}
 
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int num_samples, unsigned int reset, void *opaque)
@@ -53,13 +78,15 @@ static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *p
     if (atomic_load(&metrics->update_ack_seen) != 0)
         atomic_fetch_add(&metrics->samples_after_update_ack, num_samples);
     if (params->grChanged != 0) atomic_fetch_add(&metrics->gr_changed, 1u);
-    if (num_samples != 0u && metrics->ready_fd >= 0 && !metrics->ready_sent) {
-        const unsigned char ready = 1u;
+    if (num_samples != 0u && !metrics->ready_sent &&
+#if defined(_WIN32)
+        metrics->ready_handle != NULL
+#else
+        metrics->ready_fd >= 0
+#endif
+    ) {
         metrics->ready_sent = 1;
-        ssize_t written;
-        do {
-            written = write(metrics->ready_fd, &ready, sizeof(ready));
-        } while (written < 0 && errno == EINTR);
+        send_ready(metrics);
     }
 }
 
@@ -75,6 +102,10 @@ static void event_callback(sdrplay_api_EventT event, sdrplay_api_TunerSelectT tu
 
 static int sleep_milliseconds(long milliseconds)
 {
+#if defined(_WIN32)
+    Sleep((DWORD)milliseconds);
+    return 0;
+#else
     struct timespec delay = {
         .tv_sec = milliseconds / 1000,
         .tv_nsec = (milliseconds % 1000) * 1000000L
@@ -83,6 +114,7 @@ static int sleep_milliseconds(long milliseconds)
         if (errno != EINTR) return -1;
     }
     return 0;
+#endif
 }
 
 static void reset_metrics(lifecycle_metrics *metrics)
@@ -98,7 +130,11 @@ static void reset_metrics(lifecycle_metrics *metrics)
     atomic_init(&metrics->gr_changed, 0u);
     atomic_init(&metrics->device_failures, 0u);
     atomic_init(&metrics->update_ack_seen, 0);
+#if defined(_WIN32)
+    metrics->ready_handle = NULL;
+#else
     metrics->ready_fd = -1;
+#endif
 }
 
 static void configure_defaults(sdrplay_api_DeviceParamsT *params)
@@ -236,14 +272,24 @@ cleanup:
     return failed ? -1 : 0;
 }
 
-static int run_crash_victim(int ready_fd)
+static int run_crash_victim(
+#if defined(_WIN32)
+    HANDLE ready_handle
+#else
+    int ready_fd
+#endif
+)
 {
     sdrplay_api_DeviceT devices[SDRPLAY_MAX_DEVICES];
     unsigned int count = 0u;
     sdrplay_api_DeviceParamsT *params = NULL;
     lifecycle_metrics metrics;
     reset_metrics(&metrics);
+#if defined(_WIN32)
+    metrics.ready_handle = ready_handle;
+#else
     metrics.ready_fd = ready_fd;
+#endif
     sdrplay_api_CallbackFnsT callbacks = {
         .StreamACbFn = stream_callback,
         .EventCbFn = event_callback
@@ -264,11 +310,130 @@ static int run_crash_victim(int ready_fd)
     if (sdrplay_api_Init(devices[0].dev, &callbacks, &metrics) !=
         sdrplay_api_Success)
         return -1;
-    for (;;) pause();
+    for (;;) {
+#if defined(_WIN32)
+        Sleep(INFINITE);
+#else
+        pause();
+#endif
+    }
 }
 
 static int verify_crash_recovery(unsigned int crash_cycle)
 {
+#if defined(_WIN32)
+    SECURITY_ATTRIBUTES security_attributes = {
+        .nLength = sizeof(security_attributes),
+        .lpSecurityDescriptor = NULL,
+        .bInheritHandle = TRUE
+    };
+    HANDLE ready_read = NULL;
+    HANDLE ready_write = NULL;
+    if (!CreatePipe(&ready_read, &ready_write, &security_attributes, 0u)) {
+        fprintf(stderr, "CreatePipe failed: %lu\n", (unsigned long)GetLastError());
+        return -1;
+    }
+    if (!SetHandleInformation(ready_read, HANDLE_FLAG_INHERIT, 0u)) {
+        fprintf(stderr, "SetHandleInformation failed: %lu\n",
+                (unsigned long)GetLastError());
+        CloseHandle(ready_read);
+        CloseHandle(ready_write);
+        return -1;
+    }
+
+    char executable_path[MAX_PATH];
+    DWORD path_length = GetModuleFileNameA(NULL, executable_path,
+                                           (DWORD)sizeof(executable_path));
+    if (path_length == 0u || path_length >= (DWORD)sizeof(executable_path)) {
+        fprintf(stderr, "GetModuleFileName failed: %lu\n",
+                (unsigned long)GetLastError());
+        CloseHandle(ready_read);
+        CloseHandle(ready_write);
+        return -1;
+    }
+    char command_line[2u * MAX_PATH + 64u];
+    int command_length = snprintf(command_line, sizeof(command_line),
+                                  "\"%s\" --crash-victim %llu",
+                                  executable_path,
+                                  (unsigned long long)(uintptr_t)ready_write);
+    if (command_length < 0 || (size_t)command_length >= sizeof(command_line)) {
+        fputs("crash victim command line is too long\n", stderr);
+        CloseHandle(ready_read);
+        CloseHandle(ready_write);
+        return -1;
+    }
+
+    STARTUPINFOA startup_info = {0};
+    startup_info.cb = sizeof(startup_info);
+    PROCESS_INFORMATION process_info = {0};
+    if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL, &startup_info, &process_info)) {
+        fprintf(stderr, "CreateProcess failed: %lu\n",
+                (unsigned long)GetLastError());
+        CloseHandle(ready_read);
+        CloseHandle(ready_write);
+        return -1;
+    }
+    CloseHandle(ready_write);
+
+    unsigned char ready = 0u;
+    DWORD ready_bytes = 0u;
+    ULONGLONG deadline = GetTickCount64() + 10000u;
+    int ready_ok = 0;
+    while (GetTickCount64() < deadline) {
+        DWORD available = 0u;
+        if (!PeekNamedPipe(ready_read, NULL, 0u, NULL, &available, NULL)) break;
+        if (available != 0u) {
+            ready_ok = ReadFile(ready_read, &ready, sizeof(ready), &ready_bytes, NULL) &&
+                       ready_bytes == (DWORD)sizeof(ready) && ready == 1u;
+            break;
+        }
+        if (WaitForSingleObject(process_info.hProcess, 0u) == WAIT_OBJECT_0) break;
+        Sleep(10u);
+    }
+    CloseHandle(ready_read);
+    if (!ready_ok) {
+        fprintf(stderr, "crash victim did not begin streaming within 10 seconds\n");
+        (void)TerminateProcess(process_info.hProcess, 1u);
+        (void)WaitForSingleObject(process_info.hProcess, 10000u);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        return -1;
+    }
+    /* The first IQ notification can arrive just before Init returns. Give the
+     * victim time to enter its steady streaming wait before terminating it. */
+    if (sleep_milliseconds(500) < 0) {
+        (void)TerminateProcess(process_info.hProcess, 1u);
+        (void)WaitForSingleObject(process_info.hProcess, 10000u);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        return -1;
+    }
+    if (!TerminateProcess(process_info.hProcess, 1u)) {
+        fprintf(stderr, "TerminateProcess failed: %lu\n",
+                (unsigned long)GetLastError());
+        (void)WaitForSingleObject(process_info.hProcess, 10000u);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        return -1;
+    }
+    if (WaitForSingleObject(process_info.hProcess, 10000u) != WAIT_OBJECT_0) {
+        fputs("crash victim did not terminate within 10 seconds\n", stderr);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        return -1;
+    }
+    DWORD exit_code = 0u;
+    if (!GetExitCodeProcess(process_info.hProcess, &exit_code) || exit_code != 1u) {
+        fprintf(stderr, "crash victim did not terminate with TerminateProcess (exit=%lu)\n",
+                (unsigned long)exit_code);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        return -1;
+    }
+    CloseHandle(process_info.hThread);
+    CloseHandle(process_info.hProcess);
+#else
     int ready_pipe[2];
     if (pipe(ready_pipe) < 0) {
         perror("pipe");
@@ -326,8 +491,13 @@ static int verify_crash_recovery(unsigned int crash_cycle)
         fprintf(stderr, "crash victim did not terminate with SIGKILL\n");
         return -1;
     }
+#endif
     if (sleep_milliseconds(2000) < 0) {
+#if defined(_WIN32)
+        fputs("sleep after crash victim termination failed\n", stderr);
+#else
         perror("nanosleep");
+#endif
         return -1;
     }
     if (run_cycle(crash_cycle) < 0) return -1;
@@ -337,6 +507,18 @@ static int verify_crash_recovery(unsigned int crash_cycle)
 
 int main(int argc, char **argv)
 {
+#if defined(_WIN32)
+    if (argc == 3 && strcmp(argv[1], "--crash-victim") == 0) {
+        char *end = NULL;
+        unsigned long long handle_value = _strtoui64(argv[2], &end, 0);
+        if (end == argv[2] || *end != '\0' || handle_value == 0u) {
+            fputs("invalid crash victim handle\n", stderr);
+            return EXIT_FAILURE;
+        }
+        return run_crash_victim((HANDLE)(uintptr_t)handle_value) == 0 ?
+            EXIT_SUCCESS : EXIT_FAILURE;
+    }
+#endif
     unsigned long cycles = 10u;
     if ((argc == 2 || argc == 3) && strcmp(argv[1], "--crash-recovery") == 0) {
         unsigned long crash_cycles = 1u;

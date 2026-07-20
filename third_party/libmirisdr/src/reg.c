@@ -276,7 +276,7 @@ int mirisdr_rspduo_gain_plan_with_controls(
     unsigned int am_notch, mirisdr_rspduo_gain_plan_t *plan)
 {
     struct rspduo_gain_band band = {0};
-    if (!plan || (tuner != 1u && tuner != 2u) || gain_reduction < 20 ||
+    if (!plan || (tuner != 1u && tuner != 2u) || gain_reduction < 0 ||
         gain_reduction > 59 || rf_notch > 1u || dab_notch > 1u ||
         external_reference > 1u || am_port < 1u || am_port > 2u ||
         am_notch > 1u || rspduo_gain_band(frequency, &band) < 0 ||
@@ -369,12 +369,23 @@ static int mirisdr_rspduo_frontend_init(mirisdr_dev_t *p)
         {0x4b, 0x13ff}, {0x4b, 0x0000}, {0x4b, 0x0100},
     };
 
-    if (libusb_control_transfer(p->dh, 0x40, 0x41, 0x8008, 0x00ea, NULL, 0,
-                                CTRL_TIMEOUT) < 0) return -1;
+    int result = libusb_control_transfer(p->dh, 0x40, 0x41, 0x8008, 0x00ea,
+                                         NULL, 0, CTRL_TIMEOUT);
+    if (result < 0) {
+        fprintf(stderr, "RSPduo frontend setup failed code=%d name=%s\n",
+                result, libusb_error_name(result));
+        return -1;
+    }
     for (size_t i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
         uint16_t value = sequence[i].value;
         if (p->rspduo_tuner == 2u && i == 2u) value = 0x13ff;
-        if (mirisdr_rspduo_gpio(p, sequence[i].request, value) < 0) return -1;
+        result = mirisdr_rspduo_gpio(p, sequence[i].request, value);
+        if (result < 0) {
+            fprintf(stderr,
+                    "RSPduo frontend GPIO failed step=%zu code=%d name=%s\n",
+                    i, result, libusb_error_name(result));
+            return -1;
+        }
     }
     return 0;
 }
@@ -385,10 +396,15 @@ static int mirisdr_rspduo_frontend_ready(mirisdr_dev_t *p)
     /* The device returns 0x0a for both API 3.15 reads on tuner A. */
     for (unsigned int i = 0u; i < 2u; ++i) {
         uint8_t ready = 0u;
-        if (libusb_control_transfer(p->dh, 0xc0, 0x48, 0x0000, 0x0000,
-                                    &ready, sizeof(ready), CTRL_TIMEOUT) !=
-            (int)sizeof(ready))
+        int result = libusb_control_transfer(
+            p->dh, 0xc0, 0x48, 0x0000, 0x0000, &ready, sizeof(ready),
+            CTRL_TIMEOUT);
+        if (result != (int)sizeof(ready)) {
+            fprintf(stderr,
+                    "RSPduo readiness read failed step=%u code=%d name=%s\n",
+                    i, result, result < 0 ? libusb_error_name(result) : "short-read");
             return -1;
+        }
     }
     return 0;
 }

@@ -3,6 +3,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "openrsp/protocol.h"
 #include "openrsp/identity.h"
+#include "openrsp/socket_compat.h"
+#include "config_validation.h"
+#include "removal_tracker.h"
+#include "duo_session.h"
 #include "mirisdr.h"
 
 #include <errno.h>
@@ -12,25 +16,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#if !defined(_WIN32)
+#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 #include <pthread.h>
-#include <poll.h>
-#include <fcntl.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #define OPENRSPD_MAX_PAYLOAD 4096u
 #define OPENRSPD_MAX_CLIENTS 32
 #define OPENRSPD_MAX_DEVICES 32u
 #define OPENRSPD_STREAM_SLOT_BYTES (OPENRSP_MAX_IQ_SAMPLES * 4u)
 #define OPENRSPD_DEVICE_SNAPSHOT_CACHE_NANOSECONDS 1000000000L
+#define OPENRSPD_DEVICE_REMOVAL_GRACE_MILLISECONDS 5000u
 
 typedef struct {
     mirisdr_dev_t *radio;
-    int owner;
-    int api_lock_owner;
+    openrsp_socket_t owner;
+    openrsp_socket_t api_lock_owner;
     openrsp_acquire_request acquired_identity;
     atomic_bool streaming;
     bool stream_thread_started;
@@ -40,6 +48,7 @@ typedef struct {
     pthread_mutex_t write_lock;
     atomic_bool control_write_pending;
     atomic_bool client_write_error;
+    atomic_intptr_t client_write_error_fd;
     bool logged_usb_iq;
     bool logged_socket_iq;
     atomic_bool first_iq_seen;
@@ -57,9 +66,44 @@ typedef struct {
     struct timespec device_snapshot_time;
     uint32_t device_snapshot_count;
     openrsp_device_record device_snapshot[OPENRSPD_MAX_DEVICES];
+    openrspd_removal_tracker removal_tracker;
+    openrspd_duo_session duo;
+    bool duo_active;
+    bool duo_config_a;
+    bool duo_config_b;
+    openrsp_dual_config duo_config;
 } daemon_state;
 
 static volatile sig_atomic_t running = 1;
+
+#if defined(_WIN32)
+static SERVICE_STATUS_HANDLE service_status_handle;
+static SERVICE_STATUS service_status;
+static int service_mode;
+
+static void report_service_status(DWORD state, DWORD exit_code,
+                                  DWORD wait_hint)
+{
+    if (!service_status_handle) return;
+    service_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    service_status.dwCurrentState = state;
+    service_status.dwControlsAccepted =
+        state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN : 0u;
+    service_status.dwWin32ExitCode = exit_code;
+    service_status.dwServiceSpecificExitCode = 0u;
+    service_status.dwCheckPoint = 0u;
+    service_status.dwWaitHint = wait_hint;
+    (void)SetServiceStatus(service_status_handle, &service_status);
+}
+
+static void WINAPI service_control(DWORD control)
+{
+    if (control != SERVICE_CONTROL_STOP && control != SERVICE_CONTROL_SHUTDOWN)
+        return;
+    report_service_status(SERVICE_STOP_PENDING, NO_ERROR, 2000u);
+    running = 0;
+}
+#endif
 
 static unsigned long long wall_clock_milliseconds(void)
 {
@@ -67,6 +111,22 @@ static unsigned long long wall_clock_milliseconds(void)
     if (gettimeofday(&now, NULL) != 0) return 0u;
     return (unsigned long long)now.tv_sec * 1000u +
            (unsigned long long)now.tv_usec / 1000u;
+}
+
+static uint64_t monotonic_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0u;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static void sleep_milliseconds(uint32_t milliseconds)
+{
+    const struct timespec delay = {
+        .tv_sec = (time_t)(milliseconds / 1000u),
+        .tv_nsec = (long)(milliseconds % 1000u) * 1000000L
+    };
+    (void)nanosleep(&delay, NULL);
 }
 
 static uint32_t snapshot_sdrplay_devices(daemon_state *state,
@@ -80,14 +140,14 @@ static void stop_server(int signal_number)
     running = 0;
 }
 
-static int read_exact(int descriptor, void *buffer, size_t bytes)
+static int read_exact(openrsp_socket_t descriptor, void *buffer, size_t bytes)
 {
     unsigned char *cursor = buffer;
     while (bytes != 0u) {
-        ssize_t count = read(descriptor, cursor, bytes);
+        ptrdiff_t count = openrsp_socket_read(descriptor, cursor, bytes);
         if (count == 0) return 0;
         if (count < 0) {
-            if (errno == EINTR) continue;
+            if (openrsp_socket_interrupted(openrsp_socket_last_error())) continue;
             return -1;
         }
         cursor += (size_t)count;
@@ -96,13 +156,14 @@ static int read_exact(int descriptor, void *buffer, size_t bytes)
     return 1;
 }
 
-static int write_exact(int descriptor, const void *buffer, size_t bytes)
+static int write_exact(openrsp_socket_t descriptor, const void *buffer,
+                       size_t bytes)
 {
     const unsigned char *cursor = buffer;
     while (bytes != 0u) {
-        ssize_t count = write(descriptor, cursor, bytes);
+        ptrdiff_t count = openrsp_socket_write(descriptor, cursor, bytes);
         if (count < 0) {
-            if (errno == EINTR) continue;
+            if (openrsp_socket_interrupted(openrsp_socket_last_error())) continue;
             return -1;
         }
         cursor += (size_t)count;
@@ -111,21 +172,18 @@ static int write_exact(int descriptor, const void *buffer, size_t bytes)
     return 0;
 }
 
-static int set_nonblocking(int descriptor)
+static int set_nonblocking(openrsp_socket_t descriptor)
 {
-    int flags = fcntl(descriptor, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(descriptor, F_SETFL, flags | O_NONBLOCK);
+    return openrsp_socket_set_blocking(descriptor, 0);
 }
 
-static int set_blocking(int descriptor)
+static int set_blocking(openrsp_socket_t descriptor)
 {
-    int flags = fcntl(descriptor, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(descriptor, F_SETFL, flags & ~O_NONBLOCK);
+    return openrsp_socket_set_blocking(descriptor, 1);
 }
 
-static int write_frame(daemon_state *state, int descriptor, uint16_t type,
+static int write_frame(daemon_state *state, openrsp_socket_t descriptor,
+                       uint16_t type,
                        uint32_t sequence, const void *payload, uint32_t payload_bytes)
 {
     openrsp_message_header header = {
@@ -143,7 +201,8 @@ static int write_frame(daemon_state *state, int descriptor, uint16_t type,
     return result;
 }
 
-static int write_control_frame(daemon_state *state, int descriptor, uint16_t type,
+static int write_control_frame(daemon_state *state, openrsp_socket_t descriptor,
+                               uint16_t type,
                                uint32_t sequence, const void *payload,
                                uint32_t payload_bytes)
 {
@@ -155,6 +214,19 @@ static int write_control_frame(daemon_state *state, int descriptor, uint16_t typ
     int result = write_frame(state, descriptor, type, sequence, payload, payload_bytes);
     atomic_store(&state->control_write_pending, false);
     return result;
+}
+
+static int send_duo_event(daemon_state *state, const openrspd_duo_event *event)
+{
+    if (state == NULL || event == NULL || event->kind == OPENRSPD_DUO_EVENT_NONE ||
+        event->target_fd < 0)
+        return 0;
+    openrsp_duo_event payload = {
+        .kind = (uint32_t)event->kind,
+        .tuner = event->tuner
+    };
+    return write_control_frame(state, event->target_fd, OPENRSP_EVENT_DUO,
+                               0u, &payload, sizeof(payload));
 }
 
 static void send_stream(daemon_state *state, unsigned int tuner,
@@ -178,11 +250,18 @@ static void send_stream(daemon_state *state, unsigned int tuner,
     unsigned int slot = tuner == OPENRSP_TUNER_B ? 1u : 0u;
     uint32_t sequence = ++state->stream_sequence[slot];
     uint16_t event = tuner == OPENRSP_TUNER_B ? OPENRSP_EVENT_IQ_B : OPENRSP_EVENT_IQ;
-    if (write_frame(state, state->owner, event, sequence,
+    openrspd_client_id target = state->duo_active ? OPENRSPD_INVALID_CLIENT :
+                                                   state->owner;
+    if (state->duo_active)
+        (void)openrspd_duo_route(&state->duo, tuner, &target);
+    if (target < 0) return;
+    if (write_frame(state, target, event, sequence,
                     buffer, length) != 0) {
-        int write_error = errno;
+        int write_error = openrsp_socket_last_error();
         if (!atomic_exchange(&state->client_write_error, true)) {
-            fprintf(stderr, "OPENRSPD_SOCKET_IQ_ERROR errno=%d\n", write_error);
+            atomic_store(&state->client_write_error_fd, target);
+            fprintf(stderr, "OPENRSPD_SOCKET_IQ_ERROR error=%d fd=%lld\n",
+                    write_error, (long long)target);
             (void)fflush(stderr);
         }
         if (state->radio) (void)mirisdr_cancel_async(state->radio);
@@ -210,14 +289,23 @@ static void dual_stream_callback(unsigned int tuner, unsigned char *buffer,
 static void *stream_main(void *opaque)
 {
     daemon_state *state = opaque;
+#if defined(_WIN32)
+    const uint32_t usb_queue_depth = 8u;
+    const uint32_t stream_frame_bytes = OPENRSPD_STREAM_SLOT_BYTES;
+#else
+    const uint32_t usb_queue_depth = 32u;
+    const uint32_t stream_frame_bytes = 65536u;
+#endif
     fprintf(stderr, "OPENRSPD_STREAM_THREAD_START\n");
     (void)fflush(stderr);
-    /* Keep the proven 32-transfer USB queue and 64 KiB USB buffers.  Aggregate
-     * converted samples into 64 KiB daemon frames: a 256 KiB first socket
-     * write can fill the macOS Unix-socket window before API startup finishes. */
+    /* WinUSB reliably drains eight outstanding requests. Use larger loopback
+     * frames there to reduce socket backpressure without increasing USB
+     * ownership. macOS retains its proven 32-request, 64 KiB path. */
     int result = state->dual_mode ?
-        mirisdr_read_async_dual(state->radio, dual_stream_callback, state, 32u) :
-        mirisdr_read_async(state->radio, stream_callback, state, 32u, 65536u);
+        mirisdr_read_async_dual(state->radio, dual_stream_callback, state,
+                                usb_queue_depth) :
+        mirisdr_read_async(state->radio, stream_callback, state,
+                           usb_queue_depth, stream_frame_bytes);
     state->streaming = false;
     state->stream_result = result;
     state->stream_error = result != 0;
@@ -274,14 +362,16 @@ static void describe_flags(uint32_t flags, char *buffer, size_t bytes)
     if (used == 0u) (void)snprintf(buffer, bytes, "none");
 }
 
-static void log_config(const char *operation, int descriptor, uint32_t flags,
+static void log_config(const char *operation, openrsp_socket_t descriptor,
+                       uint32_t flags,
                        uint32_t status, const openrsp_radio_config *config)
 {
     char flag_text[64];
     describe_flags(flags, flag_text, sizeof(flag_text));
     fprintf(stderr,
-            "OPENRSPD_%s fd=%d status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d bias=%u rf_notch=%u dab_notch=%u ext_ref=%u am_port=%u am_notch=%u\n",
-            operation, descriptor, status, flag_text, config->sample_rate_hz,
+            "OPENRSPD_%s fd=%lld status=%u flags=%s fs=%u rf=%u bw=%u if=%d gr=%d lna=%u agc=%d setpoint=%d bias=%u rf_notch=%u dab_notch=%u ext_ref=%u am_port=%u am_notch=%u\n",
+            operation, (long long)descriptor, status, flag_text,
+            config->sample_rate_hz,
             config->center_frequency_hz, config->bandwidth_hz,
             config->if_frequency_hz, config->gain_reduction_db,
             config->lna_state, config->agc_mode, config->agc_setpoint_dbfs,
@@ -294,20 +384,51 @@ static void log_config(const char *operation, int descriptor, uint32_t flags,
 static int stop_stream(daemon_state *state)
 {
     if (!state->stream_thread_started) return 0;
+    int result = 0;
+#if defined(_WIN32)
+    /* Let the async event thread cancel and drain every WinUSB transfer before
+     * issuing the device-side stop request from this thread.  Handling libusb
+     * events from both threads during cancellation corrupts the Windows heap. */
     if (state->radio) (void)mirisdr_cancel_async(state->radio);
-    int result = pthread_join(state->stream_thread, NULL);
+    if (pthread_join(state->stream_thread, NULL) != 0) result = -1;
+    if (atomic_load(&state->stream_result) != 0) result = -1;
+    if (state->radio && mirisdr_streaming_stop(state->radio) < 0) result = -1;
+#else
+    /* Stop the RSPduo endpoint while libusb still owns its submitted
+     * transfers, then cancel and drain every completion before freeing them.
+     * Reversing this order leaves the device-side bulk engine active during
+     * teardown and the next session can fail its initial submits with PIPE. */
+    if (state->radio && mirisdr_streaming_stop(state->radio) < 0) result = -1;
+    if (state->radio) (void)mirisdr_cancel_async(state->radio);
+    if (pthread_join(state->stream_thread, NULL) != 0) result = -1;
+    if (atomic_load(&state->stream_result) != 0) result = -1;
+#endif
     state->stream_thread_started = false;
     state->streaming = false;
-    /* Darwin delivers bulk completions on libusb's CFRunLoop thread.  Stop the
-     * endpoint only after read_async has handled every cancellation and freed
-     * its transfers; stopping it first can queue a late callback against
-     * transfer storage that the joined stream thread is about to release. */
-    if (state->radio) (void)mirisdr_streaming_stop(state->radio);
     return result;
 }
 
-static void release_client(daemon_state *state, int descriptor)
+static void release_client(daemon_state *state, openrsp_socket_t descriptor)
 {
+    if (state->duo_active &&
+        openrspd_duo_role_for_descriptor(&state->duo, descriptor) !=
+            OPENRSPD_DUO_ROLE_NONE) {
+        openrspd_duo_event event;
+        (void)openrspd_duo_disconnect(&state->duo, descriptor, &event);
+        (void)send_duo_event(state, &event);
+        if (!state->duo.master_selected && !state->duo.slave_selected) {
+            if (state->radio) (void)stop_stream(state);
+            if (state->radio) (void)mirisdr_close(state->radio);
+            state->radio = NULL;
+            state->configured = false;
+            state->dual_mode = false;
+            state->duo_active = false;
+            state->duo_config_a = false;
+            state->duo_config_b = false;
+            state->device_snapshot_valid = false;
+        }
+        return;
+    }
     if (state->owner != descriptor) return;
     if (state->radio) (void)stop_stream(state);
     if (state->dual_mode && state->radio) {
@@ -328,14 +449,16 @@ static void release_client(daemon_state *state, int descriptor)
     state->stream_result = 0;
     state->dual_mode = false;
     state->mode_swap_paused = false;
+    openrspd_removal_tracker_present(&state->removal_tracker);
 }
 
-static void release_api_lock(daemon_state *state, int descriptor,
+static void release_api_lock(daemon_state *state, openrsp_socket_t descriptor,
                              const char *reason)
 {
     if (state->api_lock_owner != descriptor) return;
     state->api_lock_owner = -1;
-    fprintf(stderr, "OPENRSPD_API_UNLOCK fd=%d reason=%s\n", descriptor, reason);
+    fprintf(stderr, "OPENRSPD_API_UNLOCK fd=%lld reason=%s\n",
+            (long long)descriptor, reason);
     (void)fflush(stderr);
 }
 
@@ -349,23 +472,6 @@ static void shutdown_radio(daemon_state *state)
     state->configured = false;
     state->stream_error = false;
     state->stream_result = 0;
-}
-
-static bool valid_config(const openrsp_radio_config *config)
-{
-    return config && config->sample_rate_hz != 0u && config->center_frequency_hz != 0u &&
-           config->gain_reduction_db >= 20 && config->gain_reduction_db <= 59 &&
-           config->lna_state <= 9u && config->agc_mode >= 0 && config->agc_mode <= 4 &&
-           config->agc_setpoint_dbfs >= -60 && config->agc_setpoint_dbfs <= -20 &&
-           config->bias_tee_enabled <= 1u && config->rf_notch_enabled <= 1u &&
-           config->dab_notch_enabled <= 1u &&
-           config->external_reference_enabled <= 1u &&
-           config->am_port_select <= 1u &&
-           config->am_notch_enabled <= 1u &&
-           !(config->tuner == OPENRSP_TUNER_A && config->bias_tee_enabled != 0u) &&
-           !(config->tuner == OPENRSP_TUNER_B &&
-             (config->am_port_select != 0u || config->am_notch_enabled != 0u)) &&
-           (config->tuner == OPENRSP_TUNER_A || config->tuner == OPENRSP_TUNER_B);
 }
 
 static unsigned int rspduo_control_flags(uint32_t flags)
@@ -402,9 +508,29 @@ static int set_rspduo_controls(mirisdr_dev_t *radio,
         config->am_notch_enabled, control_flags);
 }
 
+static int set_rspduo_sample_rate(mirisdr_dev_t *radio,
+                                  const openrsp_radio_config *config)
+{
+#if defined(_WIN32)
+    /* A stopped WinUSB session does not reliably latch a new converter clock
+     * from the two PLL writes alone. Reuse the captured cold-config sequence,
+     * including its format/ADC setup and stream pulses, then restore controls. */
+    int result = mirisdr_configure_rspduo(
+        radio, config->sample_rate_hz, config->center_frequency_hz,
+        (uint32_t)config->if_frequency_hz, config->bandwidth_hz,
+        config->gain_reduction_db, config->lna_state);
+    if (result == 0)
+        result = set_rspduo_controls(radio, config,
+                                     OPENRSP_CHANGE_RSPDUO_CONTROLS);
+    return result;
+#else
+    return mirisdr_set_sample_rate(radio, config->sample_rate_hz);
+#endif
+}
+
 static uint32_t apply_config(mirisdr_dev_t *radio, const openrsp_radio_config *config)
 {
-    if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
+    if (!openrspd_config_valid(config)) return OPENRSP_STATUS_BAD_REQUEST;
 #define OPENRSPD_CONFIG_STEP(name, expression) do { \
         int step_result = (expression); \
         if (step_result != 0) { \
@@ -430,7 +556,7 @@ static uint32_t configure_radio(daemon_state *state,
                                 const openrsp_radio_config *config,
                                 unsigned int max_attempts)
 {
-    if (!valid_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
+    if (!openrspd_config_valid(config)) return OPENRSP_STATUS_BAD_REQUEST;
     if (state->dual_mode && state->radio) {
         (void)mirisdr_close(state->radio);
         state->radio = NULL;
@@ -474,7 +600,7 @@ static uint32_t configure_radio(daemon_state *state,
             fprintf(stderr, "OPENRSPD_CONFIGURE_RETRY status=waiting attempt=%u/%u\n",
                     attempt, max_attempts);
             (void)fflush(stderr);
-            (void)usleep(250000u);
+            sleep_milliseconds(250u);
         }
     }
     return OPENRSP_STATUS_IO_ERROR;
@@ -485,7 +611,8 @@ static bool valid_dual_config(const openrsp_dual_config *config)
     if (!config || (config->sample_rate_hz != 6000000u &&
                     config->sample_rate_hz != 8000000u)) return false;
     int32_t required_if = config->sample_rate_hz == 6000000u ? 1620000 : 2048000;
-    return valid_config(&config->channel_a) && valid_config(&config->channel_b) &&
+    return openrspd_config_valid(&config->channel_a) &&
+           openrspd_config_valid(&config->channel_b) &&
            config->channel_a.tuner == OPENRSP_TUNER_A &&
            config->channel_b.tuner == OPENRSP_TUNER_B &&
            config->channel_a.sample_rate_hz == config->sample_rate_hz &&
@@ -537,6 +664,43 @@ static uint32_t configure_dual_radio(daemon_state *state,
     return OPENRSP_STATUS_OK;
 }
 
+static void report_removed_device(daemon_state *state)
+{
+    if (state->duo_active) {
+        const openrsp_socket_t descriptors[2] = {
+            state->duo.master_fd, state->duo.slave_fd
+        };
+        const uint32_t tuners[2] = {state->duo.master_tuner,
+                                    state->duo.slave_tuner};
+        for (unsigned int index = 0u; index < 2u; ++index) {
+            if (descriptors[index] < 0) continue;
+            openrsp_device_status status = {
+                .reason = OPENRSP_DEVICE_STATUS_REMOVED,
+                .tuner = tuners[index]
+            };
+            if (write_control_frame(state, descriptors[index],
+                                    OPENRSP_EVENT_STATUS, 0u,
+                                    &status, sizeof(status)) != 0) {
+                atomic_store(&state->client_write_error_fd,
+                             descriptors[index]);
+                atomic_store(&state->client_write_error, true);
+            }
+        }
+        return;
+    }
+    if (state->owner >= 0) {
+        openrsp_device_status status = {
+            .reason = OPENRSP_DEVICE_STATUS_REMOVED,
+            .tuner = state->dual_mode ? OPENRSP_TUNER_BOTH : state->config.tuner
+        };
+        if (write_control_frame(state, state->owner, OPENRSP_EVENT_STATUS, 0u,
+                                &status, sizeof(status)) != 0) {
+            atomic_store(&state->client_write_error_fd, state->owner);
+            atomic_store(&state->client_write_error, true);
+        }
+    }
+}
+
 static void recover_failed_stream(daemon_state *state)
 {
     if (!atomic_load(&state->stream_error) || atomic_load(&state->streaming)) return;
@@ -551,11 +715,27 @@ static void recover_failed_stream(daemon_state *state)
     }
     state->configured = false;
     state->recovery_config_pending = false;
-    if (state->owner < 0) return;
+    if (state->owner < 0 &&
+        !(state->duo_active && state->duo.master_selected)) return;
     uint32_t previous_index = state->acquired_identity.device_index;
     uint32_t resolved_index = 0u;
+    /* A cached pre-failure snapshot can falsely report the unplugged receiver
+     * as present for up to one second.  Recovery classification always uses a
+     * fresh USB inventory. */
+    state->device_snapshot_valid = false;
     int identity_result = resolve_acquired_device(state, &resolved_index);
     if (identity_result != 0) {
+        if (identity_result == OPENRSP_IDENTITY_NOT_FOUND) {
+            uint64_t now_ms = monotonic_milliseconds();
+            if (openrspd_removal_tracker_absent(
+                    &state->removal_tracker, now_ms,
+                    OPENRSPD_DEVICE_REMOVAL_GRACE_MILLISECONDS)) {
+                report_removed_device(state);
+            }
+        } else {
+            /* Ambiguous identity is not proof of physical removal. */
+            openrspd_removal_tracker_present(&state->removal_tracker);
+        }
         if (state->recovery_identity_status != identity_result) {
             fprintf(stderr,
                     "OPENRSPD_RECOVERY_IDENTITY status=%s time_unix_ms=%llu\n",
@@ -566,6 +746,8 @@ static void recover_failed_stream(daemon_state *state)
         }
         return;
     }
+
+    openrspd_removal_tracker_present(&state->removal_tracker);
 
     if (state->recovery_identity_status != 0) {
         fprintf(stderr,
@@ -640,18 +822,28 @@ static void finish_recovery_config(daemon_state *state)
                                              &state->config;
     const openrsp_radio_config *target = &state->config;
     int result = 0;
-    if (target->sample_rate_hz != bootstrap->sample_rate_hz)
-        result |= mirisdr_set_sample_rate(state->radio, target->sample_rate_hz);
-    if (target->center_frequency_hz != bootstrap->center_frequency_hz)
+#if defined(_WIN32)
+    bool restart_for_sample_rate =
+        state->stream_thread_started &&
+        target->sample_rate_hz != bootstrap->sample_rate_hz;
+    if (restart_for_sample_rate) result = stop_stream(state);
+#else
+    const bool restart_for_sample_rate = false;
+#endif
+    if (result == 0 && target->sample_rate_hz != bootstrap->sample_rate_hz)
+        result |= set_rspduo_sample_rate(state->radio, target);
+    if (result == 0 &&
+        target->center_frequency_hz != bootstrap->center_frequency_hz)
         result |= mirisdr_set_center_freq(state->radio, target->center_frequency_hz);
-    if (target->bandwidth_hz != bootstrap->bandwidth_hz)
+    if (result == 0 && target->bandwidth_hz != bootstrap->bandwidth_hz)
         result |= mirisdr_set_bandwidth(state->radio, target->bandwidth_hz);
-    if (target->if_frequency_hz != bootstrap->if_frequency_hz)
+    if (result == 0 && target->if_frequency_hz != bootstrap->if_frequency_hz)
         result |= mirisdr_set_if_freq(state->radio,
                                       (uint32_t)target->if_frequency_hz);
-    result |= set_gain(state->radio, target);
-    result |= set_rspduo_controls(state->radio, target,
-                                  OPENRSP_CHANGE_RSPDUO_CONTROLS);
+    if (result == 0) result |= set_gain(state->radio, target);
+    if (result == 0)
+        result |= set_rspduo_controls(state->radio, target,
+                                      OPENRSP_CHANGE_RSPDUO_CONTROLS);
     fprintf(stderr,
             "OPENRSPD_RECOVERY_CONFIG status=%d bootstrap_rf=%u fs=%u rf=%u bw=%u if=%d gr=%d lna=%u time_unix_ms=%llu\n",
             result, bootstrap->center_frequency_hz, target->sample_rate_hz,
@@ -663,6 +855,19 @@ static void finish_recovery_config(daemon_state *state)
     if (result != 0) {
         atomic_store(&state->stream_error, true);
         if (state->radio) (void)mirisdr_cancel_async(state->radio);
+    } else if (restart_for_sample_rate) {
+        state->logged_usb_iq = false;
+        state->logged_socket_iq = false;
+        atomic_store(&state->first_iq_seen, false);
+        atomic_store(&state->stream_error, false);
+        atomic_store(&state->stream_result, 0);
+        atomic_store(&state->streaming, true);
+        if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
+            atomic_store(&state->streaming, false);
+            atomic_store(&state->stream_error, true);
+            return;
+        }
+        state->stream_thread_started = true;
     }
 }
 
@@ -684,7 +889,7 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
             next->if_frequency_hz != old_channel->if_frequency_hz ||
             next->bandwidth_hz != old_channel->bandwidth_hz)
             return OPENRSP_STATUS_BAD_REQUEST;
-        if (!valid_config(next)) return OPENRSP_STATUS_BAD_REQUEST;
+        if (!openrspd_config_valid(next)) return OPENRSP_STATUS_BAD_REQUEST;
         int dual_result = 0;
         if ((flags & (OPENRSP_CHANGE_RF | OPENRSP_CHANGE_GAIN)) != 0u)
             dual_result |= mirisdr_update_rspduo_dual(
@@ -696,14 +901,10 @@ static uint32_t apply_update(daemon_state *state, const openrsp_update_request *
         return OPENRSP_STATUS_OK;
     }
     if (next->tuner != old->tuner) return OPENRSP_STATUS_BAD_REQUEST;
-    if (!valid_config(next)) return OPENRSP_STATUS_BAD_REQUEST;
-    if ((flags & OPENRSP_CHANGE_AGC) != 0u &&
-        (next->agc_mode < 0 || next->agc_mode > 4 ||
-         next->agc_setpoint_dbfs < -60 || next->agc_setpoint_dbfs > -20))
-        return OPENRSP_STATUS_BAD_REQUEST;
+    if (!openrspd_config_valid(next)) return OPENRSP_STATUS_BAD_REQUEST;
     if ((flags & OPENRSP_CHANGE_SAMPLE_RATE) != 0u &&
         next->sample_rate_hz != old->sample_rate_hz)
-        result |= mirisdr_set_sample_rate(state->radio, next->sample_rate_hz);
+        result |= set_rspduo_sample_rate(state->radio, next);
     if ((flags & OPENRSP_CHANGE_RF) != 0u &&
         next->center_frequency_hz != old->center_frequency_hz)
         result |= mirisdr_set_center_freq(state->radio, next->center_frequency_hz);
@@ -726,6 +927,18 @@ static uint32_t snapshot_sdrplay_devices(daemon_state *state,
                                          size_t capacity)
 {
     struct timespec now = {0};
+    /* On Windows, enumerating through a second libusb context after the async
+     * event thread has stopped can corrupt the retained device context.  A
+     * held radio is the same receiver already represented by this snapshot;
+     * keep serving that verified identity until the handle is released. */
+    if (state->radio && state->device_snapshot_valid) {
+        uint32_t copied = state->device_snapshot_count;
+        if (copied > capacity) copied = (uint32_t)capacity;
+        if (records && copied != 0u)
+            memcpy(records, state->device_snapshot,
+                   copied * sizeof(*records));
+        return state->device_snapshot_count;
+    }
     if (state->device_snapshot_valid &&
         clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
         time_t seconds = now.tv_sec - state->device_snapshot_time.tv_sec;
@@ -750,7 +963,7 @@ static uint32_t snapshot_sdrplay_devices(daemon_state *state,
      * impossible until the driver has loaded the locally installed firmware.
      * Bootstrap only devices whose descriptor explicitly identifies that
      * cold state; never guess from an index or from another receiver. */
-    for (uint32_t pass = 0u; pass < OPENRSPD_MAX_DEVICES; ++pass) {
+    for (uint32_t pass = 0u; !state->radio && pass < OPENRSPD_MAX_DEVICES; ++pass) {
         uint32_t candidate_count = mirisdr_get_device_count();
         bool bootstrapped = false;
         for (uint32_t index = 0u; index < candidate_count; ++index) {
@@ -793,6 +1006,25 @@ static uint32_t snapshot_sdrplay_devices(daemon_state *state,
             record->product_id = product_id;
             (void)snprintf(record->serial, sizeof(record->serial), "%s", serial);
             (void)snprintf(record->model, sizeof(record->model), "%s", product);
+            /* The Windows backend can temporarily reject a serial-string
+             * request while this daemon already owns the WinUSB interface.
+             * Keep the identity acquired from the same physical device
+             * instead of replacing it with the port-path fallback. */
+            if (state->radio &&
+                raw_index == state->acquired_identity.device_index &&
+                vendor_id == state->acquired_identity.vendor_id &&
+                product_id == state->acquired_identity.product_id &&
+                state->acquired_identity.serial[0] != '\0')
+                (void)snprintf(record->serial, sizeof(record->serial), "%s",
+                               state->acquired_identity.serial);
+            if (product_id == 0x3020u) {
+                record->rspduo_mode_mask = state->duo_active &&
+                    state->duo.master_selected ? OPENRSP_MODE_CAP_SLAVE :
+                    (OPENRSP_MODE_CAP_SINGLE | OPENRSP_MODE_CAP_DUAL |
+                     OPENRSP_MODE_CAP_MASTER);
+                record->rspduo_sample_rate_hz = state->duo_active ?
+                    state->duo.sample_rate_hz : 0u;
+            }
         }
         ++count;
     }
@@ -818,7 +1050,112 @@ static int resolve_acquired_device(daemon_state *state, uint32_t *device_index)
     return result;
 }
 
-static int serve_request(int descriptor, daemon_state *state)
+static int duo_role_descriptor(const daemon_state *state,
+                               openrsp_socket_t descriptor,
+                               openrspd_duo_role *role)
+{
+    if (role != NULL) *role = OPENRSPD_DUO_ROLE_NONE;
+    if (state == NULL || !state->duo_active) return 0;
+    openrspd_duo_role found = openrspd_duo_role_for_descriptor(
+        &state->duo, descriptor);
+    if (role != NULL) *role = found;
+    return found != OPENRSPD_DUO_ROLE_NONE;
+}
+
+static int duo_prepare_config(daemon_state *state)
+{
+    if (state == NULL || (!state->duo_config_a && !state->duo_config_b)) return -1;
+    if (!state->duo_config_a) {
+        state->duo_config.channel_a = state->duo_config.channel_b;
+        state->duo_config.channel_a.tuner = OPENRSP_TUNER_A;
+        state->duo_config.channel_a.bias_tee_enabled = 0u;
+        state->duo_config.channel_a.am_port_select = 0u;
+        state->duo_config.channel_a.am_notch_enabled = 0u;
+    }
+    if (!state->duo_config_b) {
+        state->duo_config.channel_b = state->duo_config.channel_a;
+        state->duo_config.channel_b.tuner = OPENRSP_TUNER_B;
+        state->duo_config.channel_b.bias_tee_enabled = 0u;
+        state->duo_config.channel_b.am_port_select = 0u;
+        state->duo_config.channel_b.am_notch_enabled = 0u;
+    }
+    state->duo_config.sample_rate_hz = state->duo.sample_rate_hz;
+    state->duo_config.channel_a.sample_rate_hz = state->duo.sample_rate_hz;
+    state->duo_config.channel_b.sample_rate_hz = state->duo.sample_rate_hz;
+    int32_t required_if = state->duo.sample_rate_hz == 6000000u ? 1620000 : 2048000;
+    state->duo_config.channel_a.if_frequency_hz = required_if;
+    state->duo_config.channel_b.if_frequency_hz = required_if;
+    state->duo_config.channel_a.bandwidth_hz =
+        state->duo_config.channel_a.bandwidth_hz > 1536000u ? 1536000u :
+        state->duo_config.channel_a.bandwidth_hz;
+    state->duo_config.channel_b.bandwidth_hz =
+        state->duo_config.channel_b.bandwidth_hz > 1536000u ? 1536000u :
+        state->duo_config.channel_b.bandwidth_hz;
+    return valid_dual_config(&state->duo_config) ? 0 : -1;
+}
+
+static uint32_t duo_reset_hardware(daemon_state *state)
+{
+    if (state == NULL) return OPENRSP_STATUS_BAD_REQUEST;
+    int result = 0;
+    if (state->radio && stop_stream(state) != 0) result = -1;
+    if (state->radio && mirisdr_close(state->radio) != 0) result = -1;
+    state->radio = NULL;
+    state->configured = false;
+    state->dual_mode = false;
+    return result == 0 ? OPENRSP_STATUS_OK : OPENRSP_STATUS_IO_ERROR;
+}
+
+/* Apply a full role configuration that arrives after the shared direct-dual
+ * endpoint is already running.  Sample rate, IF, and bandwidth are shared by
+ * the two lanes and therefore cannot be changed through this per-role path;
+ * RF/gain and RSPduo controls can be updated in place. */
+static uint32_t duo_apply_running_config(daemon_state *state,
+                                         const openrsp_radio_config *config)
+{
+    if (state == NULL || config == NULL || !state->radio ||
+        !state->configured || !state->dual_mode)
+        return OPENRSP_STATUS_OK;
+    openrsp_radio_config *current = config->tuner == OPENRSP_TUNER_B ?
+        &state->duo_config.channel_b : &state->duo_config.channel_a;
+    if (config->sample_rate_hz != state->duo_config.sample_rate_hz ||
+        config->if_frequency_hz != current->if_frequency_hz ||
+        config->bandwidth_hz != current->bandwidth_hz)
+        return OPENRSP_STATUS_BAD_REQUEST;
+    int result = 0;
+    if (config->center_frequency_hz != current->center_frequency_hz ||
+        config->gain_reduction_db != current->gain_reduction_db ||
+        config->lna_state != current->lna_state)
+        result |= mirisdr_update_rspduo_dual(
+            state->radio, config->tuner, config->center_frequency_hz,
+            config->gain_reduction_db, config->lna_state);
+    result |= set_rspduo_controls(state->radio, config,
+                                  OPENRSP_CHANGE_RSPDUO_CONTROLS);
+    if (result < 0) return OPENRSP_STATUS_IO_ERROR;
+    *current = *config;
+    return OPENRSP_STATUS_OK;
+}
+
+static uint32_t duo_result_status(openrspd_duo_result result)
+{
+    switch (result) {
+    case OPENRSPD_DUO_OK: return OPENRSP_STATUS_OK;
+    case OPENRSPD_DUO_START_PENDING: return OPENRSP_STATUS_START_PENDING;
+    case OPENRSPD_DUO_STOP_PENDING: return OPENRSP_STATUS_STOP_PENDING;
+    case OPENRSPD_DUO_BUSY: return OPENRSP_STATUS_BUSY;
+    default: return OPENRSP_STATUS_BAD_REQUEST;
+    }
+}
+
+static int duo_identity_equal(const openrsp_acquire_request *left,
+                              const openrsp_acquire_request *right)
+{
+    return left != NULL && right != NULL && left->vendor_id == right->vendor_id &&
+           left->product_id == right->product_id &&
+           strcmp(left->serial, right->serial) == 0;
+}
+
+static int serve_request(openrsp_socket_t descriptor, daemon_state *state)
 {
     openrsp_message_header request;
     int read_result = read_exact(descriptor, &request, sizeof(request));
@@ -833,6 +1170,9 @@ static int serve_request(int descriptor, daemon_state *state)
     openrsp_response response = {0};
     bool start_stream_after_response = false;
     bool start_stream_after_error = false;
+    bool duo_start_stream_after_response = false;
+    openrspd_duo_event duo_event_after_response;
+    openrspd_duo_event_clear(&duo_event_after_response);
     response.sequence = request.sequence;
     if (request.magic != OPENRSP_PROTOCOL_MAGIC || request.version != OPENRSP_PROTOCOL_VERSION) {
         response.status = OPENRSP_STATUS_BAD_REQUEST;
@@ -849,17 +1189,238 @@ static int serve_request(int descriptor, daemon_state *state)
         } else {
             state->api_lock_owner = descriptor;
             response.status = OPENRSP_STATUS_OK;
-            fprintf(stderr, "OPENRSPD_API_LOCK fd=%d\n", descriptor);
+            fprintf(stderr, "OPENRSPD_API_LOCK fd=%lld\n",
+                    (long long)descriptor);
             (void)fflush(stderr);
         }
     } else if (request.type == OPENRSP_CMD_UNLOCK_API && request.payload_bytes == 0u &&
                state->api_lock_owner == descriptor) {
         release_api_lock(state, descriptor, "request");
         response.status = OPENRSP_STATUS_OK;
+    } else if (request.type == OPENRSP_CMD_DUO_ACQUIRE &&
+               request.payload_bytes == sizeof(openrsp_duo_acquire_request)) {
+        const openrsp_duo_acquire_request *acquire =
+            (const openrsp_duo_acquire_request *)payload;
+        if (state->owner >= 0 || (state->duo_active &&
+                                  acquire->role == OPENRSP_DUO_ROLE_MASTER &&
+                                  state->duo.master_selected)) {
+            response.status = OPENRSP_STATUS_BUSY;
+        } else if (acquire->role != OPENRSP_DUO_ROLE_MASTER &&
+                   acquire->role != OPENRSP_DUO_ROLE_SLAVE) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
+        } else {
+            uint32_t resolved_index = 0u;
+            int identity_result = 0;
+            if (acquire->identity.vendor_id != 0x1df7u ||
+                acquire->identity.product_id != 0x3020u)
+                identity_result = OPENRSP_IDENTITY_NOT_FOUND;
+            if (identity_result == 0 && acquire->role == OPENRSP_DUO_ROLE_MASTER) {
+                openrsp_device_record devices[OPENRSPD_MAX_DEVICES];
+                uint32_t count = snapshot_sdrplay_devices(state, devices,
+                                                           OPENRSPD_MAX_DEVICES);
+                identity_result = openrsp_identity_resolve(
+                    &acquire->identity, devices, count, &resolved_index);
+            } else if (!state->duo_active || !state->duo.master_selected ||
+                       !duo_identity_equal(&state->acquired_identity,
+                                           &acquire->identity)) {
+                identity_result = OPENRSP_IDENTITY_NOT_FOUND;
+            }
+            if (identity_result != 0) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else {
+                openrspd_duo_result duo_result = openrspd_duo_acquire(
+                    &state->duo, descriptor,
+                    acquire->role == OPENRSP_DUO_ROLE_MASTER ?
+                        OPENRSPD_DUO_ROLE_MASTER : OPENRSPD_DUO_ROLE_SLAVE,
+                    acquire->tuner, acquire->sample_rate_hz,
+                    &duo_event_after_response);
+                response.status = duo_result_status(duo_result);
+                if (duo_result == OPENRSPD_DUO_OK) {
+                    state->duo_active = true;
+                    state->device_snapshot_valid = false;
+                    if (acquire->role == OPENRSP_DUO_ROLE_MASTER) {
+                        state->acquired_identity = acquire->identity;
+                        state->acquired_identity.device_index = resolved_index;
+                    }
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_CONFIGURE &&
+               request.payload_bytes == sizeof(openrsp_radio_config)) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else {
+            const openrsp_radio_config *config =
+                (const openrsp_radio_config *)payload;
+            uint32_t expected_tuner = role == OPENRSPD_DUO_ROLE_MASTER ?
+                state->duo.master_tuner : state->duo.slave_tuner;
+            if (!openrspd_config_valid(config) || config->tuner != expected_tuner ||
+                config->sample_rate_hz != state->duo.sample_rate_hz) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else {
+                response.status = duo_apply_running_config(state, config);
+                if (response.status == OPENRSP_STATUS_OK) {
+                    if (config->tuner == OPENRSP_TUNER_A) {
+                        state->duo_config.channel_a = *config;
+                        state->duo_config_a = true;
+                    } else {
+                        state->duo_config.channel_b = *config;
+                        state->duo_config_b = true;
+                    }
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_START &&
+               request.payload_bytes == 0u) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else {
+            openrspd_duo_result duo_result = openrspd_duo_initialise(
+                &state->duo, descriptor, &duo_event_after_response);
+            response.status = duo_result_status(duo_result);
+            if (duo_result == OPENRSPD_DUO_OK && role == OPENRSPD_DUO_ROLE_MASTER) {
+                if (duo_prepare_config(state) != 0) {
+                    state->duo.master_initialised = 0u;
+                    response.status = OPENRSP_STATUS_BAD_REQUEST;
+                    openrspd_duo_event_clear(&duo_event_after_response);
+                } else {
+                    response.status = configure_dual_radio(state, &state->duo_config);
+                    if (response.status == OPENRSP_STATUS_OK) {
+                        state->duo_active = true;
+                        state->dual_mode = true;
+                        duo_start_stream_after_response = true;
+                    } else {
+                        state->duo.master_initialised = 0u;
+                    }
+                }
+            } else if (duo_result == OPENRSPD_DUO_OK &&
+                       role == OPENRSPD_DUO_ROLE_SLAVE) {
+                /* The direct-dual endpoint is already running for the master;
+                 * the slave only becomes routable after this acknowledgement. */
+                if (!state->radio || !state->configured) {
+                    state->duo.slave_initialised = 0u;
+                    response.status = OPENRSP_STATUS_IO_ERROR;
+                    openrspd_duo_event_clear(&duo_event_after_response);
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_STOP &&
+               request.payload_bytes == 0u) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else {
+            openrspd_duo_result duo_result = openrspd_duo_uninitialise(
+                &state->duo, descriptor, &duo_event_after_response);
+            response.status = duo_result_status(duo_result);
+            if (duo_result == OPENRSPD_DUO_OK && role == OPENRSPD_DUO_ROLE_MASTER)
+                response.status = duo_reset_hardware(state);
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_RELEASE &&
+               request.payload_bytes == 0u) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else {
+            openrspd_duo_result duo_result = openrspd_duo_release(
+                &state->duo, descriptor, &duo_event_after_response);
+            response.status = duo_result_status(duo_result);
+            if (duo_result == OPENRSPD_DUO_OK) {
+                state->device_snapshot_valid = false;
+                if (!state->duo.master_selected && !state->duo.slave_selected) {
+                    response.status = duo_reset_hardware(state);
+                    state->duo_active = false;
+                    state->duo_config_a = false;
+                    state->duo_config_b = false;
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_SWAP_RATE &&
+               request.payload_bytes == sizeof(openrsp_duo_rate_request)) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else if (role != OPENRSPD_DUO_ROLE_MASTER) {
+            response.status = OPENRSP_STATUS_BAD_REQUEST;
+        } else if (!state->duo.master_initialised) {
+            response.status = OPENRSP_STATUS_START_PENDING;
+        } else {
+            const openrsp_duo_rate_request *rate =
+                (const openrsp_duo_rate_request *)payload;
+            if (rate->sample_rate_hz != 6000000u &&
+                rate->sample_rate_hz != 8000000u) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else if (state->duo.slave_initialised) {
+                response.status = OPENRSP_STATUS_STOP_PENDING;
+            } else if (rate->sample_rate_hz == state->duo.sample_rate_hz) {
+                response.status = OPENRSP_STATUS_OK;
+            } else if ((!state->duo_config_a && !state->duo_config_b) ||
+                       duo_prepare_config(state) != 0) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else {
+                openrsp_dual_config saved = state->duo_config;
+                uint32_t saved_rate = state->duo.sample_rate_hz;
+                bool was_streaming = state->stream_thread_started;
+                if (was_streaming && stop_stream(state) != 0) {
+                    response.status = OPENRSP_STATUS_IO_ERROR;
+                } else {
+                    state->duo.sample_rate_hz = rate->sample_rate_hz;
+                    if (duo_prepare_config(state) != 0) {
+                        state->duo.sample_rate_hz = saved_rate;
+                        state->duo_config = saved;
+                        response.status = OPENRSP_STATUS_BAD_REQUEST;
+                    } else {
+                        uint32_t reset_status = duo_reset_hardware(state);
+                        response.status = reset_status;
+                        if (reset_status == OPENRSP_STATUS_OK)
+                            response.status = configure_dual_radio(
+                                state, &state->duo_config);
+                        if (response.status == OPENRSP_STATUS_OK) {
+                            state->dual_mode = true;
+                            duo_start_stream_after_response = was_streaming;
+                        } else {
+                            state->duo.sample_rate_hz = saved_rate;
+                            state->duo_config = saved;
+                            if (reset_status == OPENRSP_STATUS_OK)
+                                (void)configure_dual_radio(state, &saved);
+                        }
+                    }
+                }
+            }
+        }
+    } else if (request.type == OPENRSP_CMD_DUO_UPDATE &&
+               request.payload_bytes == sizeof(openrsp_update_request)) {
+        openrspd_duo_role role;
+        if (!duo_role_descriptor(state, descriptor, &role)) {
+            response.status = state->owner >= 0 ? OPENRSP_STATUS_BUSY :
+                              OPENRSP_STATUS_UNSUPPORTED;
+        } else if (!state->radio || !state->configured ||
+                   !state->duo.master_initialised) {
+            response.status = OPENRSP_STATUS_START_PENDING;
+        } else {
+            const openrsp_update_request *update =
+                (const openrsp_update_request *)payload;
+            uint32_t expected_tuner = role == OPENRSPD_DUO_ROLE_MASTER ?
+                state->duo.master_tuner : state->duo.slave_tuner;
+            if (update->config.tuner != expected_tuner) {
+                response.status = OPENRSP_STATUS_BAD_REQUEST;
+            } else {
+                response.status = apply_update(state, update);
+            }
+        }
     } else if (request.type == OPENRSP_CMD_ACQUIRE &&
                request.payload_bytes == sizeof(openrsp_acquire_request)) {
         const openrsp_acquire_request *acquire = (const openrsp_acquire_request *)payload;
-        if (state->owner >= 0 && state->owner != descriptor) {
+        if (state->duo_active) {
+            response.status = OPENRSP_STATUS_BUSY;
+        } else if (state->owner >= 0 && state->owner != descriptor) {
             response.status = OPENRSP_STATUS_BUSY;
         } else if (state->owner == descriptor) {
             response.status = OPENRSP_STATUS_OK;
@@ -933,8 +1494,8 @@ static int serve_request(int descriptor, daemon_state *state)
         if (response.status == OPENRSP_STATUS_OK) {
             state->bootstrap_configured = false;
             fprintf(stderr,
-                    "OPENRSPD_CONFIGURE_DUAL fd=%d fs=%u rf_a=%u gr_a=%d lna_a=%u rf_b=%u gr_b=%d lna_b=%u\n",
-                    descriptor, config->sample_rate_hz,
+                    "OPENRSPD_CONFIGURE_DUAL fd=%lld fs=%u rf_a=%u gr_a=%d lna_a=%u rf_b=%u gr_b=%d lna_b=%u\n",
+                    (long long)descriptor, config->sample_rate_hz,
                     config->channel_a.center_frequency_hz,
                     config->channel_a.gain_reduction_db,
                     config->channel_a.lna_state,
@@ -949,7 +1510,8 @@ static int serve_request(int descriptor, daemon_state *state)
                !state->dual_mode) {
         const openrsp_swap_request *swap = (const openrsp_swap_request *)payload;
         if ((swap->tuner != OPENRSP_TUNER_A && swap->tuner != OPENRSP_TUNER_B) ||
-            !valid_config(&swap->config) || swap->config.tuner != swap->tuner) {
+            !openrspd_config_valid(&swap->config) ||
+            swap->config.tuner != swap->tuner) {
             response.status = OPENRSP_STATUS_BAD_REQUEST;
         } else {
             bool was_streaming = state->stream_thread_started;
@@ -976,7 +1538,7 @@ static int serve_request(int descriptor, daemon_state *state)
         const openrsp_mode_swap_request *swap =
             (const openrsp_mode_swap_request *)payload;
         bool valid_target = swap->mode == OPENRSP_MODE_SINGLE ?
-                            valid_config(&swap->single) :
+                            openrspd_config_valid(&swap->single) :
                             swap->mode == OPENRSP_MODE_DUAL ?
                             valid_dual_config(&swap->dual) : false;
         if (!valid_target) {
@@ -1014,8 +1576,8 @@ static int serve_request(int descriptor, daemon_state *state)
                 state->stream_sequence[0] = 0u;
                 state->stream_sequence[1] = 0u;
                 fprintf(stderr,
-                        "OPENRSPD_SWAP_MODE fd=%d mode=%u status=%u fs=%u\n",
-                        descriptor, swap->mode, response.status,
+                        "OPENRSPD_SWAP_MODE fd=%lld mode=%u status=%u fs=%u\n",
+                        (long long)descriptor, swap->mode, response.status,
                         swap->mode == OPENRSP_MODE_DUAL ?
                         swap->dual.sample_rate_hz : swap->single.sample_rate_hz);
                 (void)fflush(stderr);
@@ -1045,7 +1607,7 @@ static int serve_request(int descriptor, daemon_state *state)
                request.payload_bytes == sizeof(openrsp_update_request) &&
                state->owner == descriptor) {
         const openrsp_update_request *update = (const openrsp_update_request *)payload;
-        if (!valid_config(&update->config)) {
+        if (!openrspd_config_valid(&update->config)) {
             response.status = OPENRSP_STATUS_BAD_REQUEST;
         } else if (!state->radio || !state->configured ||
                    atomic_load(&state->stream_error)) {
@@ -1056,7 +1618,15 @@ static int serve_request(int descriptor, daemon_state *state)
             response.status = OPENRSP_STATUS_OK;
             response.changed_flags = OPENRSP_RESPONSE_RECOVERY_QUEUED;
         } else {
-            response.status = apply_update(state, update);
+            bool restart_for_sample_rate =
+                state->stream_thread_started &&
+                (update->changed_flags & OPENRSP_CHANGE_SAMPLE_RATE) != 0u &&
+                update->config.sample_rate_hz != state->config.sample_rate_hz;
+            response.status = restart_for_sample_rate && stop_stream(state) != 0 ?
+                              OPENRSP_STATUS_IO_ERROR :
+                              apply_update(state, update);
+            if (response.status == OPENRSP_STATUS_OK && restart_for_sample_rate)
+                start_stream_after_response = true;
             if (response.status == OPENRSP_STATUS_IO_ERROR) {
                 state->config = update->config;
                 atomic_store(&state->stream_error, true);
@@ -1084,6 +1654,23 @@ static int serve_request(int descriptor, daemon_state *state)
                 return -1;
         }
     }
+    if (response.status == OPENRSP_STATUS_OK &&
+        duo_event_after_response.kind != OPENRSPD_DUO_EVENT_NONE) {
+        if (send_duo_event(state, &duo_event_after_response) != 0)
+            return -1;
+    }
+    if (duo_start_stream_after_response && response.status == OPENRSP_STATUS_OK) {
+        state->logged_usb_iq = false;
+        state->logged_socket_iq = false;
+        atomic_store(&state->first_iq_seen, false);
+        atomic_store(&state->streaming, true);
+        atomic_store(&state->stream_error, false);
+        state->stream_sequence[0] = 0u;
+        state->stream_sequence[1] = 0u;
+        if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0)
+            return -1;
+        state->stream_thread_started = true;
+    }
     if (request.type == OPENRSP_CMD_START && response.status == OPENRSP_STATUS_OK) {
         state->logged_usb_iq = false;
         state->logged_socket_iq = false;
@@ -1108,49 +1695,60 @@ static int serve_request(int descriptor, daemon_state *state)
     return 1;
 }
 
-static void remove_client(daemon_state *state, int clients[OPENRSPD_MAX_CLIENTS],
+static void remove_client(daemon_state *state,
+                          openrsp_socket_t clients[OPENRSPD_MAX_CLIENTS],
                           size_t index)
 {
-    int descriptor = clients[index];
+    openrsp_socket_t descriptor = clients[index];
     if (descriptor < 0) return;
     release_client(state, descriptor);
     release_api_lock(state, descriptor, "disconnect");
-    (void)close(descriptor);
-    clients[index] = -1;
+    (void)openrsp_socket_close(descriptor);
+    clients[index] = OPENRSP_INVALID_SOCKET;
 }
 
-static void close_clients(daemon_state *state, int clients[OPENRSPD_MAX_CLIENTS])
+static void close_clients(daemon_state *state,
+                          openrsp_socket_t clients[OPENRSPD_MAX_CLIENTS])
 {
     for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index)
         remove_client(state, clients, index);
 }
 
-static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
+static void accept_clients(openrsp_socket_t server,
+                           openrsp_socket_t clients[OPENRSPD_MAX_CLIENTS])
 {
     for (;;) {
-        int client = accept(server, NULL, NULL);
-        if (client < 0) {
-            if (errno == EINTR) continue;
-            if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
+        openrsp_socket_t client = (openrsp_socket_t)accept(server, NULL, NULL);
+        if (client == OPENRSP_INVALID_SOCKET) {
+            int error = openrsp_socket_last_error();
+            if (openrsp_socket_interrupted(error)) continue;
+            if (!openrsp_socket_would_block(error))
+                fprintf(stderr, "accept failed: %d\n", error);
             return;
         }
         /* macOS may propagate O_NONBLOCK from the listening socket.  Control
          * frames fit in one write, but IQ frames can otherwise stop at EAGAIN
          * after a partial payload and leave the receiver waiting forever. */
         if (set_blocking(client) != 0) {
-            (void)close(client);
+            (void)openrsp_socket_close(client);
             continue;
         }
         /* A client can stop draining IQ after a device-removal callback while
          * leaving its socket open.  Never let that wedge the USB callback and
          * libusb event lock indefinitely. */
+#if defined(_WIN32)
+        const DWORD send_timeout = 2000u;
+#else
         const struct timeval send_timeout = {.tv_sec = 2, .tv_usec = 0};
+#endif
         const int stream_buffer_bytes = 4 * 1024 * 1024;
-        if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout,
+        if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+                       (const char *)&send_timeout,
                        sizeof(send_timeout)) != 0 ||
-            setsockopt(client, SOL_SOCKET, SO_SNDBUF, &stream_buffer_bytes,
+            setsockopt(client, SOL_SOCKET, SO_SNDBUF,
+                       (const char *)&stream_buffer_bytes,
                        sizeof(stream_buffer_bytes)) != 0) {
-            (void)close(client);
+            (void)openrsp_socket_close(client);
             continue;
         }
         bool stored = false;
@@ -1161,26 +1759,69 @@ static void accept_clients(int server, int clients[OPENRSPD_MAX_CLIENTS])
             break;
         }
         if (!stored) {
-            fprintf(stderr, "OPENRSPD_REJECT fd=%d reason=too_many_clients\n", client);
-            (void)close(client);
+            fprintf(stderr,
+                    "OPENRSPD_REJECT fd=%lld reason=too_many_clients\n",
+                    (long long)client);
+            (void)openrsp_socket_close(client);
         }
     }
 }
 
-int main(void)
+static int run_server(void)
 {
+#if defined(_WIN32)
+    if (openrsp_socket_startup() != 0) {
+        fprintf(stderr, "Winsock startup failed\n");
+        return EXIT_FAILURE;
+    }
+    const char *port_text = getenv("OPENRSPD_PORT");
+    unsigned long port = 50151ul;
+    if (port_text && port_text[0]) {
+        char *end = NULL;
+        unsigned long parsed = strtoul(port_text, &end, 10);
+        if (!end || end == port_text || end[0] != '\0' || parsed == 0ul ||
+            parsed > 65535ul) {
+            fprintf(stderr, "Invalid OPENRSPD_PORT: %s\n", port_text);
+            openrsp_socket_cleanup();
+            return EXIT_FAILURE;
+        }
+        port = parsed;
+    }
+    openrsp_socket_t server = (openrsp_socket_t)socket(AF_INET, SOCK_STREAM, 0);
+#else
     const char *path = getenv("OPENRSPD_SOCKET");
     if (!path || path[0] == '\0') path = OPENRSP_SOCKET_PATH;
     if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
         fprintf(stderr, "Socket path is too long: %s\n", path);
         return EXIT_FAILURE;
     }
-
-    int server = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server < 0) {
-        perror("socket");
+    openrsp_socket_t server = socket(AF_UNIX, SOCK_STREAM, 0);
+#endif
+    if (server == OPENRSP_INVALID_SOCKET) {
+        fprintf(stderr, "socket failed: %d\n", openrsp_socket_last_error());
+#if defined(_WIN32)
+        openrsp_socket_cleanup();
+#endif
         return EXIT_FAILURE;
     }
+#if defined(_WIN32)
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_port = htons((u_short)port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const BOOL exclusive = TRUE;
+    if (setsockopt(server, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                   (const char *)&exclusive, sizeof(exclusive)) != 0 ||
+        set_nonblocking(server) != 0 ||
+        bind(server, (const struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(server, 8) != 0) {
+        fprintf(stderr, "openrspd TCP setup failed: %d\n",
+                openrsp_socket_last_error());
+        (void)openrsp_socket_close(server);
+        openrsp_socket_cleanup();
+        return EXIT_FAILURE;
+    }
+#else
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
     (void)strcpy(address.sun_path, path);
@@ -1189,38 +1830,60 @@ int main(void)
         bind(server, (const struct sockaddr *)&address, sizeof(address)) != 0 ||
         chmod(path, 0666) != 0 || listen(server, 8) != 0) {
         perror("openrspd socket setup");
-        (void)close(server);
+        (void)openrsp_socket_close(server);
         (void)unlink(path);
         return EXIT_FAILURE;
     }
+#endif
+#if defined(_WIN32)
+    (void)signal(SIGINT, stop_server);
+    (void)signal(SIGTERM, stop_server);
+#else
     struct sigaction stop_action = {0};
     stop_action.sa_handler = stop_server;
     (void)sigemptyset(&stop_action.sa_mask);
     (void)sigaction(SIGINT, &stop_action, NULL);
     (void)sigaction(SIGTERM, &stop_action, NULL);
     (void)signal(SIGPIPE, SIG_IGN);
+#endif
+#if defined(_WIN32)
+    printf("OPENRSPD_READY endpoint=127.0.0.1:%lu protocol=%u\n",
+           port, OPENRSP_PROTOCOL_VERSION);
+#else
     printf("OPENRSPD_READY socket=%s protocol=%u\n", path, OPENRSP_PROTOCOL_VERSION);
+#endif
     (void)fflush(stdout);
+#if defined(_WIN32)
+    if (service_mode) report_service_status(SERVICE_RUNNING, NO_ERROR, 0u);
+#endif
 
     daemon_state state = {
         .owner = -1,
         .api_lock_owner = -1,
         .write_lock = PTHREAD_MUTEX_INITIALIZER
     };
+    openrspd_duo_session_init(&state.duo);
     atomic_init(&state.streaming, false);
     atomic_init(&state.stream_error, false);
     atomic_init(&state.stream_result, 0);
     atomic_init(&state.first_iq_seen, false);
     atomic_init(&state.control_write_pending, false);
     atomic_init(&state.client_write_error, false);
-    int clients[OPENRSPD_MAX_CLIENTS];
-    for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) clients[index] = -1;
+    atomic_init(&state.client_write_error_fd, -1);
+    openrsp_socket_t clients[OPENRSPD_MAX_CLIENTS];
+    for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index)
+        clients[index] = OPENRSP_INVALID_SOCKET;
     while (running) {
         if (atomic_exchange(&state.client_write_error, false)) {
+            openrsp_socket_t failed_fd =
+                atomic_exchange(&state.client_write_error_fd,
+                                OPENRSP_INVALID_SOCKET);
             for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
-                if (clients[index] == state.owner) {
-                    fprintf(stderr, "OPENRSPD_CLIENT_EVICT fd=%d reason=iq-write-timeout\n",
-                            state.owner);
+                if (clients[index] == failed_fd ||
+                    (failed_fd < 0 && clients[index] == state.owner)) {
+                    fprintf(stderr,
+                            "OPENRSPD_CLIENT_EVICT fd=%lld reason=iq-write-timeout\n",
+                            (long long)clients[index]);
                     (void)fflush(stderr);
                     remove_client(&state, clients, index);
                     break;
@@ -1230,51 +1893,110 @@ int main(void)
         }
         recover_failed_stream(&state);
         finish_recovery_config(&state);
-        struct pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];
+        openrsp_pollfd fds[OPENRSPD_MAX_CLIENTS + 1u];
         size_t client_index[OPENRSPD_MAX_CLIENTS + 1u];
-        nfds_t count = 1u;
+        openrsp_nfds_t count = 1u;
         fds[0].fd = server;
-        fds[0].events = POLLIN;
+        fds[0].events = OPENRSP_POLL_READ;
         fds[0].revents = 0;
         client_index[0] = OPENRSPD_MAX_CLIENTS;
         for (size_t index = 0u; index < OPENRSPD_MAX_CLIENTS; ++index) {
             if (clients[index] < 0) continue;
             fds[count].fd = clients[index];
-            fds[count].events = POLLIN | POLLHUP | POLLERR;
+            fds[count].events = OPENRSP_POLL_READ | OPENRSP_POLL_HANGUP |
+                                OPENRSP_POLL_ERROR;
             fds[count].revents = 0;
             client_index[count] = index;
             ++count;
         }
-        int ready = poll(fds, count, 1000);
+        int ready = openrsp_socket_poll(fds, count, 1000);
         if (ready < 0) {
-            if (errno == EINTR) continue;
-            perror("poll");
+            int error = openrsp_socket_last_error();
+            if (openrsp_socket_interrupted(error)) continue;
+            fprintf(stderr, "poll failed: %d\n", error);
             break;
         }
         if (ready == 0) continue;
-        if ((fds[0].revents & POLLIN) != 0) accept_clients(server, clients);
+        if ((fds[0].revents & OPENRSP_POLL_READ) != 0)
+            accept_clients(server, clients);
         /* Ownership cleanup has priority over new commands. A dead lock owner
          * and a waiting contender can become ready in the same poll cycle;
          * serving by descriptor-slot order would otherwise return a spurious
          * BUSY before processing the owner's hangup. */
-        for (nfds_t index = 1u; index < count; ++index) {
+        for (openrsp_nfds_t index = 1u; index < count; ++index) {
             size_t slot = client_index[index];
-            if ((fds[index].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            if ((fds[index].revents &
+                 (OPENRSP_POLL_HANGUP | OPENRSP_POLL_ERROR |
+                  OPENRSP_POLL_INVALID)) != 0) {
                 remove_client(&state, clients, slot);
             }
         }
-        for (nfds_t index = 1u; index < count; ++index) {
+        for (openrsp_nfds_t index = 1u; index < count; ++index) {
             size_t slot = client_index[index];
             if (clients[slot] < 0) continue;
-            if ((fds[index].revents & POLLIN) == 0) continue;
+            if ((fds[index].revents & OPENRSP_POLL_READ) == 0) continue;
             int result = serve_request(clients[slot], &state);
             if (result != 1) remove_client(&state, clients, slot);
         }
     }
     close_clients(&state, clients);
     shutdown_radio(&state);
-    (void)close(server);
+    (void)openrsp_socket_close(server);
+#if defined(_WIN32)
+    openrsp_socket_cleanup();
+#else
     (void)unlink(path);
+#endif
     (void)pthread_mutex_destroy(&state.write_lock);
     return running ? EXIT_FAILURE : EXIT_SUCCESS;
 }
+
+#if defined(_WIN32)
+static void WINAPI openrsp_service_main(DWORD argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    service_status_handle =
+        RegisterServiceCtrlHandlerA("OpenRSP", service_control);
+    if (!service_status_handle) return;
+    const char *log_path = getenv("OPENRSPD_LOG");
+    if (log_path && log_path[0]) {
+        (void)freopen(log_path, "a", stdout);
+        (void)freopen(log_path, "a", stderr);
+        (void)setvbuf(stdout, NULL, _IOLBF, 0u);
+        (void)setvbuf(stderr, NULL, _IOLBF, 0u);
+    }
+    service_mode = 1;
+    report_service_status(SERVICE_START_PENDING, NO_ERROR, 5000u);
+    int result = run_server();
+    report_service_status(SERVICE_STOPPED,
+                          result == EXIT_SUCCESS ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR,
+                          0u);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--service") == 0) {
+        SERVICE_TABLE_ENTRYA table[] = {
+            {"OpenRSP", openrsp_service_main},
+            {NULL, NULL}
+        };
+        if (!StartServiceCtrlDispatcherA(table)) {
+            fprintf(stderr, "Service dispatcher failed: %lu\n",
+                    (unsigned long)GetLastError());
+            return EXIT_FAILURE;
+        }
+        return EXIT_SUCCESS;
+    }
+    if (argc != 1) {
+        fprintf(stderr, "usage: %s [--service]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    return run_server();
+}
+#else
+int main(void)
+{
+    return run_server();
+}
+#endif

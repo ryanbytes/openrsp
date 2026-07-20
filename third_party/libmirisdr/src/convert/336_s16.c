@@ -17,6 +17,17 @@ static int mirisdr_samples_convert_336_s16 (mirisdr_dev_t *p, unsigned char* buf
         /* pozice hlavičky */
         addr = src[3] << 24 | src[2] << 16 | src[1] << 8 | src[0] << 0;
 
+        if (p->rspduo_dual && getenv("OPENRSP_TRACE_DUAL_HEADERS") != NULL) {
+            static unsigned int traced_headers;
+            if (traced_headers < 32u) {
+                fprintf(stderr,
+                        "OPENRSP_DUAL_HEADER index=%u addr=%08x bytes=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
+                        traced_headers, addr, src[16], src[17], src[18], src[19],
+                        src[20], src[21], src[22], src[23]);
+                ++traced_headers;
+            }
+        }
+
         /* potenciálně ztracená data */
         if ((i == 0) && p->usb_pid != 0x3020u && p->addr_valid && (addr != p->addr)) {
             fprintf(stderr, "%u samples lost, %d, %08x:%08x\n", addr - p->addr, cnt, p->addr, addr);

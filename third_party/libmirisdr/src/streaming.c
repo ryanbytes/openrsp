@@ -23,8 +23,14 @@ int mirisdr_streaming_start (mirisdr_dev_t *p) {
     if (getenv("OPENRSP_TRACE_USB") != NULL)
         fprintf(stderr, "OPENRSP_USB control type=%02x request=43 value=0000 index=0000\n",
                 request_type);
-    libusb_control_transfer(p->dh, request_type, 0x43, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
-
+    int result = libusb_control_transfer(
+        p->dh, request_type, 0x43, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
+    if (result < 0) {
+        fprintf(stderr, "failed to start streaming on device %u: %d\n",
+                p->index, result);
+        return result;
+    }
+    p->streaming_active = 1;
     return 0;
 
 failed:
@@ -39,8 +45,14 @@ int mirisdr_streaming_stop (mirisdr_dev_t *p) {
     if (getenv("OPENRSP_TRACE_USB") != NULL)
         fprintf(stderr, "OPENRSP_USB control type=%02x request=45 value=0000 index=0000\n",
                 request_type);
-    libusb_control_transfer(p->dh, request_type, 0x45, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
-
+    int result = libusb_control_transfer(
+        p->dh, request_type, 0x45, 0x0, 0x0, NULL, 0, CTRL_TIMEOUT);
+    if (result < 0) {
+        fprintf(stderr, "failed to stop streaming on device %u: %d\n",
+                p->index, result);
+        return result;
+    }
+    p->streaming_active = 0;
     return 0;
 
 failed:
