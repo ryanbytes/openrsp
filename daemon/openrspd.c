@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* OpenRSP is dedicated to Carolyn, with love. */
 #define _POSIX_C_SOURCE 200809L
 #include "openrsp/protocol.h"
 #include "openrsp/identity.h"
