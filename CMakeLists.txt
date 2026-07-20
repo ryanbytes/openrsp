@@ -140,6 +140,11 @@ if(UNIX OR WIN32)
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_client_ping.ps1"
                 -Daemon $<TARGET_FILE:openrspd>
                 -Client $<TARGET_FILE:openrsp-client-test>)
+        add_test(NAME openrsp-windows-installer-contract
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -NonInteractive
+                -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_installer_contract.ps1"
+                -Installer "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/install-openrsp.ps1")
     endif()
 endif()
 if(UNIX)
