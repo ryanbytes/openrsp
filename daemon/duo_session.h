@@ -95,4 +95,9 @@ int openrspd_duo_route(const openrspd_duo_session *session, uint32_t tuner,
 openrspd_duo_role openrspd_duo_role_for_descriptor(
     const openrspd_duo_session *session, openrspd_client_id descriptor);
 
+/* Losing the slave's socket removes only tuner B.  Losing the master owns the
+ * shared hardware lifetime and therefore stops the direct-dual stream. */
+int openrspd_duo_write_failure_stops_stream(
+    const openrspd_duo_session *session, openrspd_client_id descriptor);
+
 #endif
