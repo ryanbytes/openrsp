@@ -36,5 +36,9 @@ int mirisdr_rspduo_bulk_status_requires_restart(int status);
  * but never after cancellation or failure has started. */
 int mirisdr_async_status_allows_resubmit(int status);
 
+/* WinUSB teardown must stop an active RSPduo endpoint on the event thread
+ * before its pending reads are cancelled. */
+int mirisdr_rspduo_stop_before_cancel(uint16_t usb_pid, int streaming_active);
+
 /* Wall-clock time for correlating transfer failures with daemon recovery. */
 uint64_t mirisdr_wall_clock_milliseconds(void);
