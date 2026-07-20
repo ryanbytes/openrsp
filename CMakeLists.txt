@@ -154,6 +154,18 @@ if(UNIX OR WIN32)
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_client_ping.ps1"
                 -Daemon $<TARGET_FILE:openrspd>
                 -Client $<TARGET_FILE:openrsp-client-test>)
+        add_executable(windows-sdrplay-api-smoke-test
+            tests/windows_sdrplay_api_smoke_test.c)
+        target_include_directories(windows-sdrplay-api-smoke-test PRIVATE compat)
+        target_link_libraries(windows-sdrplay-api-smoke-test PRIVATE
+            sdrplay_api_compat ${OPENRSP_MATH_LIBRARIES})
+        target_compile_options(windows-sdrplay-api-smoke-test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+        add_test(NAME openrsp-windows-sdrplay-api-smoke
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_sdrplay_api_smoke.ps1"
+                -Daemon $<TARGET_FILE:openrspd>
+                -Client $<TARGET_FILE:windows-sdrplay-api-smoke-test>)
         add_test(NAME openrsp-windows-installer-contract
             COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -NonInteractive
                 -ExecutionPolicy Bypass
