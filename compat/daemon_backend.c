@@ -13,7 +13,16 @@
 
 #define OPENRSP_DAEMON_RESPONSE_TIMEOUT_SECONDS 5
 #define OPENRSP_DAEMON_IQ_QUEUE_CAPACITY 32u
+#if defined(_WIN32)
+/* The Windows daemon sends 256 KiB IQ frames.  Waiting for a slow application
+ * callback here stops the socket reader, eventually filling the daemon's
+ * loopback send buffer and turning ordinary decoder load into a disconnect.
+ * IQ is real-time data: retain the newest frames and mark the resulting
+ * sequence discontinuity rather than losing the entire RSP session. */
+#define OPENRSP_DAEMON_IQ_QUEUE_WAIT_NANOSECONDS 0L
+#else
 #define OPENRSP_DAEMON_IQ_QUEUE_WAIT_NANOSECONDS 20000000L
+#endif
 
 typedef struct {
     int state;
@@ -248,7 +257,8 @@ static void queue_iq(openrsp_daemon_backend *backend, const int16_t *interleaved
             break;
         }
     }
-    if (slot == OPENRSP_DAEMON_IQ_QUEUE_CAPACITY &&
+    if (OPENRSP_DAEMON_IQ_QUEUE_WAIT_NANOSECONDS != 0L &&
+        slot == OPENRSP_DAEMON_IQ_QUEUE_CAPACITY &&
         backend->iq_queue_count != 0u) {
         struct timespec deadline;
         if (clock_gettime(CLOCK_REALTIME, &deadline) == 0) {

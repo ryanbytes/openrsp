@@ -1,5 +1,7 @@
 # OpenRSP
 
+Thanks and love to my wonderful darling Carolyn.
+
 **This project is vibecoded experimental software. Do not mistake rapid development or passing tests for broad hardware validation.**
 
 OpenRSP is an experimental open-source userspace driver for SDRplay RSP receivers. The first hardware target is the RSPduo (`1df7:3020`). The goal is to replace both SDRplay's background daemon and proprietary client library, not wrap them. The direct GPL backend now initializes either RSPduo tuner in single-tuner mode or both tuners in dual low-IF mode, tunes, and streams IQ without SDRplay software. Application compatibility and stability are not finished.
@@ -18,7 +20,7 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPduo tuner-B direct initialization | Single-tuner mode verified on one unit at 2.048 and 10 MS/s; dual low-IF A/B mode verified at 2 MS/s per tuner |
 | RSPdx/RSP1B/RSPdxR2 identification | Published RSPdx PID recognized for discovery; newer model USB IDs still need evidence |
 | Frequency, sample-rate, gain, AGC and bandwidth | Hardware-verified on RSPduo tuners A and B independently |
-| RSPduo LNA routing | All valid A/B states use independently observed register/GPIO plans across the ten hardware routing ranges from 1 kHz through 2 GHz |
+| RSPduo LNA routing | All valid A/B states use independently observed register/GPIO plans across the ten hardware routing ranges through 2 GHz; API-compatible 0--999 Hz handling uses the measured lowest-band calibration |
 | IQ streaming | Direct/API paths verified; RSPduo single-tuner complex output uses the official ADC filter-mode words and occupies both negative and positive spectral halves at 10 MS/s |
 | Stream allocation | Session-owned fixed IQ buffers; no heap allocation in steady-state API callbacks |
 | API 3.15 discovery/selection/parameter ABI | Real VID/PID/model/serial propagation; raw USB indexes are re-resolved from stable identity |
@@ -28,20 +30,25 @@ That limitation is deliberate. SDRplay's public API is documented, but its USB p
 | RSPduo hardware controls | Bias-T on tuner B, RF/DAB notch on A/B, external-reference output on A/B, and tuner-A AM port/notch match observed API/USB control behavior; electrical voltage/filter/reference output not instrument-measured |
 | API 3.15 update-reason constants and validation | Implemented; unsupported controls return errors instead of false success |
 | API software decimation | Stateful FIR at x2–x32; automated count plus x2 pass/stop-band tests, not RF-measured |
+| API DC/IQ correction | Stateful per-tuner software DC removal and IQ imbalance correction with tuner calibration timing controls; synthetic signal tests, not RF-calibrated |
+| API ADS-B modes | Stateful 17-tap fixed-point complex-baseband filtering for decimation, generic no-decimation low-pass, 2 MHz channel, and 3 MHz channel modes; synthetic pass/stop-band tests |
+| API synchronized updates | Gain, RF, sample-rate, and AGC changes can be scheduled at one-shot or periodic sample boundaries; reset flags cancel pending categories |
+| API debug logging | Runtime message, warning, and error filtering controls compatibility-layer diagnostics before or after device selection |
 | API transport-failure event | Unexpected daemon disconnect reports `DeviceFailure`; cleanup suppresses `SIGPIPE` |
+| API physical-removal event | A receiver still absent after a five-second recovery grace reports `DeviceRemoved`; transient replug recovery remains enabled |
 | Daemon crash recovery | A replacement daemon clears the halted RSPduo bulk endpoint; three consecutive forced daemon deaths recovered through a new API session without USB reset or replug |
 | Socket stalls and shutdown | Five-second send/receive deadlines; shutdown wakes blocked readers; timeout/short-frame fixtures |
 | USB cancellation state | Atomic cross-thread state with cancellation visibility fixture |
 | IQ loss indication | Daemon frame-sequence gaps set the API stream reset flag and advance sample numbering |
 | AGC gain events | Applied software-AGC changes emit API `GainChange` payloads |
 | Device API locking | Recursive in-process lock plus daemon-owned cross-process lease with crash release |
-| Update error fidelity | RF/gain/sample-rate failures use specific API codes and populate `GetLastError` |
+| Update error fidelity | RF/gain/sample-rate failures use specific API codes; `GetLastError` returns the newest record and `GetLastErrorByType` retains independent DLL, DLL-device, service, and service-device histories |
 | Overload events | Saturation/correction transitions are hysteretic, acknowledged, and dispatched off the IQ reader |
 | Unplug/replug recovery | Same-process SDRTrunk transport and P25 decode recovery verified for three consecutive physical RSPduo cycles; extended-cycle/soak validation remains |
 | SoapySDRPlay3 compatibility | The pinned upstream module plus the included dual-control patch builds/loads against OpenRSP; live single/dual RSPduo discovery, independent A/B frequency and gain settings, concurrent 2 MS/s A/B streaming, every advertised single-tuner rate from 62.5 kS/s through 10 MS/s, manual IFGR/RFGR with measured level changes, and AGC restore are verified |
 | Linux build | Automated Ubuntu build and test verified |
 | macOS build | Automated build/test verified; RSPduo hardware verified on one arm64 host |
-| Windows build | Not yet ported; POSIX socket, sleep, and pthread dependencies remain |
+| Windows x64 | Native UCRT64 daemon and API DLL build; loopback IPC, 23 native tests including API lifecycle, daemon lock, and backend recovery coverage, service entry point, and runtime packaging verified; a safety-gated, backup-first installer is staged; RSPduo streaming and SDRTrunk cutover remain hardware-unverified |
 
 ### API update coverage
 
@@ -51,8 +58,14 @@ single-tuner mode. In dual mode, RF, gain/LNA, AGC, overload acknowledgement,
 and software-decimation state are independent per tuner. The shared ADC rate,
 IF, and bandwidth cannot be changed with a per-tuner hot update. The
 stateful windowed-sinc FIR decimator accepts x2, x4, x8, x16, and x32 and keeps
-its filter state across IQ frames. It also accepts the API's required AUTO-LO,
-DC/IQ configuration, reset-flag, and overload-message acknowledgement calls.
+its filter state across IQ frames. Per-tuner DC removal and IQ imbalance
+correction run before ADS-B filtering and decimation. The four documented ADS-B
+modes select either normal decimation or stateful no-decimation centered
+complex-baseband low-pass/2 MHz/3 MHz channel filters. AUTO-LO remains the only hardware LO policy supported by the
+direct backend. Synchronized gain, RF, sample-rate, and AGC updates wait for
+their requested one-shot or periodic sample boundary, while reset flags cancel
+selected pending categories. Overload-message acknowledgement remains
+independent per tuner.
 PPM correction retunes the synthesizer by the inverse crystal-error factor and
 reports the completion through `fsChanged`, matching the documented API
 callback contract.
@@ -74,8 +87,10 @@ dual-to-single transitions. It updates the caller's device enumeration and
 channel pointers before resuming IQ, produces a fresh reset on each newly
 active stream, and keeps single-tuner B on Stream A. Direct dual sessions return
 `InvalidParam` from `sdrplay_api_SwapRspDuoDualTunerModeSampleRate()` because
-the documented 6/8 MHz hot-swap entry point is restricted to master/slave mode,
-which OpenRSP does not yet expose.
+the documented 6/8 MHz hot-swap entry point is restricted to master/slave mode.
+OpenRSP exposes master tuner A and a separately owned slave tuner B, routes the
+two callback streams to their respective client processes, emits the documented
+mode-change lifecycle events, and supports the 6/8 MHz master rate swap.
 
 ## Build and test
 
@@ -201,6 +216,55 @@ sudo ./build/openrsp-iq -f 100000000 -s 2048000 -T 1 -e 2 -m 252 capture.iq
 The output is interleaved little-endian signed 16-bit IQ. This command-line tool
 supports either RSPduo tuner in single-tuner mode; simultaneous dual operation
 is exposed through the daemon protocol and API compatibility library.
+
+## Windows replacement build and install
+
+Windows x64 builds use the MSYS2 UCRT64 toolchain and communicate only over a
+loopback TCP endpoint. The default is `127.0.0.1:50151`; set `OPENRSPD_PORT` on
+both the daemon and API process to use an isolated development port. Install the
+UCRT64 compiler, CMake, Ninja, pkg-config, and libusb packages, then run from an
+MSYS2 shell:
+
+```sh
+export PATH=/ucrt64/bin:/usr/bin
+cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX='C:/Program Files/OpenRSP'
+cmake --build build-win --parallel
+ctest --test-dir build-win --output-on-failure
+cmake --install build-win --prefix package-win
+```
+
+The package contains native `openrspd.exe` and `sdrplay_api.dll` binaries plus
+their non-system runtime DLLs. Before replacing the vendor API, extract the
+firmware from the locally installed official service without launching it:
+
+```sh
+./build-win/openrsp-extract-firmware.exe \
+  '/c/Program Files/SDRplay/sdrplay_apiService.exe' \
+  --output /tmp/rspduo-3020.bin
+sha256sum /tmp/rspduo-3020.bin
+```
+
+The expected size and SHA-256 are 6,115 bytes and
+`f2a9451acd81fd8f09c5a0e506335d5d1ec9ab2c4ed53dd98de5cfff2a249387`.
+Stop SDRTrunk and `SDRplayAPIService` before the cutover; the two daemons must
+never compete for the USB interface. From an elevated Windows PowerShell:
+
+```powershell
+Stop-Service SDRplayAPIService
+.\packaging\windows\install-openrsp.ps1 `
+  -PackageDirectory .\package-win `
+  -FirmwarePath C:\path\to\rspduo-3020.bin `
+  -StartService
+```
+
+The installer refuses a running vendor service, backs up the vendor x64 API
+DLL, installs the OpenRSP service and service-only environment, and records the
+backup path and candidate hash in `install-state.json`. The service writes its
+log to `%ProgramData%\OpenRSP\openrspd.log`. Hardware behavior on Windows must
+still be validated with the same stream, tuner-lane, RF, gain, cleanup, and
+SDRTrunk soak gates used on macOS; a successful compile or API ping is not
+hardware parity proof.
 
 ## Linux replacement install
 

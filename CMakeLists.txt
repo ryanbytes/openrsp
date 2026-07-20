@@ -154,6 +154,31 @@ if(UNIX OR WIN32)
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_client_ping.ps1"
                 -Daemon $<TARGET_FILE:openrspd>
                 -Client $<TARGET_FILE:openrsp-client-test>)
+        add_executable(windows-daemon-lock-test tests/windows_daemon_lock_test.c)
+        target_link_libraries(windows-daemon-lock-test PRIVATE openrsp_client)
+        target_compile_options(windows-daemon-lock-test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+        add_test(NAME openrsp-windows-daemon-lock
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_daemon_lock_test.ps1"
+                -Daemon $<TARGET_FILE:openrspd>
+                -Client $<TARGET_FILE:windows-daemon-lock-test>)
+        add_executable(windows-daemon-backend-recovery-test
+            tests/windows_daemon_backend_recovery_test.c
+            compat/daemon_backend.c
+            src/client_posix.c)
+        target_include_directories(windows-daemon-backend-recovery-test PRIVATE
+            compat include)
+        target_link_libraries(windows-daemon-backend-recovery-test PRIVATE
+            Threads::Threads ${OPENRSP_SOCKET_LIBRARIES})
+        target_compile_definitions(windows-daemon-backend-recovery-test PRIVATE
+            OPENRSP_SOCKET_TIMEOUT_MILLISECONDS=100)
+        target_compile_options(windows-daemon-backend-recovery-test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+        add_test(NAME openrsp-windows-daemon-backend-recovery
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_daemon_backend_recovery_test.ps1"
+                -Client $<TARGET_FILE:windows-daemon-backend-recovery-test>)
         add_executable(windows-sdrplay-api-smoke-test
             tests/windows_sdrplay_api_smoke_test.c)
         target_include_directories(windows-sdrplay-api-smoke-test PRIVATE compat)
@@ -166,6 +191,18 @@ if(UNIX OR WIN32)
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_sdrplay_api_smoke.ps1"
                 -Daemon $<TARGET_FILE:openrspd>
                 -Client $<TARGET_FILE:windows-sdrplay-api-smoke-test>)
+        add_executable(windows-sdrplay-api-lifecycle-test
+            tests/windows_sdrplay_api_lifecycle_test.c)
+        target_include_directories(windows-sdrplay-api-lifecycle-test PRIVATE
+            compat include)
+        target_link_libraries(windows-sdrplay-api-lifecycle-test PRIVATE
+            sdrplay_api_compat Threads::Threads ${OPENRSP_SOCKET_LIBRARIES})
+        target_compile_options(windows-sdrplay-api-lifecycle-test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+        add_test(NAME openrsp-windows-sdrplay-api-lifecycle
+            COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_sdrplay_api_lifecycle.ps1"
+                -Client $<TARGET_FILE:windows-sdrplay-api-lifecycle-test>)
         add_test(NAME openrsp-windows-installer-contract
             COMMAND "${OPENRSP_POWERSHELL}" -NoProfile -NonInteractive
                 -ExecutionPolicy Bypass
