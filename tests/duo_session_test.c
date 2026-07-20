@@ -108,6 +108,9 @@ static void test_disconnect_and_validation(void)
     assert(openrspd_duo_acquire(&session, 43, OPENRSPD_DUO_ROLE_SLAVE,
                                 OPENRSPD_DUO_TUNER_B, 0u, NULL) ==
            OPENRSPD_DUO_OK);
+    assert(openrspd_duo_write_failure_stops_stream(&session, 42));
+    assert(!openrspd_duo_write_failure_stops_stream(&session, 43));
+    assert(openrspd_duo_write_failure_stops_stream(&session, 99));
     assert(openrspd_duo_disconnect(&session, 43, &event) == OPENRSPD_DUO_OK);
     assert_event(&event, OPENRSPD_DUO_EVENT_SLAVE_DLL_DISAPPEARED, 42, 43);
     assert(openrspd_duo_role_for_descriptor(&session, 42) ==

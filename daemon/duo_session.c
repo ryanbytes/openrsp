@@ -252,3 +252,10 @@ openrspd_duo_role openrspd_duo_role_for_descriptor(
     if (descriptor_is_slave(session, descriptor)) return OPENRSPD_DUO_ROLE_SLAVE;
     return OPENRSPD_DUO_ROLE_NONE;
 }
+
+int openrspd_duo_write_failure_stops_stream(
+    const openrspd_duo_session *session, openrspd_client_id descriptor)
+{
+    return openrspd_duo_role_for_descriptor(session, descriptor) !=
+           OPENRSPD_DUO_ROLE_SLAVE;
+}

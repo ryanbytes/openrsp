@@ -264,7 +264,14 @@ static void send_stream(daemon_state *state, unsigned int tuner,
                     write_error, (long long)target);
             (void)fflush(stderr);
         }
-        if (state->radio) (void)mirisdr_cancel_async(state->radio);
+        /* A slave owns only its socket route.  Cancelling the shared USB
+         * stream here also kills a healthy master and can turn normal peer
+         * loss into a WinUSB endpoint stall.  Eviction clears the slave route
+         * on the main loop; master and single-owner failures still stop USB. */
+        if (state->radio &&
+            (!state->duo_active ||
+             openrspd_duo_write_failure_stops_stream(&state->duo, target)))
+            (void)mirisdr_cancel_async(state->radio);
         return;
     }
     if (!state->logged_socket_iq) {
