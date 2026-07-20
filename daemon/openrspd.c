@@ -7,6 +7,7 @@
 #include "config_validation.h"
 #include "removal_tracker.h"
 #include "duo_session.h"
+#include "windows_device_recovery.h"
 #include "mirisdr.h"
 
 #include <errno.h>
@@ -982,15 +983,43 @@ static uint32_t snapshot_sdrplay_devices(daemon_state *state,
         uint32_t candidate_count = mirisdr_get_device_count();
         bool bootstrapped = false;
         for (uint32_t index = 0u; index < candidate_count; ++index) {
-            if (mirisdr_device_requires_firmware(index) != 1) continue;
-            fprintf(stderr, "OPENRSPD_COLD_BOOT index=%u status=starting\n", index);
+            int identity_state = mirisdr_device_requires_firmware(index);
+            bool cold_boot = identity_state == MIRISDR_RSPDUO_IDENTITY_COLD;
+#if defined(_WIN32)
+            bool transient_recovery =
+                identity_state == MIRISDR_RSPDUO_IDENTITY_UNREADABLE;
+#else
+            bool transient_recovery = false;
+#endif
+            if (!cold_boot && !transient_recovery) continue;
+            if (transient_recovery) {
+                int restart_result = openrsp_windows_restart_usb_device(
+                    0x1df7u, 0x3020u,
+                    state->acquired_identity.serial[0] != '\0' ?
+                        state->acquired_identity.serial : NULL);
+                fprintf(stderr,
+                        "OPENRSPD_PNP_RESTART index=%u status=%s result=%d\n",
+                        index, restart_result == 0 ? "requested" : "failed",
+                        restart_result);
+                (void)fflush(stderr);
+                if (restart_result == 0) {
+                    const struct timespec restart_delay = {.tv_sec = 1};
+                    (void)nanosleep(&restart_delay, NULL);
+                    bootstrapped = true;
+                    break;
+                }
+                continue;
+            }
+            const char *operation = "COLD_BOOT";
+            fprintf(stderr, "OPENRSPD_%s index=%u status=starting\n",
+                    operation, index);
             (void)fflush(stderr);
             mirisdr_dev_t *candidate = NULL;
             int open_result = mirisdr_open(&candidate, index);
             int close_result = candidate ? mirisdr_close(candidate) : 0;
             fprintf(stderr,
-                    "OPENRSPD_COLD_BOOT index=%u status=%s open=%d close=%d\n",
-                    index, open_result == 0 ? "ready" : "failed",
+                    "OPENRSPD_%s index=%u status=%s open=%d close=%d\n",
+                    operation, index, open_result == 0 ? "ready" : "failed",
                     open_result, close_result);
             (void)fflush(stderr);
             if (open_result != 0) break;

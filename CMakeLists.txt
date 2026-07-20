@@ -83,10 +83,14 @@ target_compile_options(openrsp-extract-firmware PRIVATE -Wall -Wextra -Wpedantic
 
 if(UNIX OR WIN32)
     add_executable(openrspd daemon/openrspd.c daemon/config_validation.c
-        daemon/removal_tracker.c daemon/duo_session.c)
+        daemon/removal_tracker.c daemon/duo_session.c
+        daemon/windows_device_recovery.c)
     target_include_directories(openrspd PRIVATE include daemon)
     target_link_libraries(openrspd PRIVATE openrsp_miri openrsp_identity
         Threads::Threads ${OPENRSP_MATH_LIBRARIES} ${OPENRSP_SOCKET_LIBRARIES})
+    if(WIN32)
+        target_link_libraries(openrspd PRIVATE setupapi)
+    endif()
     target_compile_options(openrspd PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
@@ -126,6 +130,16 @@ target_compile_options(removal-tracker-test PRIVATE
     target_compile_options(duo-session-test PRIVATE
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME duo-session COMMAND duo-session-test)
+
+add_executable(windows-device-recovery-test
+    tests/windows_device_recovery_test.c daemon/windows_device_recovery.c)
+target_include_directories(windows-device-recovery-test PRIVATE daemon)
+target_compile_options(windows-device-recovery-test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+if(WIN32)
+    target_link_libraries(windows-device-recovery-test PRIVATE setupapi)
+endif()
+add_test(NAME windows-device-recovery COMMAND windows-device-recovery-test)
 
 if(UNIX OR WIN32)
     add_executable(openrsp-client-test tests/client_test.c)

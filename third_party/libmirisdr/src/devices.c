@@ -235,17 +235,23 @@ int mirisdr_device_requires_firmware (uint32_t index) {
             continue;
         if (matched++ != index) continue;
         if (descriptor.idVendor == 0x1df7u &&
-            descriptor.idProduct == 0x3020u) {
+            descriptor.idProduct == 0x3020u &&
+            descriptor.iSerialNumber != 0u) {
             libusb_device_handle *handle = NULL;
             if (libusb_open(list[i], &handle) == 0) {
-                result = mirisdr_rspduo_serial_is_readable(
-                             handle, &descriptor) ? 0 : 1;
+                unsigned char serial[256];
+                int serial_result = libusb_get_string_descriptor_ascii(
+                    handle, descriptor.iSerialNumber, serial,
+                    (int)sizeof(serial) - 1);
+                result = mirisdr_rspduo_descriptor_identity_state(
+                    descriptor.idVendor, descriptor.idProduct,
+                    descriptor.iSerialNumber, serial_result);
                 libusb_close(handle);
-            } else {
-                result = 1;
             }
         } else {
-            result = 0;
+            result = mirisdr_rspduo_descriptor_identity_state(
+                descriptor.idVendor, descriptor.idProduct,
+                descriptor.iSerialNumber, 0);
         }
         break;
     }

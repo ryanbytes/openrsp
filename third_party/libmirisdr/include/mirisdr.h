@@ -57,6 +57,9 @@ MIRISDR_API int mirisdr_get_device_info (uint32_t index, uint16_t *vendor_id,
                                          uint16_t *product_id, char *manufact,
                                          char *product, char *serial);
 MIRISDR_API int mirisdr_device_requires_firmware (uint32_t index);
+#define MIRISDR_RSPDUO_IDENTITY_READY 0
+#define MIRISDR_RSPDUO_IDENTITY_COLD 1
+#define MIRISDR_RSPDUO_IDENTITY_UNREADABLE -2
 MIRISDR_API int mirisdr_get_device_usb_strings (uint32_t index, char *manufact, char *product, char *serial);
 
 /* main */

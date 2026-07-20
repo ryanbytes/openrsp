@@ -40,6 +40,7 @@
 /* interní definice */
 #include "constants.h"
 #include "structs.h"
+#include "device_state.h"
 
 #ifndef OPENRSP_DEFAULT_FIRMWARE_PATH
 #if defined(__APPLE__)
@@ -442,6 +443,7 @@ int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
     ssize_t i, i_max;
     size_t count = 0;
     int r;
+    int rspduo_identity_state = MIRISDR_RSPDUO_IDENTITY_READY;
 
     *p = NULL;
 
@@ -493,9 +495,16 @@ int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
 
     dev->usb_vid = dd.idVendor;
     dev->usb_pid = dd.idProduct;
-    dev->firmware_required = dd.idVendor == 0x1df7u &&
-                             dd.idProduct == 0x3020u &&
-                             !mirisdr_rspduo_serial_is_readable(dev->dh, &dd);
+    if (dd.idVendor == 0x1df7u && dd.idProduct == 0x3020u) {
+        unsigned char serial[256];
+        int serial_result = dd.iSerialNumber == 0u ? 0 :
+            libusb_get_string_descriptor_ascii(
+                dev->dh, dd.iSerialNumber, serial, (int)sizeof(serial) - 1);
+        rspduo_identity_state = mirisdr_rspduo_descriptor_identity_state(
+            dd.idVendor, dd.idProduct, dd.iSerialNumber, serial_result);
+    }
+    dev->firmware_required =
+        rspduo_identity_state == MIRISDR_RSPDUO_IDENTITY_COLD;
 
     libusb_free_device_list(list, 1);
     list = NULL;
