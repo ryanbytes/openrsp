@@ -48,7 +48,15 @@ static compat_discovery_handle discovery_handles[SDRPLAY_MAX_DEVICES];
 static unsigned int discovery_handle_count;
 
 #define OPENRSP_EVENT_QUEUE_CAPACITY 32u
+#if defined(_WIN32)
+/* Do not make a brief JVM-side callback pause look like lost RF.  This queue
+ * remains bounded and continues to retain the newest IQ if the consumer is
+ * persistently behind; 128 frames gives the 10 MS/s RSPduo about 0.8 s of
+ * callback headroom. */
+#define OPENRSP_STREAM_QUEUE_CAPACITY 128u
+#else
 #define OPENRSP_STREAM_QUEUE_CAPACITY 8u
+#endif
 
 typedef struct {
     sdrplay_api_EventT event;

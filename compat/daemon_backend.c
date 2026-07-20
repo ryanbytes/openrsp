@@ -12,8 +12,12 @@
 #include <time.h>
 
 #define OPENRSP_DAEMON_RESPONSE_TIMEOUT_SECONDS 5
-#define OPENRSP_DAEMON_IQ_QUEUE_CAPACITY 32u
 #if defined(_WIN32)
+/* Windows feeds the compatibility DLL through a JVM callback.  Keep enough
+ * IQ history to absorb normal scheduler and garbage-collection pauses while
+ * the reader continues to drain the daemon socket.  At the 10 MS/s RSPduo
+ * rate, the old 32-frame queue held only about 200 ms. */
+#define OPENRSP_DAEMON_IQ_QUEUE_CAPACITY 128u
 /* The Windows daemon sends 256 KiB IQ frames.  Waiting for a slow application
  * callback here stops the socket reader, eventually filling the daemon's
  * loopback send buffer and turning ordinary decoder load into a disconnect.
@@ -21,6 +25,7 @@
  * sequence discontinuity rather than losing the entire RSP session. */
 #define OPENRSP_DAEMON_IQ_QUEUE_WAIT_NANOSECONDS 0L
 #else
+#define OPENRSP_DAEMON_IQ_QUEUE_CAPACITY 32u
 #define OPENRSP_DAEMON_IQ_QUEUE_WAIT_NANOSECONDS 20000000L
 #endif
 
