@@ -31,6 +31,34 @@ function Get-Sha256 {
     }
 }
 
+function Invoke-ServiceControl {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    $output = & sc.exe @ArgumentList 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe $($ArgumentList -join ' ') failed: $($output -join ' ')"
+    }
+    return $output
+}
+
+function Wait-ServiceDeletion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $service) {
+            return
+        }
+        $service.Dispose()
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    throw "Service $Name was not deleted within $TimeoutSeconds seconds."
+}
+
 $administrator = New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $administrator.IsInRole(
@@ -63,6 +91,8 @@ $vendorService = Get-Service -Name "SDRplayAPIService" -ErrorAction SilentlyCont
 if ($vendorService -and $vendorService.Status -ne "Stopped") {
     throw "Stop SDRplayAPIService before installing OpenRSP."
 }
+$vendorServiceConfiguration = Get-CimInstance Win32_Service `
+    -Filter "Name = 'SDRplayAPIService'" -ErrorAction SilentlyContinue
 $openrspService = Get-Service -Name "OpenRSP" -ErrorAction SilentlyContinue
 if ($openrspService -and $openrspService.Status -ne "Stopped") {
     throw "Stop the existing OpenRSP service before upgrading it."
@@ -75,12 +105,29 @@ $installedApi = Join-Path $ApiDirectory "sdrplay_api.dll"
 $installedPthread = Join-Path $ApiDirectory "libwinpthread-1.dll"
 $statePath = Join-Path $InstallRoot "install-state.json"
 $preservedVendorBackup = $null
+$preservedVendorServiceStartMode = $null
+$preservedMachinePort = $null
 if (Test-Path -LiteralPath $statePath) {
     $existingState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
     if ($existingState.vendorBackup -and
         (Test-Path -LiteralPath $existingState.vendorBackup -PathType Leaf)) {
         $preservedVendorBackup = $existingState.vendorBackup
     }
+    $preservedVendorServiceStartMode =
+        $existingState.vendorServiceStartModeBeforeInstall
+    $preservedMachinePort = $existingState.machinePortBeforeInstall
+}
+$vendorServiceStartModeBeforeInstall = if ($preservedVendorServiceStartMode) {
+    $preservedVendorServiceStartMode
+} elseif ($vendorServiceConfiguration) {
+    $vendorServiceConfiguration.StartMode
+} else {
+    $null
+}
+$machinePortBeforeInstall = if ($preservedMachinePort) {
+    $preservedMachinePort
+} else {
+    [Environment]::GetEnvironmentVariable("OPENRSPD_PORT", "Machine")
 }
 $timestamp = Get-Date -Format "yyyyMMddTHHmmss"
 $backupDirectory = Join-Path $InstallRoot "vendor-backup-$timestamp"
@@ -100,14 +147,32 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install OpenRSP Windows runtime")) {
     Copy-Item -LiteralPath $apiSource -Destination $installedApi -Force
     Copy-Item -LiteralPath $pthreadSource -Destination $installedPthread -Force
 
+    if ($vendorServiceConfiguration -and
+        $vendorServiceConfiguration.StartMode -eq "Auto") {
+        Set-Service -Name "SDRplayAPIService" -StartupType Manual
+    }
+
     if ($openrspService) {
-        & sc.exe delete OpenRSP | Out-Null
-        Start-Sleep -Milliseconds 500
+        $openrspService.Dispose()
+        Invoke-ServiceControl -ArgumentList @("delete", "OpenRSP") | Out-Null
+        Wait-ServiceDeletion -Name "OpenRSP"
     }
     $daemon = Join-Path $installBin "openrspd.exe"
     New-Service -Name OpenRSP -BinaryPathName "`"$daemon`" --service" `
         -DisplayName "OpenRSP RSPduo Driver" -StartupType Automatic | Out-Null
-    & sc.exe description OpenRSP "Open-source RSPduo hardware daemon for the SDRplay API compatibility library." | Out-Null
+    Invoke-ServiceControl -ArgumentList @(
+        "description",
+        "OpenRSP",
+        "Open-source RSPduo hardware daemon for the SDRplay API compatibility library."
+    ) | Out-Null
+    Invoke-ServiceControl -ArgumentList @(
+        "failure", "OpenRSP",
+        "reset=", "86400",
+        "actions=", "restart/5000/restart/15000/restart/30000"
+    ) | Out-Null
+    Invoke-ServiceControl -ArgumentList @(
+        "failureflag", "OpenRSP", "1"
+    ) | Out-Null
 
     $logDirectory = Join-Path $env:ProgramData "OpenRSP"
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -119,6 +184,17 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install OpenRSP Windows runtime")) {
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\OpenRSP" `
         -Name Environment -PropertyType MultiString -Value $serviceEnvironment `
         -Force | Out-Null
+    [Environment]::SetEnvironmentVariable(
+        "OPENRSPD_PORT", [string]$Port, "Machine")
+    if ([Environment]::GetEnvironmentVariable("OPENRSPD_PORT", "Machine") -ne
+        [string]$Port) {
+        throw "Failed to persist OPENRSPD_PORT for Windows API clients."
+    }
+    $serviceRegistry = Get-ItemProperty -Path `
+        "HKLM:\SYSTEM\CurrentControlSet\Services\OpenRSP"
+    if (-not $serviceRegistry.FailureActions) {
+        throw "OpenRSP service recovery actions were not persisted."
+    }
 
     $state = [ordered]@{
         installedApi = $installedApi
@@ -130,6 +206,9 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install OpenRSP Windows runtime")) {
         } else {
             $null
         }
+        vendorServiceStartModeBeforeInstall =
+            $vendorServiceStartModeBeforeInstall
+        machinePortBeforeInstall = $machinePortBeforeInstall
         installedAt = (Get-Date).ToUniversalTime().ToString("o")
     }
     $state | ConvertTo-Json | Set-Content -LiteralPath `
