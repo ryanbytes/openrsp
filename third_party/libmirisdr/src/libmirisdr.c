@@ -65,6 +65,26 @@ int mirisdr_set_soft(mirisdr_dev_t *p);
 
 static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev);
 
+static int mirisdr_rspduo_prime_clock(mirisdr_dev_t *dev, uint32_t rate)
+{
+    uint32_t reg3 = 0u;
+    uint32_t reg4 = 0u;
+    int result = mirisdr_rspduo_pll_words(rate, &reg3, &reg4);
+    if (result == 0) {
+        /* API 3.15 first clocks the converter through the adjacent format
+         * mode, pulses streaming twice, and then commits complex output. */
+        result |= mirisdr_write_reg(dev, 0x04, reg4);
+        result |= mirisdr_write_reg(dev, 0x03, reg3 + 0x1000u);
+        result |= mirisdr_streaming_stop(dev);
+        result |= mirisdr_streaming_start(dev);
+        result |= mirisdr_streaming_stop(dev);
+        result |= mirisdr_streaming_start(dev);
+        result |= mirisdr_write_reg(dev, 0x04, reg4);
+        result |= mirisdr_write_reg(dev, 0x03, reg3);
+    }
+    return result < 0 ? -1 : 0;
+}
+
 int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
     int r;
 
@@ -116,7 +136,10 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
     dev->freq = DEFAULT_FREQ;
     dev->rate = DEFAULT_RATE;
     dev->gain = DEFAULT_GAIN;
-    dev->bulk_buffer_size = dev->usb_pid == 0x3020u ? 65536u : DEFAULT_BULK_BUFFER;
+    dev->bulk_buffer_size = DEFAULT_BULK_BUFFER;
+    if (dev->usb_pid == 0x3020u) {
+        dev->bulk_buffer_size = 65536u;
+    }
     dev->band = MIRISDR_BAND_VHF; // matches always the default frequency of 90 MHz
 
     dev->gain_reduction_lna = 0;
@@ -139,6 +162,11 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
 
     if (dev->usb_pid == 0x3020u) {
         dev->transfer = MIRISDR_TRANSFER_BULK;
+        if (dev->firmware_required) {
+            dev->firmware_required = 0;
+            if (mirisdr_rspduo_load_firmware_and_reopen(dev) < 0) goto failed;
+            return mirisdr_setup(out_dev, dev);
+        }
         if (mirisdr_rspduo_frontend_init(dev) < 0) {
             if (dev->firmware_attempted ||
                 mirisdr_rspduo_load_firmware_and_reopen(dev) < 0) goto failed;
@@ -146,8 +174,14 @@ int mirisdr_setup (mirisdr_dev_t **out_dev, mirisdr_dev_t *dev) {
         }
         /* API 3.15 completes frontend GPIO setup, selects the bulk
          * alternate, and only then performs its two readiness reads. */
-        if (libusb_set_interface_alt_setting(dev->dh, 0, 3) < 0 ||
-            mirisdr_rspduo_frontend_ready(dev) < 0) goto failed;
+        int alternate = libusb_set_interface_alt_setting(dev->dh, 0, 3);
+        if (alternate < 0) {
+            fprintf(stderr,
+                    "RSPduo bulk alternate failed code=%d name=%s\n",
+                    alternate, libusb_error_name(alternate));
+            goto failed;
+        }
+        if (mirisdr_rspduo_frontend_ready(dev) < 0) goto failed;
     }
 
     if (dev->usb_pid != 0x3020u) {
@@ -212,20 +246,7 @@ int mirisdr_configure_rspduo(mirisdr_dev_t *p, uint32_t rate, uint32_t freq,
     int soft_result = mirisdr_set_soft(p);
     int gain_result = mirisdr_set_rspduo_gain(p, gain_reduction, lna_state);
 
-    uint32_t reg3 = 0u, reg4 = 0u;
-    int hard_result = mirisdr_rspduo_pll_words(rate, &reg3, &reg4);
-    if (hard_result == 0) {
-        /* API 3.15 first clocks the converter through the adjacent format
-         * mode, pulses streaming twice, and then commits complex output. */
-        hard_result |= mirisdr_write_reg(p, 0x04, reg4);
-        hard_result |= mirisdr_write_reg(p, 0x03, reg3 + 0x1000u);
-        hard_result |= mirisdr_streaming_stop(p);
-        hard_result |= mirisdr_streaming_start(p);
-        hard_result |= mirisdr_streaming_stop(p);
-        hard_result |= mirisdr_streaming_start(p);
-        hard_result |= mirisdr_write_reg(p, 0x04, reg4);
-        hard_result |= mirisdr_write_reg(p, 0x03, reg3);
-    }
+    int hard_result = mirisdr_rspduo_prime_clock(p, rate);
     int final_gain_result = mirisdr_set_rspduo_gain(p, gain_reduction,
                                                     lna_state);
     int result = adc_result | format_result | soft_result | gain_result |
@@ -272,7 +293,8 @@ int mirisdr_configure_rspduo_dual(mirisdr_dev_t *p, uint32_t rate,
     p->bandwidth = bandwidth <= 200000u ? MIRISDR_BW_200KHZ :
                    bandwidth <= 300000u ? MIRISDR_BW_300KHZ :
                    bandwidth <= 600000u ? MIRISDR_BW_600KHZ : MIRISDR_BW_1536KHZ;
-    if (mirisdr_adc_init(p) < 0 || mirisdr_set_hard(p) < 0 ||
+    int hard_result = mirisdr_adc_init(p) < 0 ? -1 : mirisdr_set_hard(p);
+    if (hard_result < 0 ||
         mirisdr_rspduo_set_channel(p, 1u, freq_a, gain_a, lna_a) < 0 ||
         mirisdr_rspduo_set_channel(p, 2u, freq_b, gain_b, lna_b) < 0) return -1;
     p->rspduo_tuner = 3u;
@@ -365,9 +387,19 @@ static int mirisdr_rspduo_load_firmware_and_reopen(mirisdr_dev_t *dev)
                                         firmware, 4096, CTRL_TIMEOUT);
     int second = libusb_control_transfer(dev->dh, 0x40, 0x44, 0x1000, 0x0000,
                                          firmware + 4096, 2019, CTRL_TIMEOUT);
-    if (first != 4096 || second != 2019) return -1;
-    if (libusb_control_transfer(dev->dh, 0x40, 0x41, 0x8008, 0x0000,
-                                NULL, 0, CTRL_TIMEOUT) < 0) return -1;
+    if (first != 4096 || second != 2019) {
+        fprintf(stderr,
+                "RSPduo firmware upload failed first=%d second=%d\n",
+                first, second);
+        return -1;
+    }
+    int start = libusb_control_transfer(dev->dh, 0x40, 0x41, 0x8008, 0x0000,
+                                        NULL, 0, CTRL_TIMEOUT);
+    if (start < 0) {
+        fprintf(stderr, "RSPduo firmware start failed code=%d name=%s\n",
+                start, libusb_error_name(start));
+        return -1;
+    }
     int reset = libusb_control_transfer(dev->dh, 0x40, 0x40, 0x0001, 0x0000,
                                         NULL, 0, CTRL_TIMEOUT);
     if (reset < 0 && reset != LIBUSB_ERROR_NO_DEVICE &&
@@ -461,6 +493,9 @@ int mirisdr_open_tuner (mirisdr_dev_t **p, uint32_t index, unsigned int tuner) {
 
     dev->usb_vid = dd.idVendor;
     dev->usb_pid = dd.idProduct;
+    dev->firmware_required = dd.idVendor == 0x1df7u &&
+                             dd.idProduct == 0x3020u &&
+                             !mirisdr_rspduo_serial_is_readable(dev->dh, &dd);
 
     libusb_free_device_list(list, 1);
     list = NULL;
@@ -523,6 +558,7 @@ int mirisdr_open_fd (mirisdr_dev_t **p, int fd) {
 
 int mirisdr_close (mirisdr_dev_t *p) {
     if (!p) goto failed;
+    int close_result = 0;
 
     /* ukončení async čtení okamžitě */
     mirisdr_cancel_async_now(p);
@@ -539,10 +575,11 @@ int mirisdr_close (mirisdr_dev_t *p) {
     {
         /* OpenRSP: leave the device in its idle interface state so another
          * process can claim it without requiring a physical/USB reset. */
-        mirisdr_streaming_stop(p);
+        if (p->streaming_active && mirisdr_streaming_stop(p) < 0)
+            close_result = -1;
         if (p->usb_pid == 0x3020u) {
             usleep(110000);
-            (void)mirisdr_rspduo_shutdown(p);
+            if (mirisdr_rspduo_shutdown(p) < 0) close_result = -1;
         } else {
             mirisdr_adc_stop(p);
         }
@@ -566,7 +603,7 @@ int mirisdr_close (mirisdr_dev_t *p) {
 
     free(p);
 
-    return 0;
+    return close_result;
 
 failed:
     return -1;

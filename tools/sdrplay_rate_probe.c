@@ -21,6 +21,11 @@ typedef struct {
     atomic_ullong q_power;
     atomic_llong iq_cross;
     atomic_uint spectrum_blocks;
+    atomic_uint callback_sequence_seen;
+    atomic_uint callback_expected_sample;
+    atomic_uint callback_discontinuities;
+    atomic_ullong callback_missing_samples;
+    atomic_uint callback_resets;
     double negative_spectrum_power;
     double positive_spectrum_power;
 } rate_metrics;
@@ -61,9 +66,17 @@ static void accumulate_spectrum(rate_metrics *metrics, const short *xi, const sh
 static void stream_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                             unsigned int num_samples, unsigned int reset, void *opaque)
 {
-    (void)params;
-    (void)reset;
     rate_metrics *metrics = opaque;
+    unsigned int seen = atomic_exchange(&metrics->callback_sequence_seen, 1u);
+    unsigned int expected = atomic_load(&metrics->callback_expected_sample);
+    if (seen && params->firstSampleNum != expected) {
+        atomic_fetch_add(&metrics->callback_discontinuities, 1u);
+        atomic_fetch_add(&metrics->callback_missing_samples,
+                         (unsigned int)(params->firstSampleNum - expected));
+    }
+    if (reset) atomic_fetch_add(&metrics->callback_resets, 1u);
+    atomic_store(&metrics->callback_expected_sample,
+                 params->firstSampleNum + num_samples);
     accumulate_spectrum(metrics, xi, xq, num_samples);
     unsigned long long i_power = 0u;
     unsigned long long q_power = 0u;
@@ -122,6 +135,11 @@ static int measure_rate(sdrplay_api_DeviceT *device,
     atomic_store(&metrics->q_power, 0u);
     atomic_store(&metrics->iq_cross, 0);
     atomic_store(&metrics->spectrum_blocks, 0u);
+    atomic_store(&metrics->callback_sequence_seen, 0u);
+    atomic_store(&metrics->callback_expected_sample, 0u);
+    atomic_store(&metrics->callback_discontinuities, 0u);
+    atomic_store(&metrics->callback_missing_samples, 0u);
+    atomic_store(&metrics->callback_resets, 0u);
     metrics->negative_spectrum_power = 0.0;
     metrics->positive_spectrum_power = 0.0;
     const double started = monotonic_seconds();
@@ -143,15 +161,23 @@ static int measure_rate(sdrplay_api_DeviceT *device,
     const double correlation = i_rms > 0.0 && q_rms > 0.0 ? iq / (i_rms * q_rms) : 0.0;
     const unsigned int spectrum_blocks = atomic_load_explicit(
         &metrics->spectrum_blocks, memory_order_acquire);
+    const unsigned int callback_discontinuities =
+        atomic_load(&metrics->callback_discontinuities);
+    const unsigned long long callback_missing_samples =
+        atomic_load(&metrics->callback_missing_samples);
+    const unsigned int callback_resets = atomic_load(&metrics->callback_resets);
     const double spectrum_ratio_db = spectrum_blocks == SPECTRUM_MAX_BLOCKS &&
         metrics->negative_spectrum_power > 0.0 && metrics->positive_spectrum_power > 0.0 ?
         10.0 * log10(metrics->negative_spectrum_power /
                      metrics->positive_spectrum_power) : 0.0;
     printf("rate requested=%.0f measured=%.3f error=%.4f%% samples=%llu "
            "i_rms=%.3f q_rms=%.3f iq_correlation=%.9f "
-           "negative_to_positive_db=%.3f spectrum_blocks=%u\n",
+           "negative_to_positive_db=%.3f spectrum_blocks=%u "
+           "callback_discontinuities=%u callback_missing_samples=%llu "
+           "callback_resets=%u\n",
            requested, measured, error * 100.0, samples, i_rms, q_rms, correlation,
-           spectrum_ratio_db, spectrum_blocks);
+           spectrum_ratio_db, spectrum_blocks, callback_discontinuities,
+           callback_missing_samples, callback_resets);
     if (error > RATE_ERROR_LIMIT) {
         fprintf(stderr, "rate %.0f differs from wall clock by more than 5%%\n",
                 requested);

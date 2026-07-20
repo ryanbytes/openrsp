@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENRSP_PROTOCOL_MAGIC 0x4f525350u
-#define OPENRSP_PROTOCOL_VERSION 7u
+#define OPENRSP_PROTOCOL_VERSION 9u
 #define OPENRSP_SOCKET_PATH "/var/run/openrspd.sock"
 #define OPENRSP_MAX_IQ_SAMPLES 65536u
 
@@ -25,10 +25,19 @@ typedef enum {
     OPENRSP_CMD_SWAP_TUNER = 12,
     OPENRSP_CMD_SWAP_MODE = 13,
     OPENRSP_CMD_RESUME_MODE = 14,
+    OPENRSP_CMD_DUO_ACQUIRE = 15,
+    OPENRSP_CMD_DUO_CONFIGURE = 16,
+    OPENRSP_CMD_DUO_START = 17,
+    OPENRSP_CMD_DUO_STOP = 18,
+    OPENRSP_CMD_DUO_UPDATE = 19,
+    OPENRSP_CMD_DUO_RELEASE = 20,
+    OPENRSP_CMD_DUO_SWAP_RATE = 21,
     OPENRSP_MSG_RESPONSE = 0x8000,
     OPENRSP_EVENT_IQ = 0x8001,
     OPENRSP_EVENT_DEVICE = 0x8002,
-    OPENRSP_EVENT_IQ_B = 0x8003
+    OPENRSP_EVENT_IQ_B = 0x8003,
+    OPENRSP_EVENT_STATUS = 0x8004,
+    OPENRSP_EVENT_DUO = 0x8005
 } openrsp_command_type;
 
 typedef enum {
@@ -36,7 +45,9 @@ typedef enum {
     OPENRSP_STATUS_BAD_REQUEST = 1,
     OPENRSP_STATUS_UNSUPPORTED = 2,
     OPENRSP_STATUS_BUSY = 3,
-    OPENRSP_STATUS_IO_ERROR = 4
+    OPENRSP_STATUS_IO_ERROR = 4,
+    OPENRSP_STATUS_START_PENDING = 5,
+    OPENRSP_STATUS_STOP_PENDING = 6
 } openrsp_status;
 
 typedef struct {
@@ -60,7 +71,52 @@ typedef struct {
     uint16_t product_id;
     char serial[64];
     char model[64];
+    uint32_t rspduo_mode_mask;
+    uint32_t rspduo_sample_rate_hz;
 } openrsp_device_record;
+
+#define OPENRSP_MODE_CAP_SINGLE 1u
+#define OPENRSP_MODE_CAP_DUAL 2u
+#define OPENRSP_MODE_CAP_MASTER 4u
+#define OPENRSP_MODE_CAP_SLAVE 8u
+
+#define OPENRSP_DUO_ROLE_MASTER 1u
+#define OPENRSP_DUO_ROLE_SLAVE 2u
+
+/* Notifications are delivered to the peer descriptor after the command
+ * response that caused them.  Values are stable on the wire so clients can
+ * distinguish the API 3.15 lifecycle transitions without parsing logs. */
+#define OPENRSP_DUO_EVENT_NONE 0u
+#define OPENRSP_DUO_EVENT_MASTER_INITIALISED 1u
+#define OPENRSP_DUO_EVENT_SLAVE_ATTACHED 2u
+#define OPENRSP_DUO_EVENT_SLAVE_DETACHED 3u
+#define OPENRSP_DUO_EVENT_SLAVE_INITIALISED 4u
+#define OPENRSP_DUO_EVENT_SLAVE_UNINITIALISED 5u
+#define OPENRSP_DUO_EVENT_MASTER_DLL_DISAPPEARED 6u
+#define OPENRSP_DUO_EVENT_SLAVE_DLL_DISAPPEARED 7u
+
+typedef struct {
+    openrsp_acquire_request identity;
+    uint32_t role;
+    uint32_t tuner;
+    uint32_t sample_rate_hz;
+} openrsp_duo_acquire_request;
+
+typedef struct {
+    uint32_t kind;
+    uint32_t tuner;
+} openrsp_duo_event;
+
+typedef struct {
+    uint32_t sample_rate_hz;
+} openrsp_duo_rate_request;
+
+#define OPENRSP_DEVICE_STATUS_REMOVED 1u
+
+typedef struct {
+    uint32_t reason;
+    uint32_t tuner;
+} openrsp_device_status;
 
 typedef struct {
     uint32_t sample_rate_hz;

@@ -560,6 +560,53 @@ static int run_mode_transition_once(sdrplay_api_DeviceT *device, int to_dual)
     return finish(device, 1, status);
 }
 
+static int run_master(sdrplay_api_DeviceT *device)
+{
+    double adc_rate = getenv("OPENRSP_PROBE_MASTER_ADC_RATE") != NULL &&
+                      strcmp(getenv("OPENRSP_PROBE_MASTER_ADC_RATE"), "8") == 0 ?
+                      8000000.0 : 6000000.0;
+    device->tuner = sdrplay_api_Tuner_A;
+    device->rspDuoMode = sdrplay_api_RspDuoMode_Master;
+    device->rspDuoSampleFreq = adc_rate;
+    sdrplay_api_ErrT status = sdrplay_api_SelectDevice(device);
+    sdrplay_api_DeviceParamsT *params = NULL;
+    if (status == sdrplay_api_Success)
+        status = sdrplay_api_GetDeviceParams(device->dev, &params);
+    if (status != sdrplay_api_Success || params == NULL ||
+        params->devParams == NULL || params->rxChannelA == NULL)
+        return finish(device, 0, status);
+    params->devParams->fsFreq.fsHz = adc_rate;
+    params->devParams->mode = sdrplay_api_BULK;
+    configure_channel(params->rxChannelA, 853712500.0, 45, 2u);
+    if (adc_rate == 8000000.0)
+        params->rxChannelA->tunerParams.ifType = sdrplay_api_IF_2_048;
+    probe_metrics metrics = {0};
+    sdrplay_api_CallbackFnsT callbacks = {
+        .StreamACbFn = stream_a, .StreamBCbFn = stream_b,
+        .EventCbFn = event_callback
+    };
+    status = sdrplay_api_Init(device->dev, &callbacks, &metrics);
+    if (status != sdrplay_api_Success) return finish(device, 0, status);
+    long seconds = 30;
+    const char *seconds_text = getenv("OPENRSP_PROBE_SECONDS");
+    if (seconds_text != NULL) {
+        long requested = strtol(seconds_text, NULL, 10);
+        if (requested > 0 && requested <= 3600) seconds = requested;
+    }
+    for (long second = 0; second < seconds; ++second) {
+        delay_ms(1000);
+        fprintf(stderr,
+                "MODE_MASTER_PROGRESS second=%ld samples=%llu callbacks=%u "
+                "events=%u last_event=%u\n",
+                second + 1, atomic_load(&metrics.samples[0]),
+                atomic_load(&metrics.callbacks[0]),
+                atomic_load(&metrics.mode_events),
+                atomic_load(&metrics.last_mode_event));
+    }
+    if (atomic_load(&metrics.samples[0]) == 0u) status = sdrplay_api_Fail;
+    return finish(device, 1, status);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2 || (strcmp(argv[1], "enumerate") != 0 &&
@@ -571,9 +618,10 @@ int main(int argc, char **argv)
         strcmp(argv[1], "dual-b") != 0 && strcmp(argv[1], "swap") != 0 &&
         strcmp(argv[1], "dual-rate-swap") != 0 &&
         strcmp(argv[1], "mode-swap") != 0 &&
+        strcmp(argv[1], "master") != 0 &&
         strcmp(argv[1], "mode-to-dual") != 0 &&
         strcmp(argv[1], "mode-to-single") != 0)) {
-        fprintf(stderr, "usage: %s enumerate|dual-defaults|dual-both-updates|dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
+        fprintf(stderr, "usage: %s enumerate|master|dual-defaults|dual-both-updates|dual|dual-controls|dual-init|dual-a|dual-b|swap|dual-rate-swap|mode-swap|mode-to-dual|mode-to-single\n", argv[0]);
         return EXIT_FAILURE;
     }
     sdrplay_api_ErrT status = sdrplay_api_Open();
@@ -603,6 +651,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     if (strcmp(argv[1], "swap") == 0) return run_swap(&devices[0]);
+    if (strcmp(argv[1], "master") == 0) return run_master(&devices[0]);
     if (strcmp(argv[1], "dual-defaults") == 0)
         return run_dual_defaults(&devices[0]);
     if (strcmp(argv[1], "dual-both-updates") == 0)

@@ -37,6 +37,19 @@ static mirisdr_device_t *mirisdr_device_get (uint16_t vid, uint16_t pid) {
     return NULL;
 }
 
+static int mirisdr_rspduo_serial_is_readable(
+    libusb_device_handle *handle,
+    const struct libusb_device_descriptor *descriptor)
+{
+    unsigned char serial[256];
+    if (!handle || !descriptor || descriptor->idVendor != 0x1df7u ||
+        descriptor->idProduct != 0x3020u || descriptor->iSerialNumber == 0u)
+        return 0;
+    return libusb_get_string_descriptor_ascii(
+               handle, descriptor->iSerialNumber, serial,
+               (int)sizeof(serial) - 1) > 0;
+}
+
 /* počet dostupných zařízení */
 uint32_t mirisdr_get_device_count (void) {
     ssize_t i, i_max;
@@ -221,9 +234,19 @@ int mirisdr_device_requires_firmware (uint32_t index) {
             mirisdr_device_get(descriptor.idVendor, descriptor.idProduct) == NULL)
             continue;
         if (matched++ != index) continue;
-        result = descriptor.idVendor == 0x1df7u &&
-                 descriptor.idProduct == 0x3020u &&
-                 descriptor.iSerialNumber == 0u ? 1 : 0;
+        if (descriptor.idVendor == 0x1df7u &&
+            descriptor.idProduct == 0x3020u) {
+            libusb_device_handle *handle = NULL;
+            if (libusb_open(list[i], &handle) == 0) {
+                result = mirisdr_rspduo_serial_is_readable(
+                             handle, &descriptor) ? 0 : 1;
+                libusb_close(handle);
+            } else {
+                result = 1;
+            }
+        } else {
+            result = 0;
+        }
         break;
     }
 

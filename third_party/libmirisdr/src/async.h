@@ -30,7 +30,7 @@
 /* Only endpoint stalls are safe to clear and resubmit.  An overflow means the
  * device sent more data than the host requested; retrying it can escalate a
  * USB babble fault into a reset of the whole upstream hub on macOS. */
-int mirisdr_rspduo_bulk_status_is_retryable(int status);
+int mirisdr_rspduo_bulk_status_requires_restart(int status);
 
 /* Completed transfers may be resubmitted during startup and normal streaming,
  * but never after cancellation or failure has started. */

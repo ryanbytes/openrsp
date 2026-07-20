@@ -101,6 +101,7 @@ struct mirisdr_dev {
     struct libusb_transfer **xfer;
     unsigned char       **xfer_buf;
     unsigned char       **completed_buf;
+    atomic_uchar        *xfer_pending;
     size_t              xfer_out_len;
     size_t              xfer_out_pos;
     unsigned char       *xfer_out;
@@ -116,7 +117,8 @@ struct mirisdr_dev {
     size_t              dual_samples_size;
     int                 sync_loss_cnt;
     int                 firmware_attempted;
-    unsigned int        bulk_recovery_attempts;
+    int                 firmware_required;
+    int                 streaming_active;
     unsigned int        rspduo_tuner;
     uint16_t            rspduo_gpio13;
     unsigned int        rspduo_bias_tee[2];
