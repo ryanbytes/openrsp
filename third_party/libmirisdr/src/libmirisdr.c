@@ -561,7 +561,9 @@ int mirisdr_close (mirisdr_dev_t *p) {
     int close_result = 0;
 
     /* ukončení async čtení okamžitě */
-    mirisdr_cancel_async_now(p);
+    /* Never release libusb-owned transfer storage when asynchronous teardown
+     * did not reach a terminal state. */
+    if (mirisdr_cancel_async_now(p) < 0) return -EBUSY;
 
     // similar to rtl-sdr
 #if defined(_WIN32) && !defined(__MINGW32__)

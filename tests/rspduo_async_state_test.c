@@ -6,6 +6,7 @@
 #include "structs.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -41,6 +42,13 @@ int main(void)
     mirisdr_dev_t device;
     memset(&device, 0, sizeof(device));
     atomic_init(&device.async_status, MIRISDR_ASYNC_INACTIVE);
+#if defined(_WIN32)
+    assert(mirisdr_rspduo_stop_before_cancel(0x3020u, 1));
+#else
+    assert(!mirisdr_rspduo_stop_before_cancel(0x3020u, 1));
+#endif
+    assert(!mirisdr_rspduo_stop_before_cancel(0x3020u, 0));
+    assert(!mirisdr_rspduo_stop_before_cancel(0x3011u, 1));
     assert(mirisdr_cancel_async(&device) == -2);
 
     atomic_store(&device.async_status, MIRISDR_ASYNC_RUNNING);
@@ -55,6 +63,9 @@ int main(void)
     assert(pthread_join(completion, &thread_result) == 0);
     assert(thread_result == NULL);
     assert(atomic_load(&device.async_status) == MIRISDR_ASYNC_INACTIVE);
+
+    atomic_store(&device.async_status, MIRISDR_ASYNC_FAILED);
+    assert(mirisdr_close(&device) == -EBUSY);
     puts("RSPDUO_ASYNC_STATE_OK");
     return 0;
 }

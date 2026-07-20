@@ -386,13 +386,12 @@ static int stop_stream(daemon_state *state)
     if (!state->stream_thread_started) return 0;
     int result = 0;
 #if defined(_WIN32)
-    /* Let the async event thread cancel and drain every WinUSB transfer before
-     * issuing the device-side stop request from this thread.  Handling libusb
-     * events from both threads during cancellation corrupts the Windows heap. */
+    /* The async event thread stops the RSPduo bulk engine, then cancels and
+     * drains WinUSB transfers. Keeping that complete sequence on one thread
+     * avoids concurrent libusb event handling and leaves the endpoint idle. */
     if (state->radio) (void)mirisdr_cancel_async(state->radio);
     if (pthread_join(state->stream_thread, NULL) != 0) result = -1;
     if (atomic_load(&state->stream_result) != 0) result = -1;
-    if (state->radio && mirisdr_streaming_stop(state->radio) < 0) result = -1;
 #else
     /* Stop the RSPduo endpoint while libusb still owns its submitted
      * transfers, then cancel and drain every completion before freeing them.
@@ -408,6 +407,23 @@ static int stop_stream(daemon_state *state)
     return result;
 }
 
+static int close_radio(daemon_state *state, const char *reason)
+{
+    if (!state || !state->radio) return 0;
+    int result = mirisdr_close(state->radio);
+    state->radio = NULL;
+    if (result != 0) {
+        fprintf(stderr, "OPENRSPD_CLOSE_FAILED result=%d reason=%s\n",
+                result, reason ? reason : "unknown");
+        (void)fflush(stderr);
+    }
+    /* -EBUSY means libusb still owns asynchronous transfer storage.  Do not
+     * continue in a process that has deliberately quarantined that handle;
+     * process teardown lets the OS reclaim it without a use-after-free. */
+    if (result == -EBUSY) running = 0;
+    return result;
+}
+
 static void release_client(daemon_state *state, openrsp_socket_t descriptor)
 {
     if (state->duo_active &&
@@ -418,8 +434,7 @@ static void release_client(daemon_state *state, openrsp_socket_t descriptor)
         (void)send_duo_event(state, &event);
         if (!state->duo.master_selected && !state->duo.slave_selected) {
             if (state->radio) (void)stop_stream(state);
-            if (state->radio) (void)mirisdr_close(state->radio);
-            state->radio = NULL;
+            (void)close_radio(state, "duo-disconnect");
             state->configured = false;
             state->dual_mode = false;
             state->duo_active = false;
@@ -432,15 +447,13 @@ static void release_client(daemon_state *state, openrsp_socket_t descriptor)
     if (state->owner != descriptor) return;
     if (state->radio) (void)stop_stream(state);
     if (state->dual_mode && state->radio) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        (void)close_radio(state, "dual-release");
         state->configured = false;
     }
     if (state->stream_error && state->radio) {
         fprintf(stderr, "OPENRSPD_CLOSE_FAILED_STREAM result=%d\n", state->stream_result);
         (void)fflush(stderr);
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        (void)close_radio(state, "failed-stream-release");
         state->configured = false;
     }
     state->owner = -1;
@@ -466,8 +479,7 @@ static void shutdown_radio(daemon_state *state)
 {
     if (!state->radio) return;
     (void)stop_stream(state);
-    (void)mirisdr_close(state->radio);
-    state->radio = NULL;
+    (void)close_radio(state, "daemon-shutdown");
     state->owner = -1;
     state->configured = false;
     state->stream_error = false;
@@ -558,8 +570,8 @@ static uint32_t configure_radio(daemon_state *state,
 {
     if (!openrspd_config_valid(config)) return OPENRSP_STATUS_BAD_REQUEST;
     if (state->dual_mode && state->radio) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        if (close_radio(state, "single-config-transition") == -EBUSY)
+            return OPENRSP_STATUS_IO_ERROR;
         state->configured = false;
     }
     if (max_attempts == 0u) max_attempts = 1u;
@@ -593,8 +605,8 @@ static uint32_t configure_radio(daemon_state *state,
         }
 
         if (state->radio) {
-            (void)mirisdr_close(state->radio);
-            state->radio = NULL;
+            if (close_radio(state, "single-config-failure") == -EBUSY)
+                return OPENRSP_STATUS_IO_ERROR;
         }
         if (attempt < max_attempts) {
             fprintf(stderr, "OPENRSPD_CONFIGURE_RETRY status=waiting attempt=%u/%u\n",
@@ -628,8 +640,8 @@ static uint32_t configure_dual_radio(daemon_state *state,
 {
     if (!valid_dual_config(config)) return OPENRSP_STATUS_BAD_REQUEST;
     if (!state->dual_mode && state->radio) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        if (close_radio(state, "dual-config-transition") == -EBUSY)
+            return OPENRSP_STATUS_IO_ERROR;
         state->configured = false;
     }
     if (!state->radio) {
@@ -654,8 +666,7 @@ static uint32_t configure_dual_radio(daemon_state *state,
         result |= set_rspduo_controls(state->radio, &config->channel_b,
                                       OPENRSP_CHANGE_RSPDUO_CONTROLS);
     if (result < 0) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        (void)close_radio(state, "dual-config-failure");
         return OPENRSP_STATUS_IO_ERROR;
     }
     state->dual_mode = true;
@@ -710,8 +721,7 @@ static void recover_failed_stream(daemon_state *state)
         state->stream_thread_started = false;
     }
     if (state->radio) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        if (close_radio(state, "stream-recovery") == -EBUSY) return;
     }
     state->configured = false;
     state->recovery_config_pending = false;
@@ -790,8 +800,7 @@ static void recover_failed_stream(daemon_state *state)
                                              &state->config;
     uint32_t status = configure_radio(state, bootstrap, 3u);
     if (status != OPENRSP_STATUS_OK) {
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        (void)close_radio(state, "recovery-config-failure");
         return;
     }
     state->configured = true;
@@ -804,8 +813,7 @@ static void recover_failed_stream(daemon_state *state)
     if (pthread_create(&state->stream_thread, NULL, stream_main, state) != 0) {
         atomic_store(&state->streaming, false);
         atomic_store(&state->stream_error, true);
-        (void)mirisdr_close(state->radio);
-        state->radio = NULL;
+        (void)close_radio(state, "recovery-thread-failure");
         return;
     }
     state->stream_thread_started = true;
@@ -1099,8 +1107,7 @@ static uint32_t duo_reset_hardware(daemon_state *state)
     if (state == NULL) return OPENRSP_STATUS_BAD_REQUEST;
     int result = 0;
     if (state->radio && stop_stream(state) != 0) result = -1;
-    if (state->radio && mirisdr_close(state->radio) != 0) result = -1;
-    state->radio = NULL;
+    if (close_radio(state, "duo-reset") != 0) result = -1;
     state->configured = false;
     state->dual_mode = false;
     return result == 0 ? OPENRSP_STATUS_OK : OPENRSP_STATUS_IO_ERROR;
@@ -1448,14 +1455,17 @@ static int serve_request(openrsp_socket_t descriptor, daemon_state *state)
                 if (state->radio &&
                     (!selected || !openrsp_identity_matches(&state->acquired_identity,
                                                              selected))) {
-                    (void)mirisdr_close(state->radio);
-                    state->radio = NULL;
+                    (void)close_radio(state, "identity-change");
                     state->configured = false;
                 }
-                state->owner = descriptor;
-                state->acquired_identity = *acquire;
-                state->acquired_identity.device_index = resolved_index;
-                response.status = OPENRSP_STATUS_OK;
+                if (running) {
+                    state->owner = descriptor;
+                    state->acquired_identity = *acquire;
+                    state->acquired_identity.device_index = resolved_index;
+                    response.status = OPENRSP_STATUS_OK;
+                } else {
+                    response.status = OPENRSP_STATUS_IO_ERROR;
+                }
             }
         }
     } else if (request.type == OPENRSP_CMD_START && request.payload_bytes == 0u &&
@@ -1518,8 +1528,8 @@ static int serve_request(openrsp_socket_t descriptor, daemon_state *state)
             if (was_streaming && stop_stream(state) != 0)
                 response.status = OPENRSP_STATUS_IO_ERROR;
             if (response.status == OPENRSP_STATUS_OK && state->radio) {
-                (void)mirisdr_close(state->radio);
-                state->radio = NULL;
+                if (close_radio(state, "tuner-swap") != 0)
+                    response.status = OPENRSP_STATUS_IO_ERROR;
             }
             if (response.status == OPENRSP_STATUS_OK)
                 response.status = configure_radio(state, &swap->config, 3u);
@@ -1553,8 +1563,8 @@ static int serve_request(openrsp_socket_t descriptor, daemon_state *state)
             if (was_streaming && stop_stream(state) != 0)
                 response.status = OPENRSP_STATUS_IO_ERROR;
             if (response.status == OPENRSP_STATUS_OK && state->radio) {
-                (void)mirisdr_close(state->radio);
-                state->radio = NULL;
+                if (close_radio(state, "mode-swap") != 0)
+                    response.status = OPENRSP_STATUS_IO_ERROR;
             }
             if (response.status == OPENRSP_STATUS_OK) {
                 response.status = swap->mode == OPENRSP_MODE_DUAL ?

@@ -19,6 +19,8 @@
 
 #include <time.h>
 
+#define MIRISDR_ASYNC_CANCEL_WAIT_ATTEMPTS 600u
+
 /* uložení dat */
 static int mirisdr_feed_async (mirisdr_dev_t *p, unsigned char *samples, uint32_t bytes) {
     uint32_t i;
@@ -100,6 +102,17 @@ int mirisdr_rspduo_bulk_status_requires_restart(int status)
 int mirisdr_async_status_allows_resubmit(int status)
 {
     return status != MIRISDR_ASYNC_CANCELING && status != MIRISDR_ASYNC_FAILED;
+}
+
+int mirisdr_rspduo_stop_before_cancel(uint16_t usb_pid, int streaming_active)
+{
+#if defined(_WIN32)
+    return usb_pid == 0x3020u && streaming_active;
+#else
+    (void)usb_pid;
+    (void)streaming_active;
+    return 0;
+#endif
 }
 
 uint64_t mirisdr_wall_clock_milliseconds(void)
@@ -371,6 +384,8 @@ canceled:
 
 /* ukončení async části včetně čekání */
 int mirisdr_cancel_async_now (mirisdr_dev_t *p) {
+    unsigned int attempts = 0u;
+
     if (!p) goto failed;
 
     switch (p->async_status) {
@@ -388,12 +403,14 @@ int mirisdr_cancel_async_now (mirisdr_dev_t *p) {
 
     /* cyklujeme dokud není vše ukončeno */
     while ((p->async_status != MIRISDR_ASYNC_INACTIVE) &&
-           (p->async_status != MIRISDR_ASYNC_FAILED))
+           (p->async_status != MIRISDR_ASYNC_FAILED)) {
+        if (attempts++ >= MIRISDR_ASYNC_CANCEL_WAIT_ATTEMPTS) goto failed;
 #if defined (_WIN32) && !defined(__MINGW32__)
-    Sleep(20);
+        Sleep(20);
 #else
-    usleep(20000);
+        usleep(20000);
 #endif
+    }
 
 done:
     return 0;
@@ -701,6 +718,19 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
             p->async_status = MIRISDR_ASYNC_CANCELING;
         }
         if (p->async_status == MIRISDR_ASYNC_CANCELING) {
+#if defined(_WIN32)
+            /* Keep WinUSB control and event handling on this one thread, but
+             * stop the device-side bulk engine before cancelling its queued
+             * reads.  Draining first leaves the next process's START request
+             * stalled even after a nominally clean dual-mode shutdown. */
+            if (mirisdr_rspduo_stop_before_cancel(
+                    p->usb_pid, p->streaming_active)) {
+                if (mirisdr_streaming_stop(p) < 0)
+                    transfer_failed = 1;
+                else
+                    usleep(110000);
+            }
+#endif
             if (p->xfer && mirisdr_async_cancel_pending(p) < 0) {
                 p->async_status = MIRISDR_ASYNC_FAILED;
                 return -1; /* Libusb may still own a transfer: never free it. */
@@ -727,9 +757,20 @@ int mirisdr_read_async (mirisdr_dev_t *p, mirisdr_read_async_cb_t cb, void *ctx,
     return transfer_failed ? -1 : 0;
 
 failed_free:
+    if (mirisdr_rspduo_stop_before_cancel(
+            p->usb_pid, p->streaming_active)) {
+        if (mirisdr_streaming_stop(p) < 0)
+            transfer_failed = 1;
+        else
+            usleep(110000);
+    }
     if (mirisdr_async_cancel_pending(p) == 0) {
-        if (stream_started) (void)mirisdr_streaming_stop(p);
+        if (stream_started && p->streaming_active)
+            (void)mirisdr_streaming_stop(p);
         mirisdr_async_free(p);
+        p->async_status = MIRISDR_ASYNC_INACTIVE;
+    } else {
+        p->async_status = MIRISDR_ASYNC_FAILED;
     }
 
 failed:
